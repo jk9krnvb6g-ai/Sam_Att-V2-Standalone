@@ -1,0 +1,280 @@
+openapi: 3.0.3
+info:
+  title: Sam_Att V2 Standalone API
+  version: 2.0.0
+  description: >-
+    Standalone REST API for Samchuk Hospital Attendance Management System.
+    Served directly on HTTPS Port 4101 under /api/Sam_Att without Central API Gateway.
+servers:
+  - url: https://localhost:4101/api/Sam_Att
+    description: Standalone Single-Port HTTPS Listener
+paths:
+  /health:
+    get:
+      summary: System & Database Health Check (Fail-Closed)
+      responses:
+        '200':
+          description: Healthy
+        '503':
+          description: Database Unavailable (Fail-Closed)
+  /auth/login:
+    post:
+      summary: Authenticate user with brute-force lockout protection
+      responses:
+        '200':
+          description: JWT Session Token + User Profile
+        '401':
+          description: Invalid credentials
+        '429':
+          description: Account temporarily locked
+  /auth/me:
+    get:
+      summary: Get current authenticated session and mapped PERSON_ID
+      responses:
+        '200':
+          description: Authenticated session details
+  /auth/logout:
+    post:
+      summary: Revoke current JWT session token in revoked_sessions
+      responses:
+        '200':
+          description: Session revoked
+  /me/attendance:
+    get:
+      summary: Own-only attendance records (Server-enforced PERSON_ID)
+      responses:
+        '200':
+          description: Own attendance summary and records
+        '403':
+          description: IDOR attempt blocked or unmapped account
+  /me/shifts:
+    get:
+      summary: Own-only shift assignments
+      responses:
+        '200':
+          description: Own shift schedule
+  /me/raw-scans:
+    get:
+      summary: Own-only raw biometric scan events
+      responses:
+        '200':
+          description: Own raw scans
+  /dashboard/summary:
+    get:
+      summary: Organization KPI summary (distinct late_people vs late_occurrences)
+      responses:
+        '200':
+          description: Aggregated KPI and scanner sync telemetry
+  /personnel:
+    get:
+      summary: List synced HOSOffice personnel and mapping states
+      responses:
+        '200':
+          description: Personnel list and sync history
+  /personnel/mapping-issues:
+    get:
+      summary: List FINGLE_ID mapping conflicts and effective-dated history
+      responses:
+        '200':
+          description: Mapping issues and history
+  /personnel/sync:
+    post:
+      summary: Trigger read-only personnel sync from HOSOffice hr_person
+      responses:
+        '200':
+          description: Sync completed
+        '503':
+          description: Fail-closed when HOSOffice DB is unreachable or unconfigured
+  /shifts:
+    get:
+      summary: List shift definitions and personnel type rules
+      responses:
+        '200':
+          description: Shifts and rules
+    post:
+      summary: Create new shift definition (supports cross-midnight)
+      responses:
+        '201':
+          description: Shift created
+  /shift-assignments:
+    get:
+      summary: List individual shift assignments and cancellation logs
+      responses:
+        '200':
+          description: Shift assignments
+    post:
+      summary: Assign shift to personnel with rule snapshot
+      responses:
+        '201':
+          description: Assignment created
+  /shift-assignments/{id}:
+    delete:
+      summary: Soft-cancel shift assignment with mandatory audit log
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Assignment soft-cancelled
+  /scanners:
+    get:
+      summary: List scanner devices, schedules, and sync runs
+      responses:
+        '200':
+          description: Scanner registry and status
+    post:
+      summary: Register scanner device (ADMIN only)
+      responses:
+        '201':
+          description: Scanner created
+  /scanners/sync:
+    post:
+      summary: Trigger ScannerReader.exe hardware sync (Fail-Closed if EXE unavailable)
+      responses:
+        '200':
+          description: Sync succeeded
+        '503':
+          description: Blocked by external contract / EXE unavailable
+  /scanners/ingest:
+    post:
+      summary: Ingest 6-field JSON events from ScannerReader.exe with SHA-256 deduplication
+      responses:
+        '201':
+          description: Events deduplicated, stored immutably, and processed
+  /raw-scans:
+    get:
+      summary: Query immutable raw scan events
+      responses:
+        '200':
+          description: Raw scans list
+  /attendance:
+    get:
+      summary: Query calculated organization attendance
+      responses:
+        '200':
+          description: Attendance records
+  /attendance-review:
+    get:
+      summary: Query abnormal attendance review queue, notes, and HR review history
+      responses:
+        '200':
+          description: Review queue
+  /attendance/{id}/notes:
+    post:
+      summary: Add reason note to attendance_notes without altering raw_scans
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '201':
+          description: Note added
+  /attendance/{id}/review:
+    post:
+      summary: Record HR verification in hr_review_history
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Review recorded
+  /attendance/reprocess/preview:
+    post:
+      summary: Preview deterministic reprocess impact without mutating database
+      responses:
+        '200':
+          description: Diff preview
+  /attendance/reprocess:
+    post:
+      summary: Execute deterministic attendance reprocess preserving notes and raw scans
+      responses:
+        '200':
+          description: Reprocess completed
+  /reports/lateness:
+    get:
+      summary: Lateness report and ranking
+      responses:
+        '200':
+          description: Lateness report
+  /reports/lateness/export.csv:
+    get:
+      summary: Export lateness report as Formula-Injection-Safe CSV
+      responses:
+        '200':
+          description: CSV file stream
+  /hosoffice/push/preview:
+    post:
+      summary: Dry-run validation and payload preview for HOSOffice export
+      responses:
+        '200':
+          description: Preview batch generated with zero external writes
+  /hosoffice/push:
+    post:
+      summary: Live HOSOffice Push (Guarded by HOSOFFICE_LIVE_PUSH_ENABLED flag)
+      responses:
+        '403':
+          description: Blocked when HOSOFFICE_LIVE_PUSH_ENABLED=false
+  /hosoffice/push-history:
+    get:
+      summary: Query HOSOffice preview and push history
+      responses:
+        '200':
+          description: Push history list
+  /system-logs:
+    get:
+      summary: Query system audit logs (ADMIN only, scrubbed of secrets)
+      responses:
+        '200':
+          description: Audit logs
+  /settings/connections:
+    get:
+      summary: View non-secret connection configuration (ADMIN only)
+      responses:
+        '200':
+          description: Connection settings
+  /settings/connections/health:
+    get:
+      summary: View live health of Sam_Att DB, HOSOffice DB, and Scanner EXE
+      responses:
+        '200':
+          description: Health status
+  /settings/connections/test:
+    post:
+      summary: Test connectivity to Sam_Att DB, HOSOffice DB, or Scanner EXE
+      responses:
+        '200':
+          description: Connection test passed
+        '503':
+          description: Connection failed or blocked by external contract
+  /deployment/status:
+    get:
+      summary: Get standalone service deployment status and history (ADMIN only)
+      responses:
+        '200':
+          description: Deployment status
+  /deployment/preflight:
+    post:
+      summary: Execute preflight checks for standalone service update
+      responses:
+        '200':
+          description: Preflight results
+  /deployment/approve:
+    post:
+      summary: Approve release manifest with ADMIN password re-authentication and SHA-256 pin
+      responses:
+        '200':
+          description: Release approved
+  /deployment/rollback:
+    post:
+      summary: Record rollback target for standalone service restore
+      responses:
+        '200':
+          description: Rollback recorded

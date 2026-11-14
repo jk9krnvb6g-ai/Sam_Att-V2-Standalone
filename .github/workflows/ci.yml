@@ -1,0 +1,32 @@
+name: Sam_Att V2 Standalone CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (Target 26.13.1 from .nvmrc)
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Install Locked Dependencies
+        run: npm ci
+
+      - name: TypeScript Strict Verification
+        run: npm run typecheck
+
+      - name: Build Production Frontend Bundle
+        run: npm run build
+
+      - name: Run Database Migrations & Full Integration Test Matrix
+        run: npm test
