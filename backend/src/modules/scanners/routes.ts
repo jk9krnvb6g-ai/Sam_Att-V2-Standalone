@@ -1,21 +1,48 @@
+/**
+ * ============================================================================
+ * โมดูลจัดการเครื่องสแกนนิ้ว การรับข้อมูลสแกนดิบ 6 ฟิลด์ และตารางเวลาซิงก์ (Scanner & Raw Scans Routes)
+ * ไฟล์: backend/src/modules/scanners/routes.ts
+ * ============================================================================
+ * หน้าที่หลัก:
+ * 1. ตรวจสอบสัญญาข้อมูลสแกน 6 ฟิลด์จาก `ScannerReader.exe` อย่างเคร่งครัด (`validateSixFieldEvent`)
+ * 2. บันทึกข้อมูลสแกนดิบลงตาราง `raw_scans` แบบ Append-Only เท่านั้น (ห้าม UPDATE/DELETE เด็ดขาด — แก้ไข P1 ข้อ 08)
+ *    และบันทึกผลการจับคู่ `FINGLE_ID` ลงตาราง `raw_scan_mappings`
+ * 3. มีกลไก Mutex Lock (`scannerSyncMutexLocked`) ป้องกันการกดซิงก์ซ้อนกับรอบซิงก์อัตโนมัติ (แก้ไข P1 ข้อ 09)
+ * 4. รองรับการตรวจสอบโทเค็นของเครื่องสแกน (`X-Scanner-Token`) ด้วย `verifyScannerIngestToken` แบบ Timing-Safe (แก้ไข P0 ข้อ 04)
+ * 5. ทดสอบและจัดการกรณีเครื่องสแกนไม่ตอบสนอง, Timeout, JSON ผิดรูปแบบ และการซิงก์ซ้ำ (แก้ไข P1 ข้อ 18)
+ */
 import fs from 'fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { Router } from 'express';
+import { Router, type Request, type Response, type NextFunction } from 'express';
 import { loadConfig } from '../../config/env.ts';
 import { dbQuery, dbExecute } from '../../database/adapter.ts';
-import { computeRawScanDedupKey, type SixFieldScannerEvent } from '../../utils/crypto.ts';
+import {
+  computeRawScanDedupKey,
+  verifyScannerIngestToken,
+  type SixFieldScannerEvent,
+} from '../../utils/crypto.ts';
 import { requireAuth, requireRoles, enforceOwnPersonMapping } from '../../middleware/auth.ts';
 import { resolveRawScanPersonnelMappings, reprocessAttendanceRange } from '../attendance/processor.ts';
 import { writeAuditLog } from '../audit/service.ts';
+import { evaluateDueSyncSchedules, getScannerSchedulerStatus } from './scheduler.ts';
 
 const execFileAsync = promisify(execFile);
 
 // Test Double hook strictly for automated integration tests (never active in production)
 let testDoubleScannerOutput: string | Error | null = null;
+let scannerSyncMutexLocked = false;
 
 export function setScannerExeTestDouble(output: string | Error | null): void {
   testDoubleScannerOutput = output;
+}
+
+export function isScannerSyncLocked(): boolean {
+  return scannerSyncMutexLocked;
+}
+
+export function setScannerSyncLockForTests(locked: boolean): void {
+  scannerSyncMutexLocked = locked;
 }
 
 /**
@@ -57,6 +84,10 @@ export function validateSixFieldEvent(raw: unknown): SixFieldScannerEvent {
   };
 }
 
+/**
+ * บันทึกชุดข้อมูลสแกน 6 ฟิลด์ลงตาราง `raw_scans` แบบ Append-Only
+ * พร้อมสร้างแถวเริ่มต้นใน `raw_scan_mappings`, จับคู่บุคลากร และสั่ง Reprocess อัตโนมัติ
+ */
 export async function ingestSixFieldEventsBatch(
   rawEvents: unknown[],
   triggerMode: string,
@@ -106,11 +137,11 @@ export async function ingestSixFieldEventsBatch(
     }
 
     const payloadJson = JSON.stringify(event);
-    await dbExecute(
+    const insertRes = await dbExecute(
       `INSERT INTO raw_scans (
         event_dedup_key, machine_no, enroll_number, scan_date_time, canonical_bkk_time,
         verify_mode, in_out_mode, work_code, raw_payload_json, matched_person_id, mapping_state, sync_run_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'UNMATCHED', ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'IMMUTABLE_RAW', ?)`,
       [
         dedupKey,
         event.machineNo,
@@ -124,6 +155,16 @@ export async function ingestSixFieldEventsBatch(
         syncRunId,
       ]
     );
+
+    if (insertRes.insertId) {
+      await dbExecute(
+        `INSERT IGNORE INTO raw_scan_mappings (
+          raw_scan_id, event_dedup_key, enroll_number, matched_person_id, mapping_state, mapping_rule_note
+        ) VALUES (?, ?, ?, NULL, 'UNMATCHED', 'PENDING_INITIAL_RESOLUTION')`,
+        [insertRes.insertId, dedupKey, event.enrollNumber]
+      );
+    }
+
     newInserted++;
     affectedDateSet.add(canonicalBkkTime.slice(0, 10));
   }
@@ -172,6 +213,153 @@ export async function ingestSixFieldEventsBatch(
   };
 }
 
+/**
+ * ฟังก์ชันกลางสำหรับสั่งรัน `ScannerReader.exe` (ใช้ร่วมกันทั้งการกด Manual Sync และ Automatic Scheduler)
+ * มีการล็อกป้องกันการทำงานซ้อนกัน (Concurrency Mutex) และรองรับการตรวจจับ Timeout / เครื่องสแกนไม่ตอบสนอง
+ */
+export async function executeScannerReaderSync(options: {
+  triggerMode: string;
+  actorUsername: string;
+  actorRole: string;
+  machineNo?: number | null;
+  requestId?: string;
+  ipAddress?: string;
+}) {
+  if (scannerSyncMutexLocked) {
+    const conflictErr = new Error(
+      'SYNC_ALREADY_RUNNING: ระบบกำลังดึงข้อมูลจากเครื่องสแกนอยู่ในขณะนี้ กรุณารอให้รอบปัจจุบันเสร็จสิ้นก่อน'
+    );
+    (conflictErr as Error & { code?: string; statusCode?: number }).code = 'SYNC_ALREADY_RUNNING';
+    (conflictErr as Error & { code?: string; statusCode?: number }).statusCode = 409;
+    throw conflictErr;
+  }
+
+  scannerSyncMutexLocked = true;
+  const cfg = loadConfig();
+  const machineNo = options.machineNo ?? null;
+
+  try {
+    let stdoutText: string;
+
+    if (testDoubleScannerOutput !== null) {
+      if (testDoubleScannerOutput instanceof Error) {
+        throw testDoubleScannerOutput;
+      }
+      stdoutText = testDoubleScannerOutput;
+    } else {
+      if (!cfg.scanner.syncEnabled) {
+        const err = new Error(
+          'BLOCKED_BY_EXTERNAL_CONTRACT: ปิดการเรียก ScannerReader.exe อัตโนมัติไว้ (SCANNER_SYNC_ENABLED=false) กรุณาตั้งค่า Path ของไฟล์ EXE เดิมบนเครื่อง Windows Server ก่อนเปิดใช้งานจริง'
+        );
+        (err as Error & { code?: string }).code = 'BLOCKED_BY_EXTERNAL_CONTRACT';
+        throw err;
+      }
+      if (!fs.existsSync(cfg.scanner.readerExePath)) {
+        const err = new Error(
+          `SCANNER_EXE_NOT_FOUND: ไม่พบไฟล์ ScannerReader.exe ที่ ${cfg.scanner.readerExePath}`
+        );
+        (err as Error & { code?: string }).code = 'SCANNER_EXE_NOT_FOUND';
+        throw err;
+      }
+
+      const args = machineNo ? ['--machine', String(machineNo)] : [];
+      try {
+        const { stdout } = await execFileAsync(cfg.scanner.readerExePath, args, {
+          timeout: cfg.scanner.timeoutMs,
+        });
+        stdoutText = stdout;
+      } catch (execErr: any) {
+        if (execErr?.killed || execErr?.signal === 'SIGTERM' || String(execErr?.code) === 'ETIMEDOUT') {
+          const timeoutErr = new Error(
+            `SCANNER_TIMEOUT: เครื่องสแกนนิ้วหรือ ScannerReader.exe ไม่ตอบสนองภายในเวลาที่กำหนด (${cfg.scanner.timeoutMs} ms)`
+          );
+          (timeoutErr as Error & { code?: string }).code = 'SCANNER_TIMEOUT';
+          throw timeoutErr;
+        }
+        const unreachableErr = new Error(
+          `SCANNER_DEVICE_UNREACHABLE: ไม่สามารถดึงข้อมูลจากเครื่องสแกนได้ (${execErr?.message || 'Unknown EXE error'})`
+        );
+        (unreachableErr as Error & { code?: string }).code = 'SCANNER_DEVICE_UNREACHABLE';
+        throw unreachableErr;
+      }
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stdoutText);
+    } catch {
+      const err = new Error('INVALID_EXE_JSON_OUTPUT: ผลลัพธ์จาก ScannerReader.exe ไม่ใช่ JSON ที่ถูกต้อง');
+      (err as Error & { code?: string }).code = 'INVALID_EXE_JSON_OUTPUT';
+      throw err;
+    }
+
+    if (!Array.isArray(parsed)) {
+      const err = new Error('INVALID_EXE_CONTRACT: JSON จาก ScannerReader.exe ต้องเป็น Array ของ Event 6 ฟิลด์');
+      (err as Error & { code?: string }).code = 'INVALID_EXE_CONTRACT';
+      throw err;
+    }
+
+    const result = await ingestSixFieldEventsBatch(
+      parsed,
+      options.triggerMode,
+      options.actorUsername,
+      machineNo
+    );
+
+    await writeAuditLog({
+      requestId: options.requestId || 'scanner-sync',
+      actorUsername: options.actorUsername,
+      actorRole: options.actorRole,
+      ipAddress: options.ipAddress || '127.0.0.1',
+      action: 'SCANNER_SYNC_SUCCESS',
+      targetType: 'SCANNER',
+      targetId: machineNo ? String(machineNo) : 'ALL',
+      result: 'SUCCESS',
+      detail: result,
+    });
+
+    return result;
+  } catch (err: unknown) {
+    const code = (err as { code?: string })?.code || 'SCANNER_SYNC_FAILED';
+    const message = err instanceof Error ? err.message : String(err);
+
+    await dbExecute(
+      `INSERT INTO sync_runs (
+        trigger_mode, machine_no, finished_at, status,
+        total_events_read, new_scans_inserted, duplicate_scans_skipped, unmatched_scans_count,
+        error_code, error_message, triggered_by
+      ) VALUES (?, ?, CURRENT_TIMESTAMP, 'FAILED', 0, 0, 0, 0, ?, ?, ?)`,
+      [options.triggerMode, machineNo, code, message, options.actorUsername]
+    );
+
+    if (machineNo) {
+      await dbExecute(
+        `UPDATE scanner_devices
+         SET last_sync_at = CURRENT_TIMESTAMP, last_sync_status = 'FAILED', last_error_message = ?
+         WHERE machine_no = ?`,
+        [message, machineNo]
+      );
+    }
+
+    await writeAuditLog({
+      requestId: options.requestId || 'scanner-sync',
+      actorUsername: options.actorUsername,
+      actorRole: options.actorRole,
+      ipAddress: options.ipAddress || '127.0.0.1',
+      action: 'SCANNER_SYNC_FAILED',
+      targetType: 'SCANNER',
+      targetId: machineNo ? String(machineNo) : 'ALL',
+      result: 'FAILURE',
+      errorCode: code,
+      detail: { message },
+    });
+
+    throw err;
+  } finally {
+    scannerSyncMutexLocked = false;
+  }
+}
+
 export const scannersRouter = Router();
 
 scannersRouter.get(
@@ -189,6 +377,7 @@ scannersRouter.get(
         devices,
         schedules,
         syncRuns,
+        schedulerStatus: getScannerSchedulerStatus(),
         exeContractStatus: {
           syncEnabled: cfg.scanner.syncEnabled,
           readerExePath: cfg.scanner.readerExePath,
@@ -196,6 +385,30 @@ scannersRouter.get(
           contractFields: ['machineNo', 'enrollNumber', 'scanDateTime', 'verifyMode', 'inOutMode', 'workCode'],
         },
       });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+scannersRouter.get(
+  '/scanners/scheduler/status',
+  requireAuth,
+  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
+  async (_req, res) => {
+    res.json(getScannerSchedulerStatus());
+  }
+);
+
+scannersRouter.post(
+  '/scanners/scheduler/run-due',
+  requireAuth,
+  requireRoles('ADMIN'),
+  async (req, res, next) => {
+    try {
+      const referenceBkkNow = req.body?.referenceBkkNow ? String(req.body.referenceBkkNow).trim() : undefined;
+      const result = await evaluateDueSyncSchedules(referenceBkkNow);
+      res.json(result);
     } catch (err) {
       next(err);
     }
@@ -455,76 +668,24 @@ scannersRouter.patch(
 );
 
 /**
- * Triggers Scanner Reader EXE Sync.
- * Strictly honors the rule: never fake a successful hardware sync if the EXE binary or device is unavailable!
+ * Triggers Scanner Reader EXE Sync (Manual Sync).
  */
 scannersRouter.post(
   '/scanners/sync',
   requireAuth,
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
-  async (req, res, next) => {
+  async (req, res) => {
     const actor = req.user!.username;
     const machineNo = req.body?.machineNo ? Number(req.body.machineNo) : null;
-    const cfg = loadConfig();
 
     try {
-      let stdoutText: string;
-
-      if (testDoubleScannerOutput !== null) {
-        if (testDoubleScannerOutput instanceof Error) {
-          throw testDoubleScannerOutput;
-        }
-        stdoutText = testDoubleScannerOutput;
-      } else {
-        if (!cfg.scanner.syncEnabled) {
-          const err = new Error(
-            'BLOCKED_BY_EXTERNAL_CONTRACT: ปิดการเรียก ScannerReader.exe อัตโนมัติไว้ (SCANNER_SYNC_ENABLED=false) กรุณาตั้งค่า Path ของไฟล์ EXE เดิมบนเครื่อง Windows Server ก่อนเปิดใช้งานจริง'
-          );
-          (err as Error & { code?: string }).code = 'BLOCKED_BY_EXTERNAL_CONTRACT';
-          throw err;
-        }
-        if (!fs.existsSync(cfg.scanner.readerExePath)) {
-          const err = new Error(
-            `SCANNER_EXE_NOT_FOUND: ไม่พบไฟล์ ScannerReader.exe ที่ ${cfg.scanner.readerExePath}`
-          );
-          (err as Error & { code?: string }).code = 'SCANNER_EXE_NOT_FOUND';
-          throw err;
-        }
-
-        const args = machineNo ? ['--machine', String(machineNo)] : [];
-        const { stdout } = await execFileAsync(cfg.scanner.readerExePath, args, {
-          timeout: cfg.scanner.timeoutMs,
-        });
-        stdoutText = stdout;
-      }
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(stdoutText);
-      } catch {
-        const err = new Error('INVALID_EXE_JSON_OUTPUT: ผลลัพธ์จาก ScannerReader.exe ไม่ใช่ JSON ที่ถูกต้อง');
-        (err as Error & { code?: string }).code = 'INVALID_EXE_JSON_OUTPUT';
-        throw err;
-      }
-
-      if (!Array.isArray(parsed)) {
-        const err = new Error('INVALID_EXE_CONTRACT: JSON จาก ScannerReader.exe ต้องเป็น Array ของ Event 6 ฟิลด์');
-        (err as Error & { code?: string }).code = 'INVALID_EXE_CONTRACT';
-        throw err;
-      }
-
-      const result = await ingestSixFieldEventsBatch(parsed, 'MANUAL_EXE_SYNC', actor, machineNo);
-
-      await writeAuditLog({
-        requestId: req.requestId,
+      const result = await executeScannerReaderSync({
+        triggerMode: 'MANUAL_EXE_SYNC',
         actorUsername: actor,
         actorRole: req.user!.role,
+        machineNo,
+        requestId: req.requestId,
         ipAddress: req.ip || '127.0.0.1',
-        action: 'SCANNER_SYNC_SUCCESS',
-        targetType: 'SCANNER',
-        targetId: machineNo ? String(machineNo) : 'ALL',
-        result: 'SUCCESS',
-        detail: result,
       });
 
       res.json({
@@ -533,40 +694,10 @@ scannersRouter.post(
       });
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || 'SCANNER_SYNC_FAILED';
+      const statusCode = (err as { statusCode?: number })?.statusCode;
       const message = err instanceof Error ? err.message : String(err);
 
-      await dbExecute(
-        `INSERT INTO sync_runs (
-          trigger_mode, machine_no, finished_at, status,
-          total_events_read, new_scans_inserted, duplicate_scans_skipped, unmatched_scans_count,
-          error_code, error_message, triggered_by
-        ) VALUES ('MANUAL_EXE_SYNC', ?, CURRENT_TIMESTAMP, 'FAILED', 0, 0, 0, 0, ?, ?, ?)`,
-        [machineNo, code, message, actor]
-      );
-
-      if (machineNo) {
-        await dbExecute(
-          `UPDATE scanner_devices
-           SET last_sync_at = CURRENT_TIMESTAMP, last_sync_status = 'FAILED', last_error_message = ?
-           WHERE machine_no = ?`,
-          [message, machineNo]
-        );
-      }
-
-      await writeAuditLog({
-        requestId: req.requestId,
-        actorUsername: actor,
-        actorRole: req.user!.role,
-        ipAddress: req.ip || '127.0.0.1',
-        action: 'SCANNER_SYNC_FAILED',
-        targetType: 'SCANNER',
-        targetId: machineNo ? String(machineNo) : 'ALL',
-        result: 'FAILURE',
-        errorCode: code,
-        detail: { message },
-      });
-
-      const httpStatus = code.startsWith('INVALID_') ? 422 : 503;
+      const httpStatus = statusCode || (code.startsWith('INVALID_') ? 422 : 503);
       res.status(httpStatus).json({
         error: code,
         message,
@@ -578,14 +709,44 @@ scannersRouter.post(
 );
 
 /**
- * Authenticated ingestion endpoint for receiving 6-field JSON events directly from ScannerReader.exe
- * or via the EXE Contract Test Harness.
+ * Middleware อนุญาตให้ `/scanners/ingest` รับข้อมูลได้ทั้งจาก:
+ * 1) `X-Scanner-Token` ที่ตรวจสอบด้วย Timing-Safe (`verifyScannerIngestToken`) สำหรับ `ScannerReader.exe`
+ * 2) ผู้ใช้งานที่ล็อกอินด้วยสิทธิ์ `ADMIN` หรือ `RESPONSIBLE_STAFF`
  */
+async function requireScannerTokenOrStaffAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const scannerTokenHeader = String(req.headers['x-scanner-token'] || '').trim();
+  if (scannerTokenHeader) {
+    const cfg = loadConfig();
+    if (!verifyScannerIngestToken(scannerTokenHeader, cfg.scanner.ingestSharedToken)) {
+      res.status(401).json({
+        error: 'INVALID_SCANNER_TOKEN',
+        message: 'รหัสโทเค็นของเครื่องสแกน (X-Scanner-Token) ไม่ถูกต้อง',
+        requestId: req.requestId,
+      });
+      return;
+    }
+    req.user = {
+      id: 0,
+      username: 'scanner_exe_agent',
+      displayName: 'ScannerReader.exe Agent',
+      role: 'ADMIN',
+      approvedPersonId: null,
+      jti: 'scanner-token-auth',
+      exp: Math.floor(Date.now() / 1000) + 300,
+    };
+    next();
+    return;
+  }
+
+  await requireAuth(req, res, async () => {
+    await requireRoles('ADMIN', 'RESPONSIBLE_STAFF')(req, res, next);
+  });
+}
+
 scannersRouter.post(
   '/scanners/ingest',
-  requireAuth,
-  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
-  async (req, res, next) => {
+  requireScannerTokenOrStaffAuth,
+  async (req, res) => {
     try {
       const events = req.body?.events;
       if (!Array.isArray(events) || events.length === 0) {
@@ -659,18 +820,24 @@ scannersRouter.get(
         params.push(Number(machineNo));
       }
       if (mappingState) {
-        conditions.push('rs.mapping_state = ?');
+        conditions.push("COALESCE(rsm.mapping_state, 'UNMATCHED') = ?");
         params.push(mappingState);
       }
       if (search) {
-        conditions.push('(rs.enroll_number LIKE ? OR rs.matched_person_id LIKE ? OR p.full_name LIKE ?)');
+        conditions.push('(rs.enroll_number LIKE ? OR rsm.matched_person_id LIKE ? OR p.full_name LIKE ?)');
         params.push(`%${search}%`, `%${search}%`, `%${search}%`);
       }
 
       const items = await dbQuery(
-        `SELECT rs.*, p.full_name, p.department_name
+        `SELECT rs.id, rs.event_dedup_key, rs.machine_no, rs.enroll_number,
+                rs.scan_date_time, rs.canonical_bkk_time, rs.verify_mode,
+                rs.in_out_mode, rs.work_code, rs.raw_payload_json, rs.sync_run_id, rs.imported_at,
+                rsm.matched_person_id,
+                COALESCE(rsm.mapping_state, 'UNMATCHED') AS mapping_state,
+                p.full_name, p.department_name
          FROM raw_scans rs
-         LEFT JOIN personnel p ON p.person_id = rs.matched_person_id
+         LEFT JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
+         LEFT JOIN personnel p ON p.person_id = rsm.matched_person_id
          WHERE ${conditions.join(' AND ')}
          ORDER BY rs.canonical_bkk_time DESC
          LIMIT 200`,
@@ -692,11 +859,14 @@ scannersRouter.get(
     try {
       const personId = req.user!.approvedPersonId!;
       const items = await dbQuery(
-        `SELECT id, machine_no, enroll_number, scan_date_time, canonical_bkk_time,
-                verify_mode, in_out_mode, work_code, mapping_state, imported_at
-         FROM raw_scans
-         WHERE matched_person_id = ?
-         ORDER BY canonical_bkk_time DESC`,
+        `SELECT rs.id, rs.machine_no, rs.enroll_number, rs.scan_date_time, rs.canonical_bkk_time,
+                rs.verify_mode, rs.in_out_mode, rs.work_code,
+                COALESCE(rsm.mapping_state, 'MATCHED') AS mapping_state,
+                rs.imported_at
+         FROM raw_scans rs
+         INNER JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
+         WHERE rsm.matched_person_id = ?
+         ORDER BY rs.canonical_bkk_time DESC`,
         [personId]
       );
       res.json({ personId, items });

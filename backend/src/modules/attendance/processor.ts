@@ -95,8 +95,8 @@ function fromEpochMinutes(epochMinutes: number): string {
 }
 
 /**
- * Matches raw_scans to personnel using effective-dated fingerprint_mappings.
- * Never alters raw_date_time, machine_no, enroll_number, or raw_payload_json!
+ * จับคู่ข้อมูลสแกนดิบ (raw_scans) เข้ากับบุคลากรผ่านตาราง fingerprint_mappings ตามช่วงวันที่ที่มีผล (effective_from..effective_to)
+ * กฎสำคัญ (P1 ข้อ 08): ห้ามแก้ไขตาราง raw_scans เด็ดขาด! ผลการจับคู่ทั้งหมดจะถูกบันทึกลงตาราง Derived Mapping (raw_scan_mappings) เท่านั้น
  */
 export async function resolveRawScanPersonnelMappings(dateFrom: string, dateTo: string): Promise<{
   newlyMatched: number;
@@ -106,14 +106,17 @@ export async function resolveRawScanPersonnelMappings(dateFrom: string, dateTo: 
   const extendedEnd = addDays(dateTo, 1);
   const scans = await dbQuery<{
     id: number;
+    event_dedup_key: string;
     enroll_number: string;
     canonical_bkk_time: string;
     matched_person_id: string | null;
-    mapping_state: string;
+    mapping_state: string | null;
   }>(
-    `SELECT id, enroll_number, canonical_bkk_time, matched_person_id, mapping_state
-     FROM raw_scans
-     WHERE canonical_bkk_time >= ? AND canonical_bkk_time <= ?`,
+    `SELECT rs.id, rs.event_dedup_key, rs.enroll_number, rs.canonical_bkk_time,
+            rsm.matched_person_id, rsm.mapping_state
+     FROM raw_scans rs
+     LEFT JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
+     WHERE rs.canonical_bkk_time >= ? AND rs.canonical_bkk_time <= ?`,
     [`${dateFrom} 00:00:00`, `${extendedEnd} 23:59:59`]
   );
 
@@ -129,6 +132,35 @@ export async function resolveRawScanPersonnelMappings(dateFrom: string, dateTo: 
   let unmatchedCount = 0;
   let conflictCount = 0;
 
+  async function upsertDerivedMapping(
+    rawScanId: number,
+    dedupKey: string,
+    enrollNumber: string,
+    matchedPersonId: string | null,
+    mappingState: 'MATCHED' | 'UNMATCHED' | 'CONFLICT',
+    ruleNote: string
+  ) {
+    const existing = await dbQuery<{ raw_scan_id: number }>(
+      'SELECT raw_scan_id FROM raw_scan_mappings WHERE raw_scan_id = ? LIMIT 1',
+      [rawScanId]
+    );
+    if (existing.length === 0) {
+      await dbExecute(
+        `INSERT INTO raw_scan_mappings (
+          raw_scan_id, event_dedup_key, enroll_number, matched_person_id, mapping_state, mapping_rule_note, resolved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+        [rawScanId, dedupKey, enrollNumber, matchedPersonId, mappingState, ruleNote]
+      );
+    } else {
+      await dbExecute(
+        `UPDATE raw_scan_mappings
+         SET matched_person_id = ?, mapping_state = ?, mapping_rule_note = ?, resolved_at = CURRENT_TIMESTAMP
+         WHERE raw_scan_id = ?`,
+        [matchedPersonId, mappingState, ruleNote, rawScanId]
+      );
+    }
+  }
+
   for (const scan of scans) {
     const scanDate = scan.canonical_bkk_time.slice(0, 10);
     const matchingRows = mappings.filter((m) => {
@@ -141,26 +173,38 @@ export async function resolveRawScanPersonnelMappings(dateFrom: string, dateTo: 
     if (matchingRows.length === 1 && matchingRows[0].conflict_state === 'NONE') {
       const targetPersonId = matchingRows[0].person_id;
       if (scan.matched_person_id !== targetPersonId || scan.mapping_state !== 'MATCHED') {
-        await dbExecute(
-          'UPDATE raw_scans SET matched_person_id = ?, mapping_state = ? WHERE id = ?',
-          [targetPersonId, 'MATCHED', scan.id]
+        await upsertDerivedMapping(
+          scan.id,
+          scan.event_dedup_key,
+          scan.enroll_number,
+          targetPersonId,
+          'MATCHED',
+          `Matched via fingerprint_mappings (${matchingRows[0].effective_from})`
         );
         newlyMatched++;
       }
     } else if (matchingRows.length > 1 || (matchingRows.length === 1 && matchingRows[0].conflict_state !== 'NONE')) {
       conflictCount++;
       if (scan.mapping_state !== 'CONFLICT') {
-        await dbExecute(
-          'UPDATE raw_scans SET matched_person_id = NULL, mapping_state = ? WHERE id = ?',
-          ['CONFLICT', scan.id]
+        await upsertDerivedMapping(
+          scan.id,
+          scan.event_dedup_key,
+          scan.enroll_number,
+          null,
+          'CONFLICT',
+          'Duplicate or conflicting FINGLE_ID mapping in effective range'
         );
       }
     } else {
       unmatchedCount++;
       if (scan.mapping_state !== 'UNMATCHED') {
-        await dbExecute(
-          'UPDATE raw_scans SET matched_person_id = NULL, mapping_state = ? WHERE id = ?',
-          ['UNMATCHED', scan.id]
+        await upsertDerivedMapping(
+          scan.id,
+          scan.event_dedup_key,
+          scan.enroll_number,
+          null,
+          'UNMATCHED',
+          'No active fingerprint_mapping found for enroll_number on scan date'
         );
       }
     }
@@ -219,10 +263,12 @@ export async function computeAttendanceOutcomes(options: ReprocessOptions): Prom
     in_out_mode: number;
     mapping_state: string;
   }>(
-    `SELECT id, matched_person_id, canonical_bkk_time, in_out_mode, mapping_state
-     FROM raw_scans
-     WHERE canonical_bkk_time >= ? AND canonical_bkk_time <= ?
-     ORDER BY canonical_bkk_time ASC`,
+    `SELECT rs.id, rsm.matched_person_id, rs.canonical_bkk_time, rs.in_out_mode,
+            COALESCE(rsm.mapping_state, 'UNMATCHED') AS mapping_state
+     FROM raw_scans rs
+     LEFT JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
+     WHERE rs.canonical_bkk_time >= ? AND rs.canonical_bkk_time <= ?
+     ORDER BY rs.canonical_bkk_time ASC`,
     [`${options.dateFrom} 00:00:00`, `${extendedEnd} 23:59:59`]
   );
 

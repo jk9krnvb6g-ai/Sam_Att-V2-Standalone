@@ -1,11 +1,55 @@
-import { Router } from 'express';
+/**
+ * ============================================================================
+ * โมดูลจัดการการเข้าสู่ระบบ เซสชัน และผู้ใช้งานระบบ (Auth & User Management Routes)
+ * ไฟล์: backend/src/modules/auth/routes.ts
+ * ============================================================================
+ * หน้าที่หลัก:
+ * 1. POST /auth/login: ตรวจสอบรหัสผ่าน, ป้องกัน Brute-Force Lockout,
+ *    ออก HttpOnly, Secure, SameSite=Strict Cookie (`sam_att_session`) คู่กับ CSRF Token (`sam_att_csrf`) (แก้ไข P1 ข้อ 12)
+ * 2. GET /auth/me: คืนค่าข้อมูลผู้ใช้ปัจจุบันและรหัส CSRF Token สำหรับแนบใน Header X-CSRF-Token
+ * 3. POST /auth/logout: บันทึก jti ลงตาราง `revoked_sessions` และล้าง Cookie ทั้งหมดทันที
+ * 4. GET/POST/PUT /users: จัดการบัญชีผู้ใช้งานและผูก `approved_person_id` เฉพาะผู้ดูแลระบบ (ADMIN)
+ */
+import { Router, type Response } from 'express';
 import { loadConfig } from '../../config/env.ts';
 import { dbQuery, dbExecute } from '../../database/adapter.ts';
-import { hashPassword, verifyPassword, signJwt, type UserRole } from '../../utils/crypto.ts';
-import { requireAuth, requireRoles } from '../../middleware/auth.ts';
+import {
+  hashPassword,
+  verifyPassword,
+  signJwt,
+  computeCsrfToken,
+  type UserRole,
+} from '../../utils/crypto.ts';
+import {
+  requireAuth,
+  requireRoles,
+  SESSION_COOKIE_NAME,
+  CSRF_COOKIE_NAME,
+} from '../../middleware/auth.ts';
 import { writeAuditLog } from '../audit/service.ts';
 
 export const authRouter = Router();
+
+function setAuthCookies(
+  res: Response,
+  token: string,
+  csrfToken: string,
+  ttlSeconds: number,
+  isSecureRequest: boolean
+): void {
+  const secureFlag = isSecureRequest ? '; Secure' : '';
+  const sessionCookie = `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly${secureFlag}; SameSite=Strict; Path=/; Max-Age=${ttlSeconds}`;
+  const csrfCookie = `${CSRF_COOKIE_NAME}=${encodeURIComponent(csrfToken)}${secureFlag}; SameSite=Strict; Path=/; Max-Age=${ttlSeconds}`;
+  res.setHeader('Set-Cookie', [sessionCookie, csrfCookie]);
+}
+
+function clearAuthCookies(res: Response, isSecureRequest: boolean): void {
+  const secureFlag = isSecureRequest ? '; Secure' : '';
+  res.setHeader('Set-Cookie', [
+    `${SESSION_COOKIE_NAME}=; HttpOnly${secureFlag}; SameSite=Strict; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`,
+    `${CSRF_COOKIE_NAME}=${secureFlag}; SameSite=Strict; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`,
+  ]);
+}
 
 authRouter.post('/auth/login', async (req, res, next) => {
   try {
@@ -73,7 +117,6 @@ authRouter.post('/auth/login', async (req, res, next) => {
     const passwordValid = user ? verifyPassword(password, user.password_hash) : false;
 
     if (!user || !passwordValid) {
-      // Increment failed attempts
       const currentFails = rateRows.length > 0 ? Number(rateRows[0].failed_attempts) + 1 : 1;
       const shouldLock = currentFails >= cfg.auth.rateLimitMaxAttempts;
       const lockedUntil = shouldLock
@@ -108,7 +151,6 @@ authRouter.post('/auth/login', async (req, res, next) => {
         detail: { failedAttempts: currentFails, locked: shouldLock },
       });
 
-      // Generic error message: never reveal whether username exists
       res.status(401).json({
         error: 'INVALID_CREDENTIALS',
         message: 'ชื่อผู้ใช้งานหรือรหัสผ่านไม่ถูกต้อง',
@@ -141,15 +183,20 @@ authRouter.post('/auth/login', async (req, res, next) => {
     await dbExecute('DELETE FROM auth_rate_limits WHERE rate_key = ?', [rateKey]);
     await dbExecute('UPDATE users SET last_login_at = ? WHERE id = ?', [nowIso, user.id]);
 
-    const { token, expiresAtIso } = signJwt(
+    const ttlSeconds = cfg.auth.sessionTtlMinutes * 60;
+    const { token, jti, expiresAtIso } = signJwt(
       {
         sub: user.username,
         userId: user.id,
         role: user.role,
       },
       cfg.auth.jwtSecret,
-      cfg.auth.sessionTtlMinutes * 60
+      ttlSeconds
     );
+    const csrfToken = computeCsrfToken(jti, cfg.auth.jwtSecret);
+    const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https' || cfg.nodeEnv === 'production';
+
+    setAuthCookies(res, token, csrfToken, ttlSeconds, isSecure);
 
     await writeAuditLog({
       requestId: req.requestId,
@@ -164,6 +211,7 @@ authRouter.post('/auth/login', async (req, res, next) => {
 
     res.json({
       token,
+      csrfToken,
       expiresAt: expiresAtIso,
       user: {
         id: user.id,
@@ -181,6 +229,7 @@ authRouter.post('/auth/login', async (req, res, next) => {
 authRouter.get('/auth/me', requireAuth, async (req, res, next) => {
   try {
     const u = req.user!;
+    const cfg = loadConfig();
     let personProfile = null;
     if (u.approvedPersonId) {
       const rows = await dbQuery<{
@@ -197,7 +246,10 @@ authRouter.get('/auth/me', requireAuth, async (req, res, next) => {
       personProfile = rows[0] || null;
     }
 
+    const csrfToken = computeCsrfToken(u.jti, cfg.auth.jwtSecret);
+
     res.json({
+      csrfToken,
       user: {
         id: u.id,
         username: u.username,
@@ -215,11 +267,15 @@ authRouter.get('/auth/me', requireAuth, async (req, res, next) => {
 authRouter.post('/auth/logout', requireAuth, async (req, res, next) => {
   try {
     const u = req.user!;
+    const cfg = loadConfig();
     const expiresAtIso = new Date(u.exp * 1000).toISOString().slice(0, 19).replace('T', ' ');
     await dbExecute(
       'INSERT IGNORE INTO revoked_sessions (jti, username, revoked_reason, expires_at) VALUES (?, ?, ?, ?)',
       [u.jti, u.username, 'USER_LOGOUT', expiresAtIso]
     );
+
+    const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https' || cfg.nodeEnv === 'production';
+    clearAuthCookies(res, isSecure);
 
     await writeAuditLog({
       requestId: req.requestId,

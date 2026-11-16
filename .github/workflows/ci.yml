@@ -13,13 +13,20 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Security Gate — Verify Zero Committed Private Keys or Runtime SQLite Databases
+        run: |
+          if [ -f "certs/server.key" ] || [ -f "data/sam_att_v2.sqlite" ] || [ -f "bun.lock" ]; then
+            echo "SECURITY VIOLATION: Private keys, SQLite runtime files, or conflicting lockfiles must not be committed!"
+            exit 1
+          fi
+
       - name: Setup Node.js (Target 26.13.1 from .nvmrc)
         uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
 
-      - name: Install Locked Dependencies
+      - name: Install Locked Dependencies (npm ci)
         run: npm ci
 
       - name: TypeScript Strict Verification

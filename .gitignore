@@ -1,8 +1,31 @@
+# Dependencies
 node_modules/
+
+# Build & Release Artifacts
 build/
 dist/
 coverage/
-.DS_Store
-*.log
+
+# Environment & Secrets (NEVER commit real secrets)
 .env*
 !.env.example
+
+# TLS Certificates & Private Keys (P0 Security Policy: Never track keys or certs)
+certs/*.key
+certs/*.crt
+certs/*.pem
+certs/*.pfx
+
+# Runtime Databases & Backups (P0 Security Policy: Never commit SQLite or DB dumps)
+data/*.sqlite
+data/*.sqlite-wal
+data/*.sqlite-shm
+data/*.db
+backups/
+*.bak
+*.sql.gz
+
+# Logs & OS Files
+.DS_Store
+*.log
+logs/

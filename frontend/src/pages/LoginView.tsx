@@ -15,11 +15,11 @@ export function LoginView({ onLoginSuccess }: { onLoginSuccess: (user: AuthUser)
     setError(null);
     setLoading(true);
     try {
-      const res = await apiRequest<{ token: string; user: AuthUser }>('/auth/login', {
+      const res = await apiRequest<{ token: string; csrfToken?: string; user: AuthUser }>('/auth/login', {
         method: 'POST',
         body: JSON.stringify({ username, password }),
       });
-      setStoredToken(res.token);
+      setStoredToken(res.csrfToken || 'cookie-session-active');
       const me = await apiRequest<{ user: AuthUser }>('/auth/me');
       onLoginSuccess(me.user);
     } catch (err) {

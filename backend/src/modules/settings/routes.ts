@@ -1,12 +1,27 @@
+/**
+ * ============================================================================
+ * โมดูลตั้งค่าระบบ บันทึกความปลอดภัย และศูนย์ควบคุมการอัปเดต (Settings, Audit & Deployment Routes)
+ * ไฟล์: backend/src/modules/settings/routes.ts
+ * ============================================================================
+ * หน้าที่หลัก:
+ * 1. GET /system-logs: แสดงบันทึกความปลอดภัย (Audit Logs) เฉพาะผู้ดูแลระบบ (ADMIN)
+ * 2. GET /settings/connections & /health: ตรวจสอบสถานะการเชื่อมต่อโดยไม่เปิดเผยรหัสผ่านหรือ Secret เด็ดขาด
+ * 3. POST /deployment/approve & /deployment/rollback: เชื่อมต่อกับ `backend/src/modules/deployment/agent.ts`
+ *    เพื่อตรวจ SHA-256 จริง, สำรองข้อมูลจริงลงดิสก์, รัน Health Check และบันทึกสถานะจริง (`PENDING` -> `RUNNING` -> `SUCCESS` / `FAILED`) (แก้ไข P1 ข้อ 10–11)
+ */
 import fs from 'fs';
-import crypto from 'crypto';
 import mysql from 'mysql2/promise';
 import { Router } from 'express';
-import { loadConfig } from '../../config/env.ts';
-import { dbQuery, dbExecute } from '../../database/adapter.ts';
+import { loadConfig, validateProductionConfig } from '../../config/env.ts';
+import { dbQuery } from '../../database/adapter.ts';
 import { verifyPassword } from '../../utils/crypto.ts';
 import { requireAuth, requireRoles } from '../../middleware/auth.ts';
 import { writeAuditLog } from '../audit/service.ts';
+import {
+  executeStandaloneDeployment,
+  executeStandaloneRollback,
+  isDeploymentInProgress,
+} from '../deployment/agent.ts';
 
 export const settingsRouter = Router();
 
@@ -92,9 +107,11 @@ settingsRouter.get(
           hrPersonTable: cfg.hosofficeDb.hrPersonTable,
           configured: Boolean(cfg.hosofficeDb.host && cfg.hosofficeDb.host !== 'CHANGE_ME'),
           livePushEnabled: cfg.hosofficePush.livePushEnabled,
+          targetTable: cfg.hosofficePush.targetTable,
         },
         scannerIntegration: {
           syncEnabled: cfg.scanner.syncEnabled,
+          autoSchedulerEnabled: cfg.scanner.autoSchedulerEnabled,
           readerExePath: cfg.scanner.readerExePath,
           exeBinaryExists: fs.existsSync(cfg.scanner.readerExePath),
           timeoutMs: cfg.scanner.timeoutMs,
@@ -193,11 +210,12 @@ settingsRouter.post(
             message: 'เชื่อมต่อฐานข้อมูล HOSOffice Read-only สำเร็จ',
           });
         } catch (connErr: unknown) {
+          console.error('[HOSOffice Connection Test Error]', connErr);
           res.status(503).json({
             target,
             reachable: false,
             error: 'HOSOFFICE_CONNECTION_FAILED',
-            message: connErr instanceof Error ? connErr.message : String(connErr),
+            message: 'ไม่สามารถเชื่อมต่อฐานข้อมูล HOSOffice ได้ กรุณาตรวจสอบค่าตั้งค่าเครือข่ายและสิทธิ์ผู้ใช้',
           });
         }
         return;
@@ -243,15 +261,17 @@ settingsRouter.get(
       const history = await dbQuery('SELECT * FROM deployment_history ORDER BY id DESC LIMIT 15');
       res.json({
         serviceName: 'SamAttV2Standalone',
+        serviceWrapper: 'WinSW (Windows Service Wrapper)',
         architecture: 'STANDALONE_SINGLE_PORT_HTTPS',
         httpsPort: cfg.port,
         currentVersion: '2.0.0-standalone',
         targetNodeVersion: '26.13.1',
         runtimeNodeVersion: process.version,
         isolatedFromProcurementAndGateway: true,
-        uiLiveProductionDeployEnabled: false,
+        inProgress: isDeploymentInProgress(),
+        uiLiveProductionDeployEnabled: true,
         uiDeployNotice:
-          'การอัปเดตและสำรองข้อมูลทำงานผ่าน PowerShell Standalone Scripts (scripts/*.ps1) เฉพาะ Service SamAttV2Standalone เท่านั้น ห้ามแตะต้อง Procurement หรือ Central Gateway',
+          'ทำงานผ่านกลไก Sam_Att Deployment Agent โดยตรวจ SHA-256 จริง, สำรองฐานข้อมูลจริงลงดิสก์, รัน Health Check และรองรับ Rollback เฉพาะ Service SamAttV2Standalone โดยไม่แตะต้อง Procurement',
         history,
       });
     } catch (err) {
@@ -273,7 +293,7 @@ settingsRouter.post(
           commitSha: 'initial-standalone-build',
           status: 'UP_TO_DATE',
           releaseNotes:
-            'Sam_Att V2 Standalone รุ่นเริ่มต้น แยกออกจาก Central API Gateway อย่างสมบูรณ์ ใช้ HTTPS Port 4101 เดียวกันทั้ง Frontend และ API',
+            'Sam_Att V2 Standalone รุ่นเสถียร แยกออกจาก Central API Gateway อย่างสมบูรณ์ ใช้ HTTPS Port 4101 เดียวกันทั้ง Frontend และ API',
         },
       });
     } catch (err) {
@@ -293,10 +313,13 @@ settingsRouter.post(
       const migrations = await dbQuery<{ version: string }>('SELECT version FROM schema_migrations');
       const scriptsReady =
         fs.existsSync('scripts/install-windows.ps1') &&
+        fs.existsSync('scripts/winsw-sam-att.xml') &&
         fs.existsSync('scripts/backup.ps1') &&
         fs.existsSync('scripts/restore-test.ps1') &&
         fs.existsSync('scripts/deploy-test.ps1') &&
         fs.existsSync('scripts/health-check.ps1');
+
+      const configValidation = validateProductionConfig(cfg);
 
       const checks = [
         {
@@ -313,15 +336,23 @@ settingsRouter.post(
         },
         {
           id: 'DB_MIGRATION_STATE',
-          label: 'สถานะ Schema Migration (20 ตารางหลัก)',
+          label: 'สถานะ Schema Migration (รวมตาราง raw_scan_mappings แบบ Immutable)',
           passed: migrations.length > 0,
           detail: `ใช้ Migration เวอร์ชัน ${migrations.map((m) => m.version).join(', ')}`,
         },
         {
-          id: 'POWERSHELL_RUNBOOK_SCRIPTS',
-          label: 'สคริปต์ PowerShell สำหรับติดตั้ง/Backup/Restore/Rollback',
+          id: 'WINSW_AND_POWERSHELL_RUNBOOK',
+          label: 'ไฟล์ WinSW Service Wrapper (winsw-sam-att.xml) และสคริปต์ PowerShell',
           passed: scriptsReady,
-          detail: scriptsReady ? 'พบสคริปต์ครบทั้ง 5 ไฟล์ในโฟลเดอร์ scripts/' : 'สคริปต์ไม่ครบ',
+          detail: scriptsReady ? 'พบไฟล์ WinSW XML และสคริปต์ครบถ้วนในโฟลเดอร์ scripts/' : 'สคริปต์ไม่ครบ',
+        },
+        {
+          id: 'CONFIG_SECURITY_VALIDATION',
+          label: 'การตรวจสอบความปลอดภัยของค่าตั้งค่า (Port & Secrets)',
+          passed: configValidation.valid,
+          detail: configValidation.valid
+            ? 'ค่าตั้งค่าผ่านเกณฑ์ความปลอดภัย'
+            : configValidation.violations.join('; '),
         },
       ];
 
@@ -370,7 +401,7 @@ settingsRouter.get(
   async (_req, res, next) => {
     try {
       const items = await dbQuery(
-        "SELECT id, release_version, commit_sha, artifact_sha256, backup_archive_path, executed_by, executed_at FROM deployment_history WHERE backup_archive_path IS NOT NULL ORDER BY id DESC"
+        'SELECT id, release_version, commit_sha, artifact_sha256, status, backup_archive_path, executed_by, executed_at FROM deployment_history WHERE backup_archive_path IS NOT NULL ORDER BY id DESC'
       );
       res.json({ items });
     } catch (err) {
@@ -387,7 +418,7 @@ settingsRouter.get(
     try {
       const latest = await dbQuery('SELECT * FROM deployment_history ORDER BY id DESC LIMIT 1');
       res.json({
-        inProgress: false,
+        inProgress: isDeploymentInProgress(),
         latestOperation: latest[0] || null,
       });
     } catch (err) {
@@ -406,6 +437,8 @@ settingsRouter.post(
       const releaseVersion = String(req.body?.releaseVersion || '2.0.0-standalone').trim();
       const commitSha = String(req.body?.commitSha || '').trim();
       const artifactSha256 = String(req.body?.artifactSha256 || '').trim();
+      const packageContent = typeof req.body?.packageContent === 'string' ? req.body.packageContent : undefined;
+      const artifactFilePath = typeof req.body?.artifactFilePath === 'string' ? req.body.artifactFilePath : undefined;
 
       if (!password || !commitSha || !/^[a-f0-9]{64}$/i.test(artifactSha256)) {
         res.status(400).json({
@@ -440,42 +473,63 @@ settingsRouter.post(
         return;
       }
 
-      const backupPath = `C:\\Sam_Att\\backups\\sam_att_predeploy_${Date.now()}.bak`;
-      const result = await dbExecute(
-        `INSERT INTO deployment_history (
-          release_version, commit_sha, artifact_sha256, action_type, status,
-          backup_archive_path, preflight_passed, notes, executed_by
-        ) VALUES (?, ?, ?, 'APPROVED_RELEASE_RECORD', 'PENDING_WINDOWS_AGENT', ?, 1, ?, ?)`,
-        [
+      try {
+        const outcome = await executeStandaloneDeployment({
           releaseVersion,
           commitSha,
-          artifactSha256.toLowerCase(),
-          backupPath,
-          'อนุมัติรายการอัปเดตผ่าน Re-authentication พร้อมบันทึก SHA-256 สำหรับรัน deploy-test.ps1 บน Windows VM',
-          req.user!.username,
-        ]
-      );
+          expectedArtifactSha256: artifactSha256,
+          packageContent,
+          artifactFilePath,
+          actorUsername: req.user!.username,
+        });
 
-      await writeAuditLog({
-        requestId: req.requestId,
-        actorUsername: req.user!.username,
-        actorRole: req.user!.role,
-        ipAddress: req.ip || '127.0.0.1',
-        action: 'DEPLOYMENT_APPROVED',
-        targetType: 'DEPLOYMENT',
-        targetId: String(result.insertId),
-        result: 'SUCCESS',
-        detail: { releaseVersion, commitSha, artifactSha256 },
-      });
+        await writeAuditLog({
+          requestId: req.requestId,
+          actorUsername: req.user!.username,
+          actorRole: req.user!.role,
+          ipAddress: req.ip || '127.0.0.1',
+          action: 'DEPLOYMENT_EXECUTED_SUCCESS',
+          targetType: 'DEPLOYMENT',
+          targetId: String(outcome.deploymentId),
+          result: 'SUCCESS',
+          detail: outcome,
+        });
 
-      res.json({
-        status: 'APPROVED_FOR_WINDOWS_SERVICE_RUNNER',
-        deploymentId: result.insertId,
-        releaseVersion,
-        commitSha,
-        artifactSha256,
-        backupArchivePath: backupPath,
-      });
+        res.json({
+          status: outcome.status,
+          deploymentStatus: outcome.status,
+          deploymentId: outcome.deploymentId,
+          releaseVersion: outcome.releaseVersion,
+          commitSha: outcome.commitSha,
+          artifactSha256: outcome.artifactSha256,
+          backupArchivePath: outcome.backupArchivePath,
+          backupSha256: outcome.backupSha256,
+          healthCheck: outcome.healthCheck,
+        });
+      } catch (deployErr: unknown) {
+        const code = (deployErr as { code?: string })?.code || 'DEPLOYMENT_EXECUTION_FAILED';
+        const message = deployErr instanceof Error ? deployErr.message : String(deployErr);
+
+        await writeAuditLog({
+          requestId: req.requestId,
+          actorUsername: req.user!.username,
+          actorRole: req.user!.role,
+          ipAddress: req.ip || '127.0.0.1',
+          action: 'DEPLOYMENT_EXECUTED_FAILED',
+          targetType: 'DEPLOYMENT',
+          targetId: releaseVersion,
+          result: 'FAILURE',
+          errorCode: code,
+          detail: { message },
+        });
+
+        res.status(422).json({
+          status: 'FAILED',
+          error: code,
+          message,
+          requestId: req.requestId,
+        });
+      }
     } catch (err) {
       next(err);
     }
@@ -491,57 +545,45 @@ settingsRouter.post(
       const targetBackupId = Number(req.body?.targetBackupId || 1);
       const reason = String(req.body?.reason || 'Rollback ไปยังเวอร์ชันเสถียรตามแผนฉุกเฉิน').trim();
 
-      const targetRows = await dbQuery<{
-        id: number;
-        release_version: string;
-        commit_sha: string;
-        artifact_sha256: string;
-        backup_archive_path: string | null;
-      }>('SELECT * FROM deployment_history WHERE id = ? LIMIT 1', [targetBackupId]);
+      try {
+        const outcome = await executeStandaloneRollback({
+          targetBackupId,
+          reason,
+          actorUsername: req.user!.username,
+        });
 
-      if (targetRows.length === 0) {
-        res.status(404).json({
-          error: 'BACKUP_NOT_FOUND',
-          message: 'ไม่พบรายการ Backup ที่ต้องการ Rollback',
+        await writeAuditLog({
+          requestId: req.requestId,
+          actorUsername: req.user!.username,
+          actorRole: req.user!.role,
+          ipAddress: req.ip || '127.0.0.1',
+          action: 'DEPLOYMENT_ROLLBACK_EXECUTED',
+          targetType: 'DEPLOYMENT',
+          targetId: String(outcome.rollbackEntryId),
+          result: 'SUCCESS',
+          detail: outcome,
+        });
+
+        res.json({
+          status: outcome.status,
+          rollbackEntryId: outcome.rollbackEntryId,
+          targetVersion: outcome.targetVersion,
+          backupArchivePath: outcome.restoredFromPath,
+          restoredTablesCount: outcome.restoredTablesCount,
+          healthCheck: outcome.healthCheck,
+        });
+      } catch (rbErr: unknown) {
+        const code = (rbErr as { code?: string })?.code || 'ROLLBACK_FAILED';
+        const statusCode = (rbErr as { statusCode?: number })?.statusCode || 422;
+        const message = rbErr instanceof Error ? rbErr.message : String(rbErr);
+
+        res.status(statusCode).json({
+          status: 'FAILED',
+          error: code,
+          message,
           requestId: req.requestId,
         });
-        return;
       }
-
-      const target = targetRows[0];
-      const result = await dbExecute(
-        `INSERT INTO deployment_history (
-          release_version, commit_sha, artifact_sha256, action_type, status,
-          backup_archive_path, preflight_passed, notes, executed_by
-        ) VALUES (?, ?, ?, 'ROLLBACK_RECORDED', 'READY_FOR_RESTORE_SCRIPT', ?, 1, ?, ?)`,
-        [
-          target.release_version,
-          target.commit_sha || crypto.randomUUID().slice(0, 8),
-          target.artifact_sha256,
-          target.backup_archive_path,
-          reason,
-          req.user!.username,
-        ]
-      );
-
-      await writeAuditLog({
-        requestId: req.requestId,
-        actorUsername: req.user!.username,
-        actorRole: req.user!.role,
-        ipAddress: req.ip || '127.0.0.1',
-        action: 'DEPLOYMENT_ROLLBACK_REQUESTED',
-        targetType: 'DEPLOYMENT',
-        targetId: String(result.insertId),
-        result: 'SUCCESS',
-        detail: { targetBackupId, targetVersion: target.release_version, reason },
-      });
-
-      res.json({
-        status: 'ROLLBACK_LOGGED',
-        rollbackEntryId: result.insertId,
-        targetVersion: target.release_version,
-        backupArchivePath: target.backup_archive_path,
-      });
     } catch (err) {
       next(err);
     }

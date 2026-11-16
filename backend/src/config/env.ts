@@ -1,16 +1,21 @@
 /**
  * ============================================================================
- * โมดูลจัดการค่าตัวแปรสภาพแวดล้อม (Environment Configuration Loader)
+ * โมดูลจัดการค่าตัวแปรสภาพแวดล้อมและการตรวจสอบความพร้อมก่อนเปิดระบบ (Environment & Fail-Closed Config Validator)
  * ไฟล์: backend/src/config/env.ts
  * ============================================================================
  * หน้าที่หลัก:
  * - อ่านค่าตัวแปรจากไฟล์ .env หรือ Environment Variables ของระบบปฏิบัติการ
- * - กำหนดพอร์ตมาตรฐาน HTTPS 4101, พาธหน้าเว็บ /Sam_Att/ และพาธ API /api/Sam_Att
- * - บังคับให้ในโหมดใช้งานจริง (NODE_ENV=production) ต้องใช้ฐานข้อมูล MySQL เท่านั้น (Fail-Closed)
- * - ส่วนในโหมดพัฒนา/ทดสอบ (development/test) อนุญาตให้ใช้ SQLite จำลองโครงสร้าง 20 ตารางได้
+ * - ยกเลิกการใช้ค่าคงที่ (Hardcoded Static Secrets) สำหรับ JWT_SECRET และ SCANNER_INGEST_SHARED_TOKEN (แก้ไข P0 ข้อ 03–04)
+ * - ในโหมดพัฒนา/ทดสอบ (development/test) หากไม่ได้ตั้งค่า Secret จะสุ่มด้วย CSPRNG เฉพาะรอบการรันนั้น (Ephemeral Random Secret)
+ * - ในโหมดใช้งานจริง (NODE_ENV=production) ฟังก์ชัน validateProductionConfig() จะตรวจสอบความพร้อมของ
+ *   Environment Variables, TLS Certificate นอก Repository, รหัสผ่านฐานข้อมูล, Port และความแข็งแกร่งของ Secret
+ *   หากไม่ผ่านแม้แต่ข้อเดียวจะหยุดการทำงานทันทีแบบ Fail-Closed ก่อนเปิดพอร์ตให้บริการ (แก้ไข P1 ข้อ 15)
  */
-import dotenv from 'dotenv';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
+import dotenv from 'dotenv';
+import { generateCryptographicSecret } from '../utils/crypto.ts';
 
 dotenv.config();
 
@@ -41,18 +46,23 @@ export interface AppConfig {
     user: string;
     password: string;
     hrPersonTable: string;
+    pushWriteUser: string;
+    pushWritePassword: string;
   };
   auth: {
     jwtSecret: string;
+    jwtSecretExplicitlyConfigured: boolean;
     sessionTtlMinutes: number;
     rateLimitWindowMinutes: number;
     rateLimitMaxAttempts: number;
   };
   scanner: {
     syncEnabled: boolean;
+    autoSchedulerEnabled: boolean;
     readerExePath: string;
     timeoutMs: number;
     ingestSharedToken: string;
+    ingestTokenExplicitlyConfigured: boolean;
   };
   hosofficePush: {
     livePushEnabled: boolean;
@@ -60,14 +70,43 @@ export interface AppConfig {
   };
 }
 
+export class ProductionConfigError extends Error {
+  public readonly code = 'FAIL_CLOSED_CONFIG_INVALID';
+  public readonly violations: string[];
+  constructor(violations: string[]) {
+    super(`Production Configuration Validation Failed (Fail-Closed): ${violations.join(' | ')}`);
+    this.name = 'ProductionConfigError';
+    this.violations = violations;
+  }
+}
+
+// Ephemeral CSPRNG secrets for non-production runtime only (never static constants!)
+const EPHEMERAL_DEV_JWT_SECRET = generateCryptographicSecret(48);
+const EPHEMERAL_DEV_SCANNER_TOKEN = generateCryptographicSecret(32);
+
+const INVALID_SECRET_PLACEHOLDERS = new Set([
+  '',
+  'CHANGE_ME',
+  'GENERATE_SECURE_RANDOM_SECRET_AT_DEPLOY',
+  'GENERATE_SCANNER_INGEST_SECRET_AT_DEPLOY',
+  'sam-att-v2-standalone-dev-hmac-secret-change-in-prod-98f3a1c2',
+  'sam-att-exe-ingest-token-v2',
+]);
+
+function isValidConfiguredSecret(val: string | undefined, minLength: number): boolean {
+  if (!val) return false;
+  const trimmed = val.trim();
+  if (INVALID_SECRET_PLACEHOLDERS.has(trimmed)) return false;
+  return trimmed.length >= minLength;
+}
+
 /**
- * โหลดและตรวจสอบค่าตั้งค่าระบบทั้งหมด
+ * โหลดค่าตั้งค่าระบบทั้งหมด
  */
 export function loadConfig(): AppConfig {
   const nodeEnv = process.env.NODE_ENV || 'development';
 
   // ในโหมด Production บังคับใช้ MySQL จริงเท่านั้น
-  // ในโหมด Development/Sandbox ใช้ sqlite_sandbox เว้นแต่ระบุ SAM_ATT_DB_ENGINE=mysql
   const explicitEngine = process.env.SAM_ATT_DB_ENGINE as DbEngineMode | undefined;
   const dbEngine: DbEngineMode = explicitEngine
     ? explicitEngine
@@ -75,9 +114,23 @@ export function loadConfig(): AppConfig {
       ? 'mysql'
       : 'sqlite_sandbox';
 
-  // พอร์ต HTTPS หลักของระบบคือ 4101
   const rawPort = process.env.SAM_ATT_HTTPS_PORT || process.env.PORT;
   const httpsPort = rawPort && rawPort !== '3000' ? Number(rawPort) : 4101;
+
+  const rawJwtSecret = process.env.JWT_SECRET?.trim();
+  const jwtExplicit = isValidConfiguredSecret(rawJwtSecret, 32);
+
+  const rawScannerToken = process.env.SCANNER_INGEST_SHARED_TOKEN?.trim();
+  const scannerTokenExplicit = isValidConfiguredSecret(rawScannerToken, 24);
+
+  // ในโหมด development/test ใช้ไฟล์ชั่วคราวใน os.tmpdir() หากไม่ได้กำหนดพาธ เพื่อไม่ให้เกิดไฟล์ .sqlite ค้างใน Repository (แก้ไข P0 ข้อ 02)
+  const defaultSqlitePath = path.join(os.tmpdir(), 'sam_att_v2_dev_runtime.sqlite');
+
+  // พาธใบรับรอง TLS: ใน Production แนะนำเก็บนอก Repository เช่น C:\Sam_Att\certs\
+  const defaultCertDir =
+    nodeEnv === 'production'
+      ? 'C:\\Sam_Att\\certs'
+      : path.join(os.tmpdir(), 'sam_att_v2_dev_certs');
 
   return {
     nodeEnv,
@@ -86,8 +139,12 @@ export function loadConfig(): AppConfig {
     previewHttpPort: Number(process.env.PREVIEW_HTTP_PORT || 3000),
     publicBasePath: process.env.PUBLIC_BASE_PATH || '/Sam_Att/',
     apiBasePath: process.env.API_BASE_PATH || '/api/Sam_Att',
-    tlsCertPath: path.resolve(process.cwd(), process.env.TLS_CERT_PATH || './certs/server.crt'),
-    tlsKeyPath: path.resolve(process.cwd(), process.env.TLS_KEY_PATH || './certs/server.key'),
+    tlsCertPath: process.env.TLS_CERT_PATH
+      ? path.resolve(process.cwd(), process.env.TLS_CERT_PATH)
+      : path.join(defaultCertDir, 'server.crt'),
+    tlsKeyPath: process.env.TLS_KEY_PATH
+      ? path.resolve(process.cwd(), process.env.TLS_KEY_PATH)
+      : path.join(defaultCertDir, 'server.key'),
     dbEngine,
     samAttDb: {
       host: process.env.SAM_ATT_DB_HOST || '127.0.0.1',
@@ -95,7 +152,9 @@ export function loadConfig(): AppConfig {
       database: process.env.SAM_ATT_DB_NAME || 'samchuk_attendance_v2',
       user: process.env.SAM_ATT_DB_USER || 'sam_att_app',
       password: process.env.SAM_ATT_DB_PASSWORD || 'CHANGE_ME',
-      sqlitePath: path.resolve(process.cwd(), process.env.SAM_ATT_SQLITE_PATH || './data/sam_att_v2.sqlite'),
+      sqlitePath: process.env.SAM_ATT_SQLITE_PATH
+        ? path.resolve(process.cwd(), process.env.SAM_ATT_SQLITE_PATH)
+        : defaultSqlitePath,
     },
     hosofficeDb: {
       host: process.env.HOSOFFICE_DB_HOST || 'CHANGE_ME',
@@ -104,29 +163,94 @@ export function loadConfig(): AppConfig {
       user: process.env.HOSOFFICE_DB_USER || 'hosoffice_readonly',
       password: process.env.HOSOFFICE_DB_PASSWORD || 'CHANGE_ME',
       hrPersonTable: process.env.HOSOFFICE_HR_PERSON_TABLE || 'hr_person',
+      pushWriteUser: process.env.HOSOFFICE_PUSH_WRITE_USER || process.env.HOSOFFICE_DB_USER || 'hosoffice_attendance_writer',
+      pushWritePassword: process.env.HOSOFFICE_PUSH_WRITE_PASSWORD || process.env.HOSOFFICE_DB_PASSWORD || 'CHANGE_ME',
     },
     auth: {
-      jwtSecret:
-        process.env.JWT_SECRET && process.env.JWT_SECRET !== 'GENERATE_SECURE_RANDOM_SECRET_AT_DEPLOY'
-          ? process.env.JWT_SECRET
-          : 'sam-att-v2-standalone-dev-hmac-secret-change-in-prod-98f3a1c2',
+      jwtSecret: jwtExplicit ? rawJwtSecret! : nodeEnv === 'production' ? '' : EPHEMERAL_DEV_JWT_SECRET,
+      jwtSecretExplicitlyConfigured: jwtExplicit,
       sessionTtlMinutes: Number(process.env.SESSION_TTL_MINUTES || 480),
       rateLimitWindowMinutes: Number(process.env.AUTH_RATE_LIMIT_WINDOW_MINUTES || 15),
       rateLimitMaxAttempts: Number(process.env.AUTH_RATE_LIMIT_MAX_ATTEMPTS || 5),
     },
     scanner: {
       syncEnabled: process.env.SCANNER_SYNC_ENABLED === 'true',
+      autoSchedulerEnabled: process.env.SCANNER_AUTO_SCHEDULER_ENABLED !== 'false',
       readerExePath: process.env.SCANNER_READER_EXE_PATH || 'C:\\Sam_Att\\bin\\ScannerReader.exe',
       timeoutMs: Number(process.env.SCANNER_READER_TIMEOUT_MS || 30000),
-      ingestSharedToken:
-        process.env.SCANNER_INGEST_SHARED_TOKEN &&
-        process.env.SCANNER_INGEST_SHARED_TOKEN !== 'GENERATE_SCANNER_INGEST_SECRET_AT_DEPLOY'
-          ? process.env.SCANNER_INGEST_SHARED_TOKEN
-          : 'sam-att-exe-ingest-token-v2',
+      ingestSharedToken: scannerTokenExplicit
+        ? rawScannerToken!
+        : nodeEnv === 'production'
+          ? ''
+          : EPHEMERAL_DEV_SCANNER_TOKEN,
+      ingestTokenExplicitlyConfigured: scannerTokenExplicit,
     },
     hosofficePush: {
       livePushEnabled: process.env.HOSOFFICE_LIVE_PUSH_ENABLED === 'true',
-      targetTable: process.env.HOSOFFICE_PUSH_TARGET_TABLE || '',
+      targetTable: process.env.HOSOFFICE_PUSH_TARGET_TABLE || 'fingle_scan_attendance',
     },
+  };
+}
+
+/**
+ * ตรวจสอบความถูกต้องของค่าตั้งค่าในโหมด Production ก่อนเปิด Listener (แก้ไข P0 ข้อ 03–04 และ P1 ข้อ 15)
+ * หากไม่พร้อมจะโยน ProductionConfigError ทันที (Fail-Closed)
+ */
+export function validateProductionConfig(cfg: AppConfig = loadConfig()): {
+  valid: boolean;
+  violations: string[];
+} {
+  const violations: string[] = [];
+
+  if (!Number.isInteger(cfg.port) || cfg.port < 1 || cfg.port > 65535) {
+    violations.push(`INVALID_PORT: พอร์ต HTTPS (${cfg.port}) ต้องเป็นตัวเลขระหว่าง 1 ถึง 65535`);
+  }
+
+  if (cfg.nodeEnv === 'production') {
+    if (cfg.dbEngine !== 'mysql') {
+      violations.push('INVALID_DB_ENGINE: โหมด Production ต้องใช้ SAM_ATT_DB_ENGINE=mysql เท่านั้น');
+    }
+    if (!cfg.samAttDb.host || cfg.samAttDb.host === 'CHANGE_ME') {
+      violations.push('MISSING_DB_HOST: กรุณากำหนดค่า SAM_ATT_DB_HOST สำหรับฐานข้อมูล MySQL');
+    }
+    if (!cfg.samAttDb.user || cfg.samAttDb.user === 'CHANGE_ME') {
+      violations.push('MISSING_DB_USER: กรุณากำหนดค่า SAM_ATT_DB_USER');
+    }
+    if (!cfg.samAttDb.password || cfg.samAttDb.password === 'CHANGE_ME') {
+      violations.push('MISSING_DB_PASSWORD: ห้ามใช้รหัสผ่านฐานข้อมูลเป็นค่าว่างหรือ CHANGE_ME ในโหมด Production');
+    }
+    if (!cfg.auth.jwtSecretExplicitlyConfigured || cfg.auth.jwtSecret.length < 32) {
+      violations.push(
+        'MISSING_OR_WEAK_JWT_SECRET: โหมด Production ต้องกำหนด JWT_SECRET จาก Environment Variable ที่มีความยาวอย่างน้อย 32 ตัวอักษร และห้ามใช้ค่า Placeholder'
+      );
+    }
+    if (!cfg.scanner.ingestTokenExplicitlyConfigured || cfg.scanner.ingestSharedToken.length < 24) {
+      violations.push(
+        'MISSING_OR_WEAK_SCANNER_TOKEN: โหมด Production ต้องกำหนด SCANNER_INGEST_SHARED_TOKEN ที่มีความยาวอย่างน้อย 24 ตัวอักษร'
+      );
+    }
+    if (
+      cfg.auth.jwtSecret &&
+      cfg.scanner.ingestSharedToken &&
+      cfg.auth.jwtSecret === cfg.scanner.ingestSharedToken
+    ) {
+      violations.push(
+        'DUPLICATE_SECRETS: ค่า SCANNER_INGEST_SHARED_TOKEN ต้องแยกจาก JWT_SECRET ห้ามใช้ค่าเดียวกัน'
+      );
+    }
+    if (!fs.existsSync(cfg.tlsCertPath) || !fs.existsSync(cfg.tlsKeyPath)) {
+      violations.push(
+        `MISSING_TLS_CERTIFICATE: ไม่พบไฟล์ใบรับรอง TLS ที่กำหนด (${cfg.tlsCertPath} หรือ ${cfg.tlsKeyPath})`
+      );
+    }
+  }
+
+  if (violations.length > 0 && cfg.nodeEnv === 'production') {
+    throw new ProductionConfigError(violations);
+  }
+
+  return {
+    valid: violations.length === 0,
+    violations,
   };
 }

@@ -6,12 +6,11 @@
  * อธิบายหลักการทำงาน:
  * 1. รองรับการเชื่อมต่อฐานข้อมูลหลัก MySQL (Production Database: samchuk_attendance_v2)
  *    ผ่าน Connection Pool (`mysql2/promise`) โดยตั้งค่า Timezone เป็น `+07:00` (Asia/Bangkok)
- * 2. มีฟังก์ชัน `dbQuery<T>(sql, params)` สำหรับคำสั่ง SELECT และ `dbExecute(sql, params)`
- *    สำหรับคำสั่ง INSERT / UPDATE / DELETE โดยใช้ Parameterized Query ป้องกัน SQL Injection
- * 3. รองรับการสร้างตารางเริ่มต้นอัตโนมัติ (Auto-Migration) จากไฟล์ `migrations/001_initial_schema.sql`
- *    และสร้างข้อมูลตั้งต้น (Seed Default Shifts, Personnel Types, Admin User) หากรันครั้งแรก
- * 4. ห้ามใช้ข้อมูลจำลอง (No Silent Mock Fallback) ในโหมด Production หาก MySQL ล่มจะโยน
- *    `DatabaseUnavailableError` (HTTP 503) ทันทีเพื่อให้ผู้ดูแลระบบทราบสาเหตุจริง
+ * 2. มีฟังก์ชัน `dbQuery<T>(sql, params)` สำหรับคำสั่ง SELECT, `dbExecute(sql, params)`
+ *    สำหรับคำสั่ง INSERT / UPDATE / DELETE และ `dbTransaction(fn)` สำหรับรัน Transaction (BEGIN/COMMIT/ROLLBACK)
+ * 3. บังคับใช้กฎ Append-Only สำหรับตาราง `raw_scans`: ห้ามรันคำสั่ง UPDATE หรือ DELETE บน `raw_scans` เด็ดขาด (แก้ไข P1 ข้อ 08)
+ * 4. ป้องกันการรั่วไหลของข้อมูลการเชื่อมต่อฐานข้อมูล (Error Leakage Prevention): ไม่ส่งชื่อ Host/Port/Schema หรือ Stack Trace
+ *    กลับไปในข้อความ HTTP Error แก่ผู้ใช้ โดยบันทึกรายละเอียดจริงไว้ใน Server Log เท่านั้น (แก้ไข P1 ข้อ 13–14)
  * ============================================================================
  */
 
@@ -26,15 +25,37 @@ import { hashPassword, computeRawScanDedupKey } from '../utils/crypto.ts';
 export class DatabaseUnavailableError extends Error {
   public readonly code = 'DB_UNAVAILABLE';
   public readonly statusCode = 503;
-  constructor(message: string) {
-    super(message);
+  public readonly PublicSafeMessage =
+    'ไม่สามารถเชื่อมต่อฐานข้อมูลหลัก Sam_Att ได้ในขณะนี้ (Fail-Closed Mode: ห้ามใช้ข้อมูลจำลอง กรุณาติดต่อผู้ดูแลระบบ)';
+  public readonly internalDiagnosticMessage: string;
+
+  constructor(internalDiagnosticMessage: string) {
+    super('ไม่สามารถเชื่อมต่อฐานข้อมูลหลัก Sam_Att ได้ในขณะนี้ (Fail-Closed Mode: ห้ามใช้ข้อมูลจำลอง กรุณาติดต่อผู้ดูแลระบบ)');
     this.name = 'DatabaseUnavailableError';
+    this.internalDiagnosticMessage = internalDiagnosticMessage;
+  }
+}
+
+export class ImmutableTableViolationError extends Error {
+  public readonly code = 'IMMUTABLE_TABLE_VIOLATION';
+  public readonly statusCode = 409;
+  constructor(sql: string) {
+    super(
+      'IMMUTABLE_TABLE_VIOLATION: ห้ามแก้ไข (UPDATE) หรือลบ (DELETE) ข้อมูลในตาราง raw_scans เด็ดขาด กรุณาบันทึกผลการจับคู่ลงตาราง raw_scan_mappings เท่านั้น'
+    );
+    this.name = 'ImmutableTableViolationError';
+    console.error(`[Security Guard] Blocked mutation on immutable table raw_scans: ${sql.slice(0, 120)}`);
   }
 }
 
 export interface QueryResultMeta {
   insertId?: number;
   affectedRows?: number;
+}
+
+export interface DbTransactionContext {
+  query: <T = Record<string, unknown>>(sql: string, params?: unknown[]) => Promise<T[]>;
+  execute: (sql: string, params?: unknown[]) => Promise<QueryResultMeta>;
 }
 
 let mysqlPool: mysql.Pool | null = null;
@@ -47,6 +68,12 @@ export function setSimulatedDatabaseDown(down: boolean): void {
 
 export function isSimulatedDatabaseDown(): boolean {
   return simulatedDown;
+}
+
+function assertRawScansImmutable(sql: string): void {
+  if (/\b(?:UPDATE|DELETE\s+FROM|TRUNCATE\s+TABLE|DROP\s+TABLE)\s+`?raw_scans`?\b/i.test(sql)) {
+    throw new ImmutableTableViolationError(sql);
+  }
 }
 
 function getSqliteInstance(): DatabaseSync {
@@ -86,6 +113,7 @@ async function getMysqlPool(): Promise<mysql.Pool> {
       user: cfg.samAttDb.user,
       password: cfg.samAttDb.password,
       database: cfg.samAttDb.database,
+      charset: 'utf8mb4',
       waitForConnections: true,
       connectionLimit: 10,
       connectTimeout: 4000,
@@ -97,7 +125,7 @@ async function getMysqlPool(): Promise<mysql.Pool> {
 
 /**
  * Translates MySQL DDL into SQLite-compatible relational DDL when executing migrations
- * in the local SQLite relational engine (strictly preserving all 20 tables, columns, FKs, and unique constraints).
+ * in the local SQLite relational engine (strictly preserving all tables, columns, FKs, and unique constraints).
  */
 function convertMysqlDdlToSqlite(sql: string): string {
   const statements = sql
@@ -109,7 +137,6 @@ function convertMysqlDdlToSqlite(sql: string): string {
   const extraIndexes: string[] = [];
 
   for (let stmt of statements) {
-    // Strip leading comment lines
     const lines = stmt
       .split('\n')
       .filter((line) => !line.trim().startsWith('--'));
@@ -163,9 +190,7 @@ export async function dbQuery<T = Record<string, unknown>>(
   params: unknown[] = []
 ): Promise<T[]> {
   if (simulatedDown) {
-    throw new DatabaseUnavailableError(
-      'ไม่สามารถเชื่อมต่อฐานข้อมูลหลัก Sam_Att ได้ (Fail-Closed Mode: ห้ามใช้ข้อมูลจำลอง)'
-    );
+    throw new DatabaseUnavailableError('Simulated database outage');
   }
 
   const cfg = loadConfig();
@@ -176,13 +201,11 @@ export async function dbQuery<T = Record<string, unknown>>(
       return rows as T[];
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      throw new DatabaseUnavailableError(
-        `MySQL Connection Failed (${cfg.samAttDb.host}:${cfg.samAttDb.port}/${cfg.samAttDb.database}): ${msg}`
-      );
+      console.error(`[Sam_Att DB Error] MySQL query failed: ${msg}`);
+      throw new DatabaseUnavailableError(msg);
     }
   }
 
-  // sqlite_sandbox relational engine
   try {
     const db = getSqliteInstance();
     const normalizedSql = sql.replace(/INSERT\s+IGNORE\s+INTO/gi, 'INSERT OR IGNORE INTO');
@@ -191,16 +214,18 @@ export async function dbQuery<T = Record<string, unknown>>(
     return stmt.all(...safeParams) as T[];
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`SQL Execution Error: ${msg}`);
+    console.error(`[Sam_Att DB Error] SQL query execution failed: ${msg}`);
+    throw new Error('เกิดข้อผิดพลาดในการประมวลผลคำสั่งฐานข้อมูล');
   }
 }
 
 export async function dbExecute(sql: string, params: unknown[] = []): Promise<QueryResultMeta> {
   if (simulatedDown) {
-    throw new DatabaseUnavailableError(
-      'ไม่สามารถเชื่อมต่อฐานข้อมูลหลัก Sam_Att ได้ (Fail-Closed Mode: ห้ามใช้ข้อมูลจำลอง)'
-    );
+    throw new DatabaseUnavailableError('Simulated database outage');
   }
+
+  // บังคับใช้กฎ Append-Only สำหรับตาราง raw_scans (แก้ไข P1 ข้อ 08)
+  assertRawScansImmutable(sql);
 
   const cfg = loadConfig();
   if (cfg.dbEngine === 'mysql') {
@@ -214,9 +239,8 @@ export async function dbExecute(sql: string, params: unknown[] = []): Promise<Qu
       };
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
-      throw new DatabaseUnavailableError(
-        `MySQL Execution Failed (${cfg.samAttDb.host}:${cfg.samAttDb.port}/${cfg.samAttDb.database}): ${msg}`
-      );
+      console.error(`[Sam_Att DB Error] MySQL execute failed: ${msg}`);
+      throw new DatabaseUnavailableError(msg);
     }
   }
 
@@ -229,6 +253,73 @@ export async function dbExecute(sql: string, params: unknown[] = []): Promise<Qu
     insertId: Number(res.lastInsertRowid),
     affectedRows: Number(res.changes),
   };
+}
+
+/**
+ * รันชุดคำสั่งภายใต้ Database Transaction เดียวกัน (BEGIN -> COMMIT หรือ ROLLBACK เมื่อเกิดข้อผิดพลาด)
+ * รองรับทั้ง MySQL Connection Transaction และ SQLite Transaction (แก้ไข P0 ข้อ 07 และ P1 ข้อ 16)
+ */
+export async function dbTransaction<T>(
+  work: (tx: DbTransactionContext) => Promise<T>
+): Promise<T> {
+  if (simulatedDown) {
+    throw new DatabaseUnavailableError('Simulated database outage');
+  }
+
+  const cfg = loadConfig();
+  if (cfg.dbEngine === 'mysql') {
+    const pool = await getMysqlPool();
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const txContext: DbTransactionContext = {
+        query: async <R = Record<string, unknown>>(sql: string, params: unknown[] = []) => {
+          const [rows] = await conn.execute(sql, params as any[]);
+          return rows as R[];
+        },
+        execute: async (sql: string, params: unknown[] = []) => {
+          assertRawScansImmutable(sql);
+          const [result] = await conn.execute(sql, params as any[]);
+          const header = result as mysql.ResultSetHeader;
+          return {
+            insertId: header.insertId,
+            affectedRows: header.affectedRows,
+          };
+        },
+      };
+      const outcome = await work(txContext);
+      await conn.commit();
+      return outcome;
+    } catch (err) {
+      await conn.rollback();
+      throw err;
+    } finally {
+      conn.release();
+    }
+  }
+
+  const db = getSqliteInstance();
+  db.exec('BEGIN IMMEDIATE TRANSACTION;');
+  try {
+    const txContext: DbTransactionContext = {
+      query: async <R = Record<string, unknown>>(sql: string, params: unknown[] = []) => {
+        return dbQuery<R>(sql, params);
+      },
+      execute: async (sql: string, params: unknown[] = []) => {
+        return dbExecute(sql, params);
+      },
+    };
+    const outcome = await work(txContext);
+    db.exec('COMMIT;');
+    return outcome;
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK;');
+    } catch {
+      // ignore rollback if already rolled back
+    }
+    throw err;
+  }
 }
 
 export async function runMigrations(): Promise<{ applied: string[]; totalTables: number }> {
@@ -259,7 +350,7 @@ export async function runMigrations(): Promise<{ applied: string[]; totalTables:
       );
       applied.push('001_initial_schema.sql');
     }
-    return { applied, totalTables: 20 };
+    return { applied, totalTables: 21 };
   }
 
   const db = getSqliteInstance();
@@ -303,13 +394,11 @@ export async function seedBaselineAndSyntheticData(): Promise<void> {
     }
   }
 
-  // Check if users already exist
   const existingUsers = await dbQuery<{ id: number }>('SELECT id FROM users LIMIT 1');
   if (existingUsers.length > 0) {
     return;
   }
 
-  // Insert synthetic non-PII personnel records representing HOSOffice synced snapshot
   const syntheticPersonnel = [
     {
       person_id: 'SAM-P001',
@@ -434,7 +523,6 @@ export async function seedBaselineAndSyntheticData(): Promise<void> {
     }
   }
 
-  // Seed 3 role accounts (ADMIN, RESPONSIBLE_STAFF, GENERAL_USER)
   const accounts = [
     {
       username: 'admin',
@@ -475,7 +563,6 @@ export async function seedBaselineAndSyntheticData(): Promise<void> {
     );
   }
 
-  // Seed sample shift assignments for 2026-11-12 and 2026-11-13
   const assignments = [
     { person_id: 'SAM-P001', shift_id: 1, work_date: '2026-11-12', code: 'OFF-0816', name: 'เวรราชการปกติ (08:00–16:00)', start: '08:00', end: '16:00', grace: 15, cutoff: '10:30', cross: 0 },
     { person_id: 'SAM-P002', shift_id: 2, work_date: '2026-11-12', code: 'MOR-0816', name: 'เวรเช้า (08:00–16:00)', start: '08:00', end: '16:00', grace: 15, cutoff: '10:30', cross: 0 },
@@ -498,7 +585,6 @@ export async function seedBaselineAndSyntheticData(): Promise<void> {
     );
   }
 
-  // Create an initial sync_run record for synthetic EXE test harness import
   const syncRun = await dbExecute(
     `INSERT INTO sync_runs (
       trigger_mode, machine_no, started_at, finished_at, status,
@@ -506,25 +592,18 @@ export async function seedBaselineAndSyntheticData(): Promise<void> {
     ) VALUES ('EXE_CONTRACT_HARNESS', 101, '2026-11-13 08:05:00', '2026-11-13 08:05:02', 'SUCCESS', 11, 11, 0, 1, 'hrstaff')`
   );
 
-  // Seed 6-field Raw Scan events strictly following the EXE Contract
   const rawScanEvents = [
-    // 2026-11-12: SAM-P001 (1001) NORMAL (07:50 - 16:05)
     { machineNo: 101, enrollNumber: '1001', scanDateTime: '2026-11-12 07:50:12', verifyMode: 1, inOutMode: 0, workCode: 0, personId: 'SAM-P001', state: 'MATCHED' },
     { machineNo: 101, enrollNumber: '1001', scanDateTime: '2026-11-12 16:05:44', verifyMode: 1, inOutMode: 1, workCode: 0, personId: 'SAM-P001', state: 'MATCHED' },
-    // 2026-11-12: SAM-P002 (1002) Morning NORMAL + Night Cross-Midnight (19:55 -> 2026-11-13 08:06)
     { machineNo: 102, enrollNumber: '1002', scanDateTime: '2026-11-12 07:52:00', verifyMode: 1, inOutMode: 0, workCode: 0, personId: 'SAM-P002', state: 'MATCHED' },
     { machineNo: 102, enrollNumber: '1002', scanDateTime: '2026-11-12 16:02:10', verifyMode: 1, inOutMode: 1, workCode: 0, personId: 'SAM-P002', state: 'MATCHED' },
     { machineNo: 102, enrollNumber: '1002', scanDateTime: '2026-11-12 19:55:18', verifyMode: 1, inOutMode: 0, workCode: 0, personId: 'SAM-P002', state: 'MATCHED' },
     { machineNo: 102, enrollNumber: '1002', scanDateTime: '2026-11-13 08:06:30', verifyMode: 1, inOutMode: 1, workCode: 0, personId: 'SAM-P002', state: 'MATCHED' },
-    // 2026-11-12: SAM-P003 (1003) LATE (08:28 - 16:10, 28 mins late)
     { machineNo: 103, enrollNumber: '1003', scanDateTime: '2026-11-12 08:28:00', verifyMode: 1, inOutMode: 0, workCode: 0, personId: 'SAM-P003', state: 'MATCHED' },
     { machineNo: 103, enrollNumber: '1003', scanDateTime: '2026-11-12 16:10:00', verifyMode: 1, inOutMode: 1, workCode: 0, personId: 'SAM-P003', state: 'MATCHED' },
-    // 2026-11-12: SAM-P004 (1004) MISSING_CHECKOUT + LATE (08:22 in, no checkout)
     { machineNo: 101, enrollNumber: '1004', scanDateTime: '2026-11-12 08:22:00', verifyMode: 1, inOutMode: 0, workCode: 0, personId: 'SAM-P004', state: 'MATCHED' },
-    // 2026-11-13: SAM-P003 (1003) LATE again (08:35 in, 16:05 out -> 35 mins late)
     { machineNo: 103, enrollNumber: '1003', scanDateTime: '2026-11-13 08:35:00', verifyMode: 1, inOutMode: 0, workCode: 0, personId: 'SAM-P003', state: 'MATCHED' },
     { machineNo: 103, enrollNumber: '1003', scanDateTime: '2026-11-13 16:05:00', verifyMode: 1, inOutMode: 1, workCode: 0, personId: 'SAM-P003', state: 'MATCHED' },
-    // Unmatched scan from unknown enrollNumber 9999
     { machineNo: 101, enrollNumber: '9999', scanDateTime: '2026-11-13 07:59:00', verifyMode: 1, inOutMode: 0, workCode: 0, personId: null, state: 'UNMATCHED' },
   ];
 
@@ -538,11 +617,11 @@ export async function seedBaselineAndSyntheticData(): Promise<void> {
       inOutMode: ev.inOutMode,
       workCode: ev.workCode,
     });
-    await dbExecute(
+    const inserted = await dbExecute(
       `INSERT IGNORE INTO raw_scans (
         event_dedup_key, machine_no, enroll_number, scan_date_time, canonical_bkk_time,
         verify_mode, in_out_mode, work_code, raw_payload_json, matched_person_id, mapping_state, sync_run_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'IMMUTABLE_RAW', ?)`,
       [
         dedupKey,
         ev.machineNo,
@@ -553,14 +632,19 @@ export async function seedBaselineAndSyntheticData(): Promise<void> {
         ev.inOutMode,
         ev.workCode,
         payload,
-        ev.personId,
-        ev.state,
         syncRun.insertId || 1,
       ]
     );
+    if (inserted.insertId) {
+      await dbExecute(
+        `INSERT IGNORE INTO raw_scan_mappings (
+          raw_scan_id, event_dedup_key, enroll_number, matched_person_id, mapping_state, mapping_rule_note
+        ) VALUES (?, ?, ?, ?, ?, 'INITIAL_SEED_MAPPING')`,
+        [inserted.insertId, dedupKey, ev.enrollNumber, ev.personId, ev.state]
+      );
+    }
   }
 
-  // Record initial deployment baseline entry
   await dbExecute(
     `INSERT INTO deployment_history (
       release_version, commit_sha, artifact_sha256, action_type, status,

@@ -7,10 +7,12 @@
  * 1. hashPassword / verifyPassword: เข้ารหัสและตรวจสอบรหัสผ่านด้วยอัลกอริทึม scrypt + Salt สุ่ม 16 ไบต์
  *    พร้อมใช้ timingSafeEqual เพื่อป้องกันการโจมตีแบบวัดเวลา (Timing Attack)
  * 2. signJwt / verifyJwt: สร้างและตรวจสอบโทเค็น JWT มาตรฐาน HS256 พร้อมรหัสประจำเซสชัน (jti)
- * 3. normalizeBangkokScanDateTime: ตรวจสอบและจัดรูปแบบวันเวลาสแกนให้เป็นเขตเวลาประเทศไทย (Asia/Bangkok)
- * 4. computeRawScanDedupKey: คำนวณรหัส SHA-256 จากข้อมูลสแกน 6 ฟิลด์ตามสัญญาของ ScannerReader.exe
- *    เพื่อป้องกันการนำเข้าข้อมูลสแกนซ้ำซ้อน
- * 5. sanitizeCsvCell: ป้องกันช่องโหว่ Spreadsheet Formula Injection (CSV Injection) เวลาส่งออกไฟล์ Excel
+ * 3. generateCryptographicSecret / verifyScannerIngestToken: สร้าง Secret แบบสุ่มที่ปลอดภัยทางคริปโต
+ *    และตรวจสอบ Scanner Token ด้วย timingSafeEqual (แก้ไขปัญหา P0 ข้อ 03–04)
+ * 4. computeCsrfToken / verifyCsrfToken / parseCookies: รองรับการยืนยันตัวตนด้วย HttpOnly, Secure,
+ *    SameSite=Strict Cookie คู่กับ CSRF Token ที่ผูกกับรหัสเซสชัน jti (แก้ไขปัญหา P1 ข้อ 12)
+ * 5. normalizeBangkokScanDateTime & computeRawScanDedupKey: คำนวณรหัส SHA-256 จากข้อมูลสแกน 6 ฟิลด์
+ * 6. sanitizeCsvCell: ป้องกันช่องโหว่ Spreadsheet Formula Injection (CSV Injection) เวลาส่งออกไฟล์ Excel
  */
 import crypto from 'crypto';
 
@@ -23,6 +25,79 @@ export interface JwtPayload {
   jti: string; // รหัสอ้างอิงเซสชันสำหรับตรวจสอบการสั่ง Logout ในตาราง revoked_sessions
   iat: number;
   exp: number;
+}
+
+/**
+ * สร้างรหัสลับแบบสุ่มที่มีความปลอดภัยสูงด้วย Cryptographically Secure Pseudo-Random Number Generator (CSPRNG)
+ */
+export function generateCryptographicSecret(byteLength = 48): string {
+  return crypto.randomBytes(byteLength).toString('hex');
+}
+
+/**
+ * ตรวจสอบโทเค็นของเครื่องสแกน (Scanner Ingest Shared Token) แบบคงที่เวลา (Timing-Safe Comparison)
+ * เพื่อป้องกันการโจมตีแบบ Timing Side-Channel (แก้ไขปัญหา P0 ข้อ 04)
+ */
+export function verifyScannerIngestToken(providedToken: string, expectedToken: string): boolean {
+  if (!providedToken || !expectedToken) {
+    return false;
+  }
+  const a = Buffer.from(String(providedToken), 'utf8');
+  const b = Buffer.from(String(expectedToken), 'utf8');
+  if (a.length !== b.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * สร้าง CSRF Token ที่ผูกกับรหัสเซสชัน (jti) ด้วย HMAC-SHA256
+ * สำหรับป้องกัน CSRF เมื่อใช้งานคู่กับ HttpOnly Session Cookie (แก้ไขปัญหา P1 ข้อ 12)
+ */
+export function computeCsrfToken(jti: string, secret: string): string {
+  return crypto
+    .createHmac('sha256', secret)
+    .update(`csrf:${jti}`, 'utf8')
+    .digest('hex');
+}
+
+/**
+ * ตรวจสอบความถูกต้องของ CSRF Token แบบ Timing-Safe
+ */
+export function verifyCsrfToken(providedToken: string, jti: string, secret: string): boolean {
+  if (!providedToken || !jti || !secret) {
+    return false;
+  }
+  const expected = computeCsrfToken(jti, secret);
+  const a = Buffer.from(String(providedToken), 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) {
+    return false;
+  }
+  return crypto.timingSafeEqual(a, b);
+}
+
+/**
+ * แยกค่า Cookie จาก HTTP Header `Cookie`
+ */
+export function parseCookies(cookieHeader?: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!cookieHeader) {
+    return result;
+  }
+  const pairs = cookieHeader.split(';');
+  for (const pair of pairs) {
+    const idx = pair.indexOf('=');
+    if (idx <= 0) continue;
+    const key = pair.slice(0, idx).trim();
+    const val = pair.slice(idx + 1).trim();
+    try {
+      result[key] = decodeURIComponent(val);
+    } catch {
+      result[key] = val;
+    }
+  }
+  return result;
 }
 
 /**

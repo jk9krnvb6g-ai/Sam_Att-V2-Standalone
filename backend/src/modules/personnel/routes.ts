@@ -141,10 +141,13 @@ personnelRouter.get(
          ORDER BY fm.id DESC`
       );
       const unmatchedRawScans = await dbQuery(
-        `SELECT enroll_number, COUNT(*) as scan_count, MIN(canonical_bkk_time) as first_seen, MAX(canonical_bkk_time) as last_seen
-         FROM raw_scans
-         WHERE mapping_state != 'MATCHED'
-         GROUP BY enroll_number`
+        `SELECT rs.enroll_number, COUNT(*) as scan_count,
+                MIN(rs.canonical_bkk_time) as first_seen,
+                MAX(rs.canonical_bkk_time) as last_seen
+         FROM raw_scans rs
+         LEFT JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
+         WHERE COALESCE(rsm.mapping_state, 'UNMATCHED') != 'MATCHED'
+         GROUP BY rs.enroll_number`
       );
 
       res.json({

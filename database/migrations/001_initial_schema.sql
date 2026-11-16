@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS sync_runs (
   INDEX idx_sync_runs_started (started_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 11. raw_scans: Immutable Original Scan Events from Scanner Reader EXE (6-Field Contract)
+-- 11. raw_scans: Immutable Original Scan Events from Scanner Reader EXE (6-Field Contract — Append-Only, NEVER UPDATE/DELETE)
 CREATE TABLE IF NOT EXISTS raw_scans (
   id INT AUTO_INCREMENT PRIMARY KEY,
   event_dedup_key VARCHAR(64) NOT NULL UNIQUE,
@@ -205,6 +205,20 @@ CREATE TABLE IF NOT EXISTS raw_scans (
   INDEX idx_raw_scans_person_time (matched_person_id, canonical_bkk_time),
   INDEX idx_raw_scans_machine (machine_no),
   CONSTRAINT fk_raw_scans_sync_run FOREIGN KEY (sync_run_id) REFERENCES sync_runs(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 11b. raw_scan_mappings: Derived FINGLE_ID -> PERSON_ID Mapping State (Separates Mutable Mapping from Immutable raw_scans)
+CREATE TABLE IF NOT EXISTS raw_scan_mappings (
+  raw_scan_id INT NOT NULL PRIMARY KEY,
+  event_dedup_key VARCHAR(64) NOT NULL UNIQUE,
+  enroll_number VARCHAR(64) NOT NULL,
+  matched_person_id VARCHAR(64) NULL,
+  mapping_state VARCHAR(32) NOT NULL DEFAULT 'UNMATCHED',
+  mapping_rule_note VARCHAR(500) NULL,
+  resolved_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_rsm_person (matched_person_id),
+  INDEX idx_rsm_state (mapping_state),
+  CONSTRAINT fk_rsm_raw_scan FOREIGN KEY (raw_scan_id) REFERENCES raw_scans(id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 12. attendance: Derived Daily/Shift Attendance Calculation Results

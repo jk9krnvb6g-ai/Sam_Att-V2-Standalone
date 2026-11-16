@@ -1,21 +1,19 @@
 /**
  * ============================================================================
- * โมดูลเชื่อมต่อ Backend API (Frontend API Service & Token Manager)
+ * โมดูลเชื่อมต่อ Backend API (Frontend API Service & HttpOnly Cookie + CSRF Manager)
  * ไฟล์: frontend/src/services/api.ts
  * ============================================================================
  * หน้าที่หลัก:
- * 1. จัดเก็บและดึง JWT Token จาก localStorage ของเบราว์เซอร์
- * 2. ฟังก์ชัน apiRequest(): ตัวกลางสำหรับส่ง HTTP Request ไปยัง /api/Sam_Att/*
- *    โดยแนบ Header Authorization: Bearer <token> ให้อัตโนมัติ
- * 3. แปลงข้อผิดพลาดจากฝั่งเซิร์ฟเวอร์ (เช่น 401, 403, 429, 503 Fail-Closed)
- *    ให้อยู่ในรูปออบเจกต์ ApiClientError เพื่อให้หน้าเว็บแสดงข้อความแจ้งเตือนภาษาไทยได้ทันที
- * 4. ฟังก์ชัน downloadLatenessCsv(): ดาวน์โหลดไฟล์รายงาน CSV สำหรับเปิดในโปรแกรม Excel
+ * 1. ยกเลิกการเก็บ JWT Token ใน localStorage เพื่อป้องกันความเสี่ยงจาก XSS (แก้ไข P1 ข้อ 12)
+ * 2. ใช้ HttpOnly, Secure, SameSite=Strict Cookie (`sam_att_session`) ร่วมกับ CSRF Token (`sam_att_csrf`)
+ * 3. ฟังก์ชัน apiRequest(): ตัวกลางสำหรับส่ง HTTP Request ไปยัง /api/Sam_Att/*
+ *    โดยตั้งค่า `credentials: 'include'` และแนบ Header `X-CSRF-Token` ให้อัตโนมัติ
+ * 4. แปลงข้อผิดพลาดจากฝั่งเซิร์ฟเวอร์ให้อยู่ในรูปออบเจกต์ ApiClientError
+ * 5. ฟังก์ชัน downloadLatenessCsv(): ดาวน์โหลดไฟล์รายงาน CSV สำหรับเปิดในโปรแกรม Excel
  */
 
-// ระดับสิทธิ์ผู้ใช้งาน 3 ระดับตามข้อกำหนดของโรงพยาบาลสามชุก
 export type UserRole = 'ADMIN' | 'RESPONSIBLE_STAFF' | 'GENERAL_USER';
 
-// โครงสร้างข้อมูลผู้ใช้งานที่ผ่านการยืนยันตัวตนแล้ว
 export interface AuthUser {
   id: number;
   username: string;
@@ -32,10 +30,6 @@ export interface AuthUser {
   } | null;
 }
 
-/**
- * คลาสจัดการข้อผิดพลาดจากการเรียกใช้งาน API
- * เก็บรหัส HTTP Status, รหัสข้อผิดพลาด (code), รหัสคำขอ (requestId) และสถานะ failClosed
- */
 export class ApiClientError extends Error {
   public readonly status: number;
   public readonly code: string;
@@ -51,53 +45,85 @@ export class ApiClientError extends Error {
   }
 }
 
-// พาธหลักของ Backend API บนพอร์ต 4101 เดียวกันกับหน้าเว็บ
 const API_BASE = '/api/Sam_Att';
-const TOKEN_STORAGE_KEY = 'sam_att_v2_token';
+const LEGACY_LOCALSTORAGE_JWT_KEY = 'sam_att_v2_token';
+const CSRF_COOKIE_NAME = 'sam_att_csrf';
 
-/**
- * อ่านค่า JWT Token ที่บันทึกไว้ในเบราว์เซอร์
- */
-export function getStoredToken(): string | null {
-  return localStorage.getItem(TOKEN_STORAGE_KEY);
+// เก็บเฉพาะ CSRF Token ในหน่วยความจำ (ไม่เก็บ JWT ลง localStorage เด็ดขาด)
+let inMemoryCsrfToken: string | null = null;
+
+function readCsrfCookie(): string | null {
+  if (typeof document === 'undefined') return null;
+  const pairs = document.cookie.split(';');
+  for (const pair of pairs) {
+    const idx = pair.indexOf('=');
+    if (idx <= 0) continue;
+    const k = pair.slice(0, idx).trim();
+    const v = pair.slice(idx + 1).trim();
+    if (k === CSRF_COOKIE_NAME) {
+      try {
+        return decodeURIComponent(v);
+      } catch {
+        return v;
+      }
+    }
+  }
+  return null;
 }
 
 /**
- * บันทึกหรือลบ JWT Token ในเบราว์เซอร์ (ส่งค่า null เมื่อออกจากระบบ)
+ * อ่านค่าสถานะเซสชัน/CSRF Token สำหรับตรวจสอบว่าเบราว์เซอร์มีเซสชันอยู่หรือไม่
+ * พร้อมล้างค่า JWT เก่าที่อาจตกค้างใน localStorage ทิ้งอัตโนมัติ
  */
-export function setStoredToken(token: string | null): void {
-  if (token) {
-    localStorage.setItem(TOKEN_STORAGE_KEY, token);
-  } else {
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
+export function getStoredToken(): string | null {
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage.getItem(LEGACY_LOCALSTORAGE_JWT_KEY)) {
+      localStorage.removeItem(LEGACY_LOCALSTORAGE_JWT_KEY);
+    }
+  } catch {
+    // ignore storage access issues
+  }
+  return inMemoryCsrfToken || readCsrfCookie();
+}
+
+/**
+ * บันทึกหรือล้างค่า CSRF Token ในหน่วยความจำเมื่อเข้าสู่ระบบหรือออกจากระบบ
+ */
+export function setStoredToken(csrfToken: string | null): void {
+  inMemoryCsrfToken = csrfToken;
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(LEGACY_LOCALSTORAGE_JWT_KEY);
+    }
+  } catch {
+    // ignore
   }
 }
 
 /**
  * ฟังก์ชันกลางสำหรับเรียกใช้งาน REST API ภายใต้ /api/Sam_Att/*
- * @param endpoint พาธย่อย เช่น '/auth/login' หรือ '/attendance?dateFrom=...'
- * @param options ตัวเลือกของ fetch เช่น method, body, headers
+ * ส่ง HttpOnly Cookie ไปพร้อมกับ `credentials: 'include'` และแนบ `X-CSRF-Token`
  */
 export async function apiRequest<T = any>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const token = getStoredToken();
+  const csrfToken = getStoredToken();
   const headers: Record<string, string> = {
+    'X-Requested-With': 'SamAttV2Client',
     ...(options.headers as Record<string, string> | undefined),
   };
 
-  // หากมีการส่งข้อมูล body ให้ระบุ Content-Type เป็น JSON อัตโนมัติ
   if (options.body && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json';
   }
-  // แนบ JWT Token ไปกับทุกคำขอหากผู้ใช้ล็อกอินอยู่
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
+  if (csrfToken) {
+    headers['X-CSRF-Token'] = csrfToken;
   }
 
   const res = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
+    credentials: 'include',
     headers,
   });
 
@@ -116,12 +142,15 @@ export async function apiRequest<T = any>(
     );
   }
 
-  // กรณีเป็นไฟล์รายงาน CSV ให้คืนค่าเป็นข้อความดิบ
   if (contentType.includes('text/csv')) {
     return (await res.text()) as unknown as T;
   }
 
-  return (await res.json()) as T;
+  const jsonData = await res.json();
+  if (jsonData && typeof jsonData === 'object' && typeof jsonData.csrfToken === 'string') {
+    inMemoryCsrfToken = jsonData.csrfToken;
+  }
+  return jsonData as T;
 }
 
 /**

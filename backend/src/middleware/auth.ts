@@ -1,22 +1,33 @@
 /**
  * ============================================================================
- * โมดูลตรวจสอบตัวตนและควบคุมสิทธิ์การเข้าถึง (Authentication & RBAC Middleware)
+ * โมดูลตรวจสอบตัวตนและควบคุมสิทธิ์การเข้าถึง (Authentication, Cookie/CSRF & RBAC Middleware)
  * ไฟล์: backend/src/middleware/auth.ts
  * ============================================================================
  * หน้าที่หลัก:
  * 1. attachRequestId: สร้างรหัสอ้างอิงคำขอ (X-Request-Id) สำหรับตรวจสอบย้อนหลังใน Audit Logs
- * 2. requireAuth: ตรวจสอบโทเค็น JWT ใน Authorization Header, เช็กว่าเซสชันถูกยกเลิกหรือไม่
- *    และดึงข้อมูลสิทธิ์ล่าสุดของผู้ใช้จากตาราง users ในฐานข้อมูลเสมอ
+ * 2. requireAuth:
+ *    - รองรับการยืนยันตัวตนหลักผ่าน HttpOnly, Secure, SameSite=Strict Cookie (`sam_att_session`)
+ *      พร้อมตรวจสอบ CSRF Token (`X-CSRF-Token`) สำหรับคำสั่งเปลี่ยนแปลงข้อมูล (POST/PUT/PATCH/DELETE) (แก้ไข P1 ข้อ 12)
+ *    - รองรับ Authorization: Bearer <token> สำหรับสคริปต์/CLI ทดสอบอัตโนมัติ
+ *    - ตรวจสอบว่าเซสชันถูกยกเลิกในตาราง `revoked_sessions` หรือไม่
+ *    - ดึงข้อมูลสิทธิ์ล่าสุดของผู้ใช้จากตาราง `users` ในฐานข้อมูลจริงเสมอ
  * 3. requireRoles: บังคับสิทธิ์ 3 ระดับ (ADMIN, RESPONSIBLE_STAFF, GENERAL_USER)
  * 4. enforceOwnPersonMapping: ป้องกันช่องโหว่ IDOR สำหรับเมนูส่วนตัว (/me/*)
- *    โดยไม่อนุญาตให้ส่งรหัสบุคลากร (personId) ของคนอื่นเข้ามาในคำขอเด็ดขาด
  */
 import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
 import { loadConfig } from '../config/env.ts';
 import { dbQuery, DatabaseUnavailableError } from '../database/adapter.ts';
-import { verifyJwt, type UserRole } from '../utils/crypto.ts';
+import {
+  verifyJwt,
+  parseCookies,
+  verifyCsrfToken,
+  type UserRole,
+} from '../utils/crypto.ts';
 import { writeAuditLog } from '../modules/audit/service.ts';
+
+export const SESSION_COOKIE_NAME = 'sam_att_session';
+export const CSRF_COOKIE_NAME = 'sam_att_csrf';
 
 export interface AuthenticatedUser {
   id: number;
@@ -26,6 +37,7 @@ export interface AuthenticatedUser {
   approvedPersonId: string | null;
   jti: string;
   exp: number;
+  authSource?: 'COOKIE' | 'BEARER';
 }
 
 declare global {
@@ -49,29 +61,33 @@ export function attachRequestId(req: Request, res: Response, next: NextFunction)
 }
 
 /**
- * ดึงค่า Bearer Token จาก Header Authorization
+ * ดึงค่า JWT Token จาก HttpOnly Cookie (`sam_att_session`) เป็นหลัก
+ * หรือจาก Header `Authorization: Bearer <token>` สำหรับ CLI/Test Client
  */
-function extractBearerToken(req: Request): string | null {
+function extractAuthToken(req: Request): { token: string | null; source: 'COOKIE' | 'BEARER' | null } {
+  const cookies = parseCookies(req.headers.cookie);
+  if (cookies[SESSION_COOKIE_NAME]) {
+    return { token: cookies[SESSION_COOKIE_NAME], source: 'COOKIE' };
+  }
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
-    return authHeader.slice(7).trim();
+    return { token: authHeader.slice(7).trim(), source: 'BEARER' };
   }
-  return null;
+  return { token: null, source: null };
 }
 
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
 /**
- * Middleware ตรวจสอบการเข้าสู่ระบบ (Authentication)
- * - ตรวจสอบลายเซ็นและวันหมดอายุของ JWT
- * - ตรวจสอบว่าโทเค็น (jti) อยู่ในตาราง revoked_sessions (ออกจากระบบแล้ว) หรือไม่
- * - ดึงข้อมูลผู้ใช้และสิทธิ์ปัจจุบันจากฐานข้อมูลโดยตรง
+ * Middleware ตรวจสอบการเข้าสู่ระบบ (Authentication + CSRF Verification)
  */
 export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const token = extractBearerToken(req);
-    if (!token) {
+    const { token, source } = extractAuthToken(req);
+    if (!token || !source) {
       res.status(401).json({
         error: 'UNAUTHORIZED',
-        message: 'กรุณาเข้าสู่ระบบก่อนใช้งาน (Missing authentication token)',
+        message: 'กรุณาเข้าสู่ระบบก่อนใช้งาน (Missing authentication session)',
         requestId: req.requestId,
       });
       return;
@@ -89,6 +105,21 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     }
 
     const { payload } = verified;
+
+    // กรณีใช้ HttpOnly Cookie และเป็นการเรียกคำสั่งเปลี่ยนแปลงข้อมูล (POST/PUT/PATCH/DELETE)
+    // ต้องตรวจสอบ CSRF Token ใน Header X-CSRF-Token เสมอ (แก้ไขปัญหา P1 ข้อ 12)
+    if (source === 'COOKIE' && MUTATING_METHODS.has(req.method.toUpperCase())) {
+      const csrfHeader = String(req.headers['x-csrf-token'] || '').trim();
+      if (!verifyCsrfToken(csrfHeader, payload.jti, cfg.auth.jwtSecret)) {
+        res.status(403).json({
+          error: 'CSRF_VALIDATION_FAILED',
+          message: 'คำขอถูกปฏิเสธเนื่องจากรหัสป้องกัน CSRF (X-CSRF-Token) ไม่ถูกต้องหรือขาดหายไป',
+          requestId: req.requestId,
+        });
+        return;
+      }
+    }
+
     // ตรวจสอบว่าโทเค็นนี้ถูกสั่งออกจากระบบ (Revoked) ไปแล้วหรือยัง
     const revoked = await dbQuery<{ jti: string }>(
       'SELECT jti FROM revoked_sessions WHERE jti = ? LIMIT 1',
@@ -134,13 +165,14 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       approvedPersonId: dbUser.approved_person_id,
       jti: payload.jti,
       exp: payload.exp,
+      authSource: source,
     };
     next();
   } catch (err) {
     if (err instanceof DatabaseUnavailableError) {
       res.status(503).json({
         error: 'DB_UNAVAILABLE',
-        message: err.message,
+        message: err.PublicSafeMessage,
         requestId: req.requestId,
       });
       return;
@@ -151,7 +183,6 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 
 /**
  * Middleware ตรวจสอบระดับสิทธิ์ผู้ใช้งาน (Role-Based Access Control)
- * หากผู้ใช้ไม่มีสิทธิ์ที่กำหนด จะบันทึกเหตุการณ์ลงตาราง audit_logs และตอบกลับ HTTP 403
  */
 export function requireRoles(...allowedRoles: UserRole[]) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -191,8 +222,6 @@ export function requireRoles(...allowedRoles: UserRole[]) {
 
 /**
  * Middleware ป้องกันการเข้าถึงข้อมูลข้ามบุคคล (Anti-IDOR Own-Only Enforcement) สำหรับ API /me/*
- * - บล็อกทันทีหากพบความพยายามส่ง personId ของผู้อื่นมาทาง Query, Params หรือ Body
- * - ตรวจสอบว่าบัญชีผู้ใช้ได้รับการผูกกับรหัสบุคลากร (approved_person_id) โดย ADMIN แล้ว
  */
 export async function enforceOwnPersonMapping(
   req: Request,
