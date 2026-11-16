@@ -1,18 +1,32 @@
+/**
+ * ============================================================================
+ * โมดูลการเข้ารหัส ความปลอดภัย และการคำนวณรหัสป้องกันข้อมูลซ้ำ (Crypto & Security Utils)
+ * ไฟล์: backend/src/utils/crypto.ts
+ * ============================================================================
+ * หน้าที่หลัก:
+ * 1. hashPassword / verifyPassword: เข้ารหัสและตรวจสอบรหัสผ่านด้วยอัลกอริทึม scrypt + Salt สุ่ม 16 ไบต์
+ *    พร้อมใช้ timingSafeEqual เพื่อป้องกันการโจมตีแบบวัดเวลา (Timing Attack)
+ * 2. signJwt / verifyJwt: สร้างและตรวจสอบโทเค็น JWT มาตรฐาน HS256 พร้อมรหัสประจำเซสชัน (jti)
+ * 3. normalizeBangkokScanDateTime: ตรวจสอบและจัดรูปแบบวันเวลาสแกนให้เป็นเขตเวลาประเทศไทย (Asia/Bangkok)
+ * 4. computeRawScanDedupKey: คำนวณรหัส SHA-256 จากข้อมูลสแกน 6 ฟิลด์ตามสัญญาของ ScannerReader.exe
+ *    เพื่อป้องกันการนำเข้าข้อมูลสแกนซ้ำซ้อน
+ * 5. sanitizeCsvCell: ป้องกันช่องโหว่ Spreadsheet Formula Injection (CSV Injection) เวลาส่งออกไฟล์ Excel
+ */
 import crypto from 'crypto';
 
 export type UserRole = 'ADMIN' | 'RESPONSIBLE_STAFF' | 'GENERAL_USER';
 
 export interface JwtPayload {
-  sub: string; // username
+  sub: string; // ชื่อบัญชีผู้ใช้งาน (username)
   userId: number;
   role: UserRole;
-  jti: string;
+  jti: string; // รหัสอ้างอิงเซสชันสำหรับตรวจสอบการสั่ง Logout ในตาราง revoked_sessions
   iat: number;
   exp: number;
 }
 
 /**
- * Password Hashing with scrypt + 16-byte random salt.
+ * เข้ารหัสรหัสผ่านด้วยอัลกอริทึม scrypt พร้อมสุ่ม Salt ขนาด 16 ไบต์
  */
 export function hashPassword(plainPassword: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -20,6 +34,9 @@ export function hashPassword(plainPassword: string): string {
   return `scrypt$${salt}$${derivedKey}`;
 }
 
+/**
+ * ตรวจสอบรหัสผ่านที่ผู้ใช้กรอกเทียบกับค่า Hash ที่เก็บในฐานข้อมูลแบบคงที่เวลา (Timing-Safe)
+ */
 export function verifyPassword(plainPassword: string, storedHash: string): boolean {
   try {
     const parts = storedHash.split('$');
@@ -54,6 +71,9 @@ function base64UrlDecode(input: string): string {
   return Buffer.from(padded, 'base64').toString('utf8');
 }
 
+/**
+ * สร้างโทเค็น JWT (HS256) สำหรับผู้ใช้งานที่ล็อกอินสำเร็จ
+ */
 export function signJwt(
   payload: Omit<JwtPayload, 'iat' | 'exp' | 'jti'>,
   secret: string,
@@ -88,6 +108,9 @@ export function signJwt(
   };
 }
 
+/**
+ * ตรวจสอบความถูกต้องของลายเซ็นและวันหมดอายุของโทเค็น JWT
+ */
 export function verifyJwt(token: string, secret: string): { valid: boolean; payload?: JwtPayload; reason?: string } {
   try {
     const parts = token.split('.');
@@ -121,12 +144,10 @@ export function verifyJwt(token: string, secret: string): { valid: boolean; payl
 }
 
 /**
- * Normalizes a scanDateTime string to canonical Asia/Bangkok 'YYYY-MM-DD HH:mm:ss' format.
- * Rejects invalid date formats or out-of-range calendar values.
+ * แปลงและตรวจสอบความถูกต้องของเวลาสแกนให้อยู่ในรูปแบบมาตรฐาน 'YYYY-MM-DD HH:mm:ss' (Asia/Bangkok)
  */
 export function normalizeBangkokScanDateTime(rawDateTime: string): string {
   const trimmed = String(rawDateTime || '').trim();
-  // Match 'YYYY-MM-DD HH:mm:ss' or 'YYYY-MM-DDTHH:mm:ss' (+optional +07:00)
   const match = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-]\d{2}:?\d{2}))?$/.exec(trimmed);
   if (!match) {
     throw new Error(`INVALID_SCAN_DATETIME_FORMAT: ${rawDateTime}`);
@@ -145,7 +166,7 @@ export function normalizeBangkokScanDateTime(rawDateTime: string): string {
 }
 
 /**
- * Computes deterministic SHA-256 deduplication key from the 6-field Scanner Reader EXE contract.
+ * โครงสร้างข้อมูลสแกน 6 ฟิลด์ตามสัญญามาตรฐานของโปรแกรม ScannerReader.exe
  */
 export interface SixFieldScannerEvent {
   machineNo: number;
@@ -156,6 +177,10 @@ export interface SixFieldScannerEvent {
   workCode: number;
 }
 
+/**
+ * คำนวณรหัสป้องกันข้อมูลซ้ำ (SHA-256 Deduplication Key) จากค่าทั้ง 6 ฟิลด์ของเครื่องสแกน
+ * หากดึงข้อมูลสแกนซ้ำจากเครื่องเดิม ระบบจะได้ค่า dedupKey เดิมและข้ามการบันทึกซ้ำโดยอัตโนมัติ
+ */
 export function computeRawScanDedupKey(event: SixFieldScannerEvent): {
   dedupKey: string;
   canonicalBkkTime: string;
@@ -175,8 +200,8 @@ export function computeRawScanDedupKey(event: SixFieldScannerEvent): {
 }
 
 /**
- * Protects CSV exports against Spreadsheet Formula Injection (CSV Injection).
- * Any cell starting with =, +, -, @, Tab, or CR is prefixed with an apostrophe.
+ * ป้องกันช่องโหว่ Spreadsheet Formula Injection (CSV Injection)
+ * หากข้อมูลในช่องเริ่มต้นด้วยเครื่องหมาย =, +, -, @, Tab หรือ CR จะเติมเครื่องหมาย ' นำหน้าเสมอ
  */
 export function sanitizeCsvCell(value: unknown): string {
   if (value === null || value === undefined) {

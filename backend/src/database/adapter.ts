@@ -1,3 +1,20 @@
+/**
+ * ============================================================================
+ * ไฟล์: backend/src/database/adapter.ts
+ * หน้าที่: ตัวจัดการการเชื่อมต่อฐานข้อมูลกลางของระบบ (Database Adapter Layer)
+ * ============================================================================
+ * อธิบายหลักการทำงาน:
+ * 1. รองรับการเชื่อมต่อฐานข้อมูลหลัก MySQL (Production Database: samchuk_attendance_v2)
+ *    ผ่าน Connection Pool (`mysql2/promise`) โดยตั้งค่า Timezone เป็น `+07:00` (Asia/Bangkok)
+ * 2. มีฟังก์ชัน `dbQuery<T>(sql, params)` สำหรับคำสั่ง SELECT และ `dbExecute(sql, params)`
+ *    สำหรับคำสั่ง INSERT / UPDATE / DELETE โดยใช้ Parameterized Query ป้องกัน SQL Injection
+ * 3. รองรับการสร้างตารางเริ่มต้นอัตโนมัติ (Auto-Migration) จากไฟล์ `migrations/001_initial_schema.sql`
+ *    และสร้างข้อมูลตั้งต้น (Seed Default Shifts, Personnel Types, Admin User) หากรันครั้งแรก
+ * 4. ห้ามใช้ข้อมูลจำลอง (No Silent Mock Fallback) ในโหมด Production หาก MySQL ล่มจะโยน
+ *    `DatabaseUnavailableError` (HTTP 503) ทันทีเพื่อให้ผู้ดูแลระบบทราบสาเหตุจริง
+ * ============================================================================
+ */
+
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';

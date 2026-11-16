@@ -1,3 +1,16 @@
+/**
+ * ============================================================================
+ * โมดูลตรวจสอบตัวตนและควบคุมสิทธิ์การเข้าถึง (Authentication & RBAC Middleware)
+ * ไฟล์: backend/src/middleware/auth.ts
+ * ============================================================================
+ * หน้าที่หลัก:
+ * 1. attachRequestId: สร้างรหัสอ้างอิงคำขอ (X-Request-Id) สำหรับตรวจสอบย้อนหลังใน Audit Logs
+ * 2. requireAuth: ตรวจสอบโทเค็น JWT ใน Authorization Header, เช็กว่าเซสชันถูกยกเลิกหรือไม่
+ *    และดึงข้อมูลสิทธิ์ล่าสุดของผู้ใช้จากตาราง users ในฐานข้อมูลเสมอ
+ * 3. requireRoles: บังคับสิทธิ์ 3 ระดับ (ADMIN, RESPONSIBLE_STAFF, GENERAL_USER)
+ * 4. enforceOwnPersonMapping: ป้องกันช่องโหว่ IDOR สำหรับเมนูส่วนตัว (/me/*)
+ *    โดยไม่อนุญาตให้ส่งรหัสบุคลากร (personId) ของคนอื่นเข้ามาในคำขอเด็ดขาด
+ */
 import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
 import { loadConfig } from '../config/env.ts';
@@ -24,6 +37,9 @@ declare global {
   }
 }
 
+/**
+ * แนบหมายเลขประจำคำขอ (Request ID) เข้ากับทุก Request และส่งกลับใน Header X-Request-Id
+ */
 export function attachRequestId(req: Request, res: Response, next: NextFunction): void {
   const existing = req.headers['x-request-id'];
   const requestId = typeof existing === 'string' && existing.trim() ? existing.trim() : crypto.randomUUID();
@@ -32,6 +48,9 @@ export function attachRequestId(req: Request, res: Response, next: NextFunction)
   next();
 }
 
+/**
+ * ดึงค่า Bearer Token จาก Header Authorization
+ */
 function extractBearerToken(req: Request): string | null {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
@@ -40,6 +59,12 @@ function extractBearerToken(req: Request): string | null {
   return null;
 }
 
+/**
+ * Middleware ตรวจสอบการเข้าสู่ระบบ (Authentication)
+ * - ตรวจสอบลายเซ็นและวันหมดอายุของ JWT
+ * - ตรวจสอบว่าโทเค็น (jti) อยู่ในตาราง revoked_sessions (ออกจากระบบแล้ว) หรือไม่
+ * - ดึงข้อมูลผู้ใช้และสิทธิ์ปัจจุบันจากฐานข้อมูลโดยตรง
+ */
 export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const token = extractBearerToken(req);
@@ -64,7 +89,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     }
 
     const { payload } = verified;
-    // Check revoked_sessions
+    // ตรวจสอบว่าโทเค็นนี้ถูกสั่งออกจากระบบ (Revoked) ไปแล้วหรือยัง
     const revoked = await dbQuery<{ jti: string }>(
       'SELECT jti FROM revoked_sessions WHERE jti = ? LIMIT 1',
       [payload.jti]
@@ -78,7 +103,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       return;
     }
 
-    // Always resolve current user role and approved_person_id from database (never trust stale token claims)
+    // ดึงระดับสิทธิ์ (role) และรหัสบุคลากรที่ผูกไว้ (approved_person_id) จากฐานข้อมูลจริงทุกครั้ง
     const users = await dbQuery<{
       id: number;
       username: string;
@@ -124,6 +149,10 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   }
 }
 
+/**
+ * Middleware ตรวจสอบระดับสิทธิ์ผู้ใช้งาน (Role-Based Access Control)
+ * หากผู้ใช้ไม่มีสิทธิ์ที่กำหนด จะบันทึกเหตุการณ์ลงตาราง audit_logs และตอบกลับ HTTP 403
+ */
 export function requireRoles(...allowedRoles: UserRole[]) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     if (!req.user) {
@@ -161,9 +190,9 @@ export function requireRoles(...allowedRoles: UserRole[]) {
 }
 
 /**
- * Prevents IDOR on /me/* endpoints:
- * Rejects any attempt to override target personId via query, params, or body,
- * and ensures the user has an approved PERSON_ID mapped by ADMIN.
+ * Middleware ป้องกันการเข้าถึงข้อมูลข้ามบุคคล (Anti-IDOR Own-Only Enforcement) สำหรับ API /me/*
+ * - บล็อกทันทีหากพบความพยายามส่ง personId ของผู้อื่นมาทาง Query, Params หรือ Body
+ * - ตรวจสอบว่าบัญชีผู้ใช้ได้รับการผูกกับรหัสบุคลากร (approved_person_id) โดย ADMIN แล้ว
  */
 export async function enforceOwnPersonMapping(
   req: Request,

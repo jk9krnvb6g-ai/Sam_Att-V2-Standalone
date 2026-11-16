@@ -1,3 +1,14 @@
+/**
+ * ============================================================================
+ * โมดูลจัดการค่าตัวแปรสภาพแวดล้อม (Environment Configuration Loader)
+ * ไฟล์: backend/src/config/env.ts
+ * ============================================================================
+ * หน้าที่หลัก:
+ * - อ่านค่าตัวแปรจากไฟล์ .env หรือ Environment Variables ของระบบปฏิบัติการ
+ * - กำหนดพอร์ตมาตรฐาน HTTPS 4101, พาธหน้าเว็บ /Sam_Att/ และพาธ API /api/Sam_Att
+ * - บังคับให้ในโหมดใช้งานจริง (NODE_ENV=production) ต้องใช้ฐานข้อมูล MySQL เท่านั้น (Fail-Closed)
+ * - ส่วนในโหมดพัฒนา/ทดสอบ (development/test) อนุญาตให้ใช้ SQLite จำลองโครงสร้าง 20 ตารางได้
+ */
 import dotenv from 'dotenv';
 import path from 'path';
 
@@ -49,10 +60,14 @@ export interface AppConfig {
   };
 }
 
+/**
+ * โหลดและตรวจสอบค่าตั้งค่าระบบทั้งหมด
+ */
 export function loadConfig(): AppConfig {
   const nodeEnv = process.env.NODE_ENV || 'development';
-  // In production, default strictly to mysql fail-closed.
-  // In development/test sandbox where external MySQL daemon is not attached, allow sqlite_sandbox unless SAM_ATT_DB_ENGINE=mysql is explicitly set.
+
+  // ในโหมด Production บังคับใช้ MySQL จริงเท่านั้น
+  // ในโหมด Development/Sandbox ใช้ sqlite_sandbox เว้นแต่ระบุ SAM_ATT_DB_ENGINE=mysql
   const explicitEngine = process.env.SAM_ATT_DB_ENGINE as DbEngineMode | undefined;
   const dbEngine: DbEngineMode = explicitEngine
     ? explicitEngine
@@ -60,6 +75,7 @@ export function loadConfig(): AppConfig {
       ? 'mysql'
       : 'sqlite_sandbox';
 
+  // พอร์ต HTTPS หลักของระบบคือ 4101
   const rawPort = process.env.SAM_ATT_HTTPS_PORT || process.env.PORT;
   const httpsPort = rawPort && rawPort !== '3000' ? Number(rawPort) : 4101;
 

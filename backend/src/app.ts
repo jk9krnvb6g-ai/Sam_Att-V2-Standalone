@@ -1,3 +1,15 @@
+/**
+ * ============================================================================
+ * โมดูลกำหนดเส้นทาง Express Application หลัก (Express App & Router Wiring)
+ * ไฟล์: backend/src/app.ts
+ * ============================================================================
+ * หน้าที่หลัก:
+ * 1. กำหนด Security Headers และผูกหมายเลขคำขอ (Request ID) เข้ากับทุก HTTP Request
+ * 2. เปิดจุดตรวจสอบสถานะระบบ (Health Check) ที่ /api/Sam_Att/health
+ * 3. ผูก Router ของทั้ง 8 โมดูลธุรกิจเข้ากับพาธ /api/Sam_Att/*
+ * 4. เสิร์ฟไฟล์หน้าเว็บ React ที่ผ่านการ Build แล้ว (โฟลเดอร์ dist/) ที่พาธ /Sam_Att/
+ * 5. ดักจับข้อผิดพลาดระดับระบบด้วยกลไก Fail-Closed (ส่งรหัส 503 ทันทีเมื่อฐานข้อมูลล่ม)
+ */
 import fs from 'fs';
 import path from 'path';
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
@@ -17,18 +29,24 @@ export function createExpressApp(options?: { serveStaticBuild?: boolean }): Expr
   const app = express();
   const cfg = loadConfig();
 
+  // ปิดการแสดงชื่อซอฟต์แวร์เซิร์ฟเวอร์ใน Header เพื่อความปลอดภัย
   app.disable('x-powered-by');
+
+  // แนบรหัสอ้างอิงคำขอ (X-Request-Id) และรองรับการรับข้อมูล JSON ขนาดสูงสุด 5MB
   app.use(attachRequestId);
   app.use(express.json({ limit: '5mb' }));
 
-  // Security headers
+  // ตั้งค่า HTTP Security Headers พื้นฐาน
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     next();
   });
 
-  // Public Health Endpoint under /api/Sam_Att/health
+  /**
+   * จุดตรวจสอบสถานะความพร้อมของระบบ (Public Health Endpoint: GET /api/Sam_Att/health)
+   * ทดสอบการคิวรีฐานข้อมูลจริงด้วย SELECT 1 หากฐานข้อมูลล่มจะตอบกลับ HTTP 503 (FAIL_CLOSED)
+   */
   app.get(`${cfg.apiBasePath}/health`, async (req: Request, res: Response) => {
     try {
       const check = await dbQuery<{ ok: number }>('SELECT 1 AS ok');
@@ -65,18 +83,18 @@ export function createExpressApp(options?: { serveStaticBuild?: boolean }): Expr
     }
   });
 
-  // Mount all domain routers under /api/Sam_Att
+  // ผูก Router ของทุกโมดูลเข้าภายใต้พาธ /api/Sam_Att
   const apiPrefix = cfg.apiBasePath;
-  app.use(apiPrefix, authRouter);
-  app.use(apiPrefix, personnelRouter);
-  app.use(apiPrefix, shiftsRouter);
-  app.use(apiPrefix, scannersRouter);
-  app.use(apiPrefix, attendanceRouter);
-  app.use(apiPrefix, reportsRouter);
-  app.use(apiPrefix, hosofficeRouter);
-  app.use(apiPrefix, settingsRouter);
+  app.use(apiPrefix, authRouter);       // โมดูลเข้าสู่ระบบและจัดการผู้ใช้
+  app.use(apiPrefix, personnelRouter);  // โมดูลทะเบียนบุคลากรและซิงก์ HOSOffice
+  app.use(apiPrefix, shiftsRouter);     // โมดูลแม่แบบกะทำงานและมอบหมายตารางเวร
+  app.use(apiPrefix, scannersRouter);   // โมดูลเครื่องสแกนและรับข้อมูลสแกนดิบ 6 ฟิลด์
+  app.use(apiPrefix, attendanceRouter); // โมดูลตรวจสอบเวลาปฏิบัติงานและ Reprocess
+  app.use(apiPrefix, reportsRouter);    // โมดูลรายงานสถิติการมาสายและส่งออก CSV
+  app.use(apiPrefix, hosofficeRouter);  // โมดูลจำลองและส่งข้อมูลกลับ HOSOffice
+  app.use(apiPrefix, settingsRouter);   // โมดูลตั้งค่าระบบ บันทึกความปลอดภัย และอัปเดต
 
-  // Unknown API endpoint handler
+  // กรณีเรียก API ที่ไม่มีอยู่ในระบบ ให้ตอบกลับ HTTP 404 แบบ JSON
   app.use(apiPrefix, (req: Request, res: Response) => {
     res.status(404).json({
       error: 'API_ENDPOINT_NOT_FOUND',
@@ -85,7 +103,7 @@ export function createExpressApp(options?: { serveStaticBuild?: boolean }): Expr
     });
   });
 
-  // Serve Production Frontend Static Build at /Sam_Att/ (and root fallback) when enabled
+  // เสิร์ฟไฟล์หน้าเว็บ Frontend ที่คอมไพล์แล้ว (โฟลเดอร์ dist/) ที่พาธ /Sam_Att/
   const distDir = path.resolve(process.cwd(), 'dist');
   if (options?.serveStaticBuild !== false && fs.existsSync(path.join(distDir, 'index.html'))) {
     app.use('/Sam_Att', express.static(distDir, { index: 'index.html' }));
@@ -96,7 +114,7 @@ export function createExpressApp(options?: { serveStaticBuild?: boolean }): Expr
     });
   }
 
-  // Global Fail-Closed Error Middleware
+  // Middleware ดักจับข้อผิดพลาดส่วนกลาง (Global Fail-Closed Error Handler)
   app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {
     if (err instanceof DatabaseUnavailableError) {
       res.status(503).json({

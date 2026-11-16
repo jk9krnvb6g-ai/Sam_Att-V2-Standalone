@@ -1,31 +1,29 @@
-# Sam_Att V2 Standalone — ระบบบริหารจัดการเวลาปฏิบัติงาน โรงพยาบาลสามชุก
+# ระบบบริหารเวลาปฏิบัติงานบุคลากร โรงพยาบาลสามชุก
+## Samchuk Hospital Attendance Management System — Sam_Att V2 Standalone
 
-ระบบบริหารจัดการเวลาปฏิบัติงานรุ่น Standalone ที่สร้างขึ้นใหม่ทั้งหมดตาม Master Development Specification โดย **ไม่ใช้ Central API Gateway** และ **ไม่แก้ไข GitHub Repository เดิม**
+ระบบบริหารจัดการเวลาปฏิบัติงาน ตารางเวร และข้อมูลสแกนลายนิ้วมือของบุคลากรโรงพยาบาลสามชุก พัฒนาขึ้นใหม่ในรูปแบบ **Standalone Single-Port HTTPS (`4101`)** โดยแยกโครงสร้างโค้ดระหว่าง **`backend/`** และ **`frontend/`** อย่างชัดเจน พร้อมคำอธิบายในซอร์สโค้ดภาษาไทยเพื่อใช้ศึกษาและดูแลรักษาต่อได้ง่าย
 
-## จุดเด่นทางสถาปัตยกรรม
-- **Single-Port HTTPS (`4101`):** เสิร์ฟทั้ง Production React SPA (`/Sam_Att/`) และ Express REST API (`/api/Sam_Att/*`) บนพอร์ต HTTPS `4101` เดียวกัน
-- **Node.js Target `26.13.1`:** กำหนดใน `.nvmrc`, `package.json` (`engines.node`), และ `.github/workflows/ci.yml`
-- **ฐานข้อมูลแยกอิสระ (`samchuk_attendance_v2`):** โครงสร้าง 20 ตารางหลัก (19 ตารางตาม Baseline + `deployment_history`) พร้อมระบบ Fail-Closed ห้ามสลับไปใช้ Mock Data เมื่อฐานข้อมูลหลักหรือ HOSOffice ล่ม
-- **การควบคุมสิทธิ์ 3 ระดับ (`ADMIN`, `RESPONSIBLE_STAFF`, `GENERAL_USER`):** บังคับ Own-Only ที่ฝั่ง Server ด้วย `approved_person_id` ป้องกัน IDOR ทุกช่องทาง
-- **รักษาสัญญา ScannerReader.exe 6 ฟิลด์:** รองรับ `machineNo`, `enrollNumber`, `scanDateTime`, `verifyMode`, `inOutMode`, `workCode` พร้อมการตัดข้อมูลซ้ำด้วย SHA-256 และการเก็บ Raw Scan แบบ Immutable
+---
 
-## คำสั่งติดตั้งและทดสอบ
-```bash
-# 1. ติดตั้งแพ็กเกจตาม lockfile
-npm ci
+## สารบัญเอกสารคู่มือหลัก (5 เอกสารแยกตามหัวข้อ)
 
-# 2. ตรวจสอบ TypeScript Strict Mode
-npm run typecheck
+1. **[1_เกี่ยวกับการติดตั้ง.md](./1_เกี่ยวกับการติดตั้ง.md)**
+   - ความต้องการของระบบ โครงสร้างโฟลเดอร์ การตั้งค่า `.env` การสร้างฐานข้อมูล MySQL และการติดตั้งเป็น Windows Service
+2. **[2_ความสามารถของระบบ.md](./2_ความสามารถของระบบ.md)**
+   - ภาพรวมสถาปัตยกรรมพอร์ตเดียว HTTPS `4101`, สิทธิ์ผู้ใช้งาน 3 ระดับ (`ADMIN`, `RESPONSIBLE_STAFF`, `GENERAL_USER`), รายละเอียดครบทั้ง 11 เมนู และกฎธุรกิจสำคัญ
+3. **[3_ฐานข้อมูล.md](./3_ฐานข้อมูล.md)**
+   - สถาปัตยกรรมฐานข้อมูลแยกอิสระ (`samchuk_attendance_v2` และ `hosoffice` แบบอ่านอย่างเดียว) พร้อมคำอธิบายตารางทั้ง 20 ตารางและความสัมพันธ์ของข้อมูล
+4. **[4_การอัพเดท.md](./4_การอัพเดท.md)**
+   - ขั้นตอนการตรวจสอบความพร้อม (`Preflight Check`) การสำรองข้อมูล การอนุมัติแพ็กเกจด้วยรหัสผ่าน `ADMIN` และขั้นตอนการย้อนกลับเวอร์ชัน (`Rollback`)
+5. **[5_ใช้รันระบบใช้งาน.md](./5_ใช้รันระบบใช้งาน.md)**
+   - คำสั่งสำหรับรันระบบ (`npm start`, `npm run dev`, `npm run build`, `npm test`), บัญชีทดสอบทั้ง 3 ระดับสิทธิ์ และแนวทางการใช้งานประจำวัน
 
-# 3. สร้าง Production Frontend Bundle (/Sam_Att/)
-npm run build
+---
 
-# 4. รัน Database Migration
-npm run db:migrate
+## โครงสร้างหลักของโครงการ (แยก `backend/` และ `frontend/` ชัดเจน)
 
-# 5. รันชุดทดสอบอัตโนมัติ (Integration, RBAC, IDOR, Attendance, Fail-Closed Tests)
-npm test
-
-# 6. เริ่มต้นเซิร์ฟเวอร์ Standalone
-npm start
-```
+- **[`backend/`](./backend/README.md)** — ซอร์สโค้ดฝั่งเซิร์ฟเวอร์ (Node.js + Express + TypeScript + MySQL/SQLite Adapter + ชุดทดสอบอัตโนมัติ)
+- **[`frontend/`](./frontend/README.md)** — ซอร์สโค้ดฝั่งหน้าเว็บผู้ใช้งาน (React 19 + TypeScript + Tailwind CSS รองรับทั้งหน้าจอคอมพิวเตอร์และโทรศัพท์มือถือ)
+- **`database/`** — สคริปต์ SQL สำหรับสร้างตารางฐานข้อมูล (`migrations/`) และข้อมูลตั้งต้นสำหรับทดสอบ (`seeds/`)
+- **`scripts/`** — สคริปต์ PowerShell สำหรับติดตั้ง สำรองข้อมูล อัปเดต กู้คืน และตรวจสอบสถานะบน Windows Server
+- **`docs/`** — เอกสารสถาปัตยกรรม สัญญาการเชื่อมต่อเครื่องสแกน 6 ฟิลด์ และสเปก OpenAPI

@@ -1,3 +1,15 @@
+/**
+ * ============================================================================
+ * โมดูลจัดการเซิร์ฟเวอร์หลัก (Standalone HTTPS Server Bootstrapper)
+ * ไฟล์: backend/src/server.ts
+ * ============================================================================
+ * หน้าที่หลัก:
+ * 1. โหลดค่าตั้งค่าจากไฟล์ .env ผ่านฟังก์ชัน loadConfig()
+ * 2. รันสคริปต์สร้างตารางฐานข้อมูลอัตโนมัติ (runMigrations)
+ * 3. ในโหมดพัฒนา/ทดสอบ (ไม่ใช่ Production) จะเติมข้อมูลทดสอบเริ่มต้น (seedBaselineAndSyntheticData)
+ * 4. ตรวจสอบและสร้างใบรับรองความปลอดภัย HTTPS (Self-Signed TLS Certificate) หากยังไม่มี
+ * 5. เปิดเซิร์ฟเวอร์ HTTPS พอร์ต 4101 พอร์ตเดียวสำหรับให้บริการทั้ง Frontend (/Sam_Att/) และ API (/api/Sam_Att/*)
+ */
 import fs from 'fs';
 import path from 'path';
 import https from 'https';
@@ -10,6 +22,10 @@ import { runMigrations, seedBaselineAndSyntheticData } from './database/adapter.
 import { reprocessAttendanceRange } from './modules/attendance/processor.ts';
 import { createExpressApp } from './app.ts';
 
+/**
+ * ฟังก์ชันตรวจสอบไฟล์ใบรับรองความปลอดภัย HTTPS (server.crt และ server.key)
+ * หากยังไม่มีไฟล์ใบรับรองในโฟลเดอร์ certs/ ระบบจะเรียกใช้ openssl เพื่อสร้างใบรับรองอัตโนมัติ
+ */
 export function ensureTlsCertificates(certPath: string, keyPath: string): void {
   if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
     return;
@@ -35,13 +51,16 @@ export function ensureTlsCertificates(certPath: string, keyPath: string): void {
   ]);
 }
 
+/**
+ * ฟังก์ชันเริ่มต้นการทำงานของเซิร์ฟเวอร์ Sam_Att V2 Standalone
+ */
 export async function startStandaloneServers(): Promise<{
   httpsServer: https.Server;
   previewServer?: http.Server;
 }> {
   const cfg = loadConfig();
 
-  // Initialize database schema migrations and baseline seed in non-prod
+  // ขั้นตอนที่ 1: รันสร้างตารางฐานข้อมูลทั้งหมด 20 ตาราง และเติมข้อมูลตัวอย่างเฉพาะในโหมดพัฒนา
   await runMigrations();
   if (cfg.nodeEnv !== 'production') {
     await seedBaselineAndSyntheticData();
@@ -53,15 +72,16 @@ export async function startStandaloneServers(): Promise<{
     });
   }
 
+  // ขั้นตอนที่ 2: ตรวจสอบความพร้อมของใบรับรอง HTTPS (TLS)
   ensureTlsCertificates(cfg.tlsCertPath, cfg.tlsKeyPath);
 
   const distPath = path.resolve(process.cwd(), 'dist');
   const hasBuiltDist = fs.existsSync(path.join(distPath, 'index.html'));
 
-  // Create primary Express app
+  // ขั้นตอนที่ 3: สร้างอินสแตนซ์ของ Express Application
   const app = createExpressApp({ serveStaticBuild: hasBuiltDist });
 
-  // In development when dist isn't built or for live preview, also attach Vite middleware fallback
+  // ขั้นตอนที่ 4: ในโหมดพัฒนา (Development) ให้เชื่อมต่อ Vite Middleware เพื่อคอมไพล์หน้าเว็บแบบสด
   if (cfg.nodeEnv !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -78,7 +98,7 @@ export async function startStandaloneServers(): Promise<{
     cert: fs.readFileSync(cfg.tlsCertPath),
   };
 
-  // 1. Primary Standalone Single-Port HTTPS Listener on Port 4101 (Frontend /Sam_Att/ + API /api/Sam_Att/*)
+  // ขั้นตอนที่ 5: เปิดพอร์ตหลัก HTTPS 4101 (ให้บริการทั้งหน้าเว็บ /Sam_Att/ และ API /api/Sam_Att/*)
   const httpsServer = https.createServer(tlsOptions, app);
   await new Promise<void>((resolve) => {
     httpsServer.listen(cfg.port, cfg.host, () => {
@@ -89,7 +109,7 @@ export async function startStandaloneServers(): Promise<{
     });
   });
 
-  // 2. In AI Studio container environment, also bind Port 3000 so the live preview iframe works seamlessly
+  // ขั้นตอนที่ 6: ในสภาพแวดล้อมพรีวิว (Port 3000) เปิด HTTP Bridge เพื่อให้หน้าจอ Preview ทำงานได้ทันที
   let previewServer: http.Server | undefined;
   if (cfg.nodeEnv !== 'production' && cfg.previewHttpPort !== cfg.port) {
     previewServer = http.createServer(app);
