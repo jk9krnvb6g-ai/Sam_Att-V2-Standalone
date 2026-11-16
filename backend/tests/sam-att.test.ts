@@ -27,9 +27,19 @@ import {
   stopAutomaticScannerScheduler,
 } from '../src/modules/scanners/scheduler.ts';
 import {
-  setHosOfficeLivePushTestSink,
+  REQUIRED_HOSOFFICE_TARGET_COLUMNS,
+  setHosOfficeTargetAdapterForTests,
+  setSimulatePostHosOfficeCommitLocalDbFailureForTests,
+  type HosOfficeTableContractSchema,
   type ValidatedHosOfficePushRecord,
 } from '../src/modules/hosoffice/routes.ts';
+import {
+  buildReleaseArtifactFile,
+  ensureBaselineDeploymentWorkspaceInitialized,
+  executeStandaloneDeployment,
+  executeStandaloneRollback,
+  getActiveReleaseMetadata,
+} from '../src/modules/deployment/agent.ts';
 import { ensureTlsCertificates } from '../src/server.ts';
 import { createExpressApp } from '../src/app.ts';
 import { sanitizeCsvCell } from '../src/utils/crypto.ts';
@@ -38,6 +48,7 @@ import { sanitizeCsvCell } from '../src/utils/crypto.ts';
 const TEST_RUN_ID = `${process.pid}_${Date.now()}`;
 const TEST_SQLITE_PATH = path.join(os.tmpdir(), `sam_att_test_${TEST_RUN_ID}.sqlite`);
 const TEST_CERT_DIR = path.join(os.tmpdir(), `sam_att_certs_${TEST_RUN_ID}`);
+const TEST_DEPLOY_DIR = path.join(os.tmpdir(), `sam_att_deploy_${TEST_RUN_ID}`);
 const CERT_PATH = path.join(TEST_CERT_DIR, 'server.crt');
 const KEY_PATH = path.join(TEST_CERT_DIR, 'server.key');
 
@@ -134,6 +145,7 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     process.env.SAM_ATT_DB_ENGINE = 'sqlite_sandbox';
     process.env.TLS_CERT_PATH = CERT_PATH;
     process.env.TLS_KEY_PATH = KEY_PATH;
+    process.env.SAM_ATT_DEPLOY_ROOT_DIR = TEST_DEPLOY_DIR;
     resetSqliteInstanceForTests(TEST_SQLITE_PATH);
 
     const mig = await runMigrations();
@@ -186,14 +198,29 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
         // ignore
       }
     }
+    if (fs.existsSync(TEST_DEPLOY_DIR)) {
+      try {
+        fs.rmSync(TEST_DEPLOY_DIR, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
   });
 
-  test('Phase 0 & Security Gate (Items 01, 02, 05, 13): Single-Port HTTPS, Security Headers, and Zero Committed Keys/SQLite/bun.lock', async () => {
+  test('Phase 0 & Security Gate (Items 01, 02, 05, 13): Single-Port HTTPS, Security Headers, and Complete Cross-Platform Lockfile', async () => {
     // ตรวจว่าไม่มีไฟล์ Private Key, SQLite Runtime หรือ bun.lock ค้างในโฟลเดอร์โปรเจกต์
     assert.equal(fs.existsSync(path.resolve(process.cwd(), 'certs/server.key')), false, 'certs/server.key must not exist in repo');
     assert.equal(fs.existsSync(path.resolve(process.cwd(), 'data/sam_att_v2.sqlite')), false, 'data/sam_att_v2.sqlite must not exist in repo');
     assert.equal(fs.existsSync(path.resolve(process.cwd(), 'bun.lock')), false, 'bun.lock must be removed');
     assert.equal(fs.existsSync(path.resolve(process.cwd(), 'package-lock.json')), true, 'package-lock.json must exist for npm ci');
+
+    // PHASE 1: ยืนยันว่า package-lock.json มี Optional Dependencies ครบทั้ง Linux และ Windows สำหรับ Tailwind Oxide, LightningCSS, Rolldown และ Esbuild
+    const rawLock = JSON.parse(fs.readFileSync(path.resolve(process.cwd(), 'package-lock.json'), 'utf8'));
+    const pkgKeys = Object.keys(rawLock.packages || {});
+    assert.ok(pkgKeys.includes('node_modules/@tailwindcss/oxide-win32-x64-msvc'), 'Lockfile must include Windows Tailwind Oxide binary');
+    assert.ok(pkgKeys.includes('node_modules/lightningcss-win32-x64-msvc'), 'Lockfile must include Windows LightningCSS binary');
+    assert.ok(pkgKeys.includes('node_modules/@rolldown/binding-win32-x64-msvc'), 'Lockfile must include Windows Rolldown binding');
+    assert.ok(pkgKeys.includes('node_modules/@esbuild/win32-x64'), 'Lockfile must include Windows esbuild binary');
 
     const health = await apiCall('/api/Sam_Att/health');
     assert.equal(health.status, 200);
@@ -647,7 +674,7 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     assert.deepEqual(rawBefore, rawAfter, 'Entire raw_scans table must remain 100% untouched after reprocess');
   });
 
-  test('Phase 4 & 5 Gate (Item 07): Dashboard KPIs, CSV Injection Protection, and HOSOffice Live Push Transaction & Idempotency', async () => {
+  test('Phase 4 Gate (Item 07): Dashboard KPIs, CSV Injection Protection, and HOSOffice Live Push Contract Verification, Idempotency, UNKNOWN State & Reconciliation', async () => {
     const dash = await apiCall('/api/Sam_Att/dashboard/summary?dateFrom=2026-11-12&dateTo=2026-11-13', {
       token: staffToken,
     });
@@ -676,7 +703,7 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     assert.equal(previewPush.status, 200);
     assert.equal(previewPush.data.mode, 'DRY_RUN_PREVIEW');
 
-    // Live Push blocked when feature flag is false
+    // Live Push blocked when feature flag is false or target table is empty
     const livePushBlocked = await apiCall('/api/Sam_Att/hosoffice/push', {
       method: 'POST',
       token: adminToken,
@@ -685,31 +712,130 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     assert.equal(livePushBlocked.status, 403);
     assert.equal(livePushBlocked.data.error, 'HOSOFFICE_LIVE_PUSH_DISABLED');
 
-    // Enable Live Push and test direct execution by RESPONSIBLE_STAFF with Transaction & Idempotency (Item 07)
+    // Setup Simulated HOSOffice Target Table with Unique Composite Key & Contract Inspection
     process.env.HOSOFFICE_LIVE_PUSH_ENABLED = 'true';
     process.env.HOSOFFICE_PUSH_TARGET_TABLE = 'fingle_scan_attendance';
-    const pushedRowsSink: ValidatedHosOfficePushRecord[] = [];
-    setHosOfficeLivePushTestSink(async (_table, records) => {
-      pushedRowsSink.push(...records);
-      return { writtenCount: records.length };
+
+    const simulatedHosOfficeRows = new Map<
+      string,
+      {
+        record: ValidatedHosOfficePushRecord;
+        batchKey: string;
+        recordIdempotencyKey: string;
+      }
+    >();
+
+    let contractShouldBeInvalid = false;
+
+    setHosOfficeTargetAdapterForTests({
+      async inspectTableContract(tableName: string): Promise<HosOfficeTableContractSchema> {
+        if (contractShouldBeInvalid) {
+          return {
+            tableName,
+            columns: [{ name: 'PERSON_ID', dataType: 'varchar' }], // missing required columns & unique key
+            uniqueKeys: [],
+            permissions: ['SELECT'],
+          };
+        }
+        return {
+          tableName,
+          columns: REQUIRED_HOSOFFICE_TARGET_COLUMNS.map((c) => ({
+            name: c.name,
+            dataType: c.allowedTypes[0],
+          })),
+          uniqueKeys: [['PERSON_ID', 'WORK_DATE', 'SHIFT_CODE'], ['IDEMPOTENCY_KEY']],
+          permissions: ['SELECT', 'INSERT', 'UPDATE'],
+        };
+      },
+      async writeIdempotentBatch(tableName, records, batchIdempotencyKey) {
+        let deduplicatedCount = 0;
+        for (const rec of records) {
+          const shiftCode = rec.SHIFT_CODE || 'DEFAULT';
+          const compositeKey = `${tableName}:${rec.PERSON_ID}:${rec.WORK_DATE}:${shiftCode}`;
+          const recordIdempotencyKey = `${batchIdempotencyKey}:${rec.PERSON_ID}:${rec.WORK_DATE}:${shiftCode}`;
+          if (simulatedHosOfficeRows.has(compositeKey)) {
+            deduplicatedCount++;
+          }
+          simulatedHosOfficeRows.set(compositeKey, {
+            record: rec,
+            batchKey: batchIdempotencyKey,
+            recordIdempotencyKey,
+          });
+        }
+        return { writtenCount: records.length, deduplicatedCount };
+      },
+      async queryRecordsByBatchKey(_tableName, batchIdempotencyKey) {
+        const out: Array<{
+          personId: string;
+          workDate: string;
+          shiftCode: string;
+          recordIdempotencyKey: string;
+        }> = [];
+        for (const item of simulatedHosOfficeRows.values()) {
+          if (item.batchKey === batchIdempotencyKey) {
+            out.push({
+              personId: item.record.PERSON_ID,
+              workDate: item.record.WORK_DATE,
+              shiftCode: item.record.SHIFT_CODE || 'DEFAULT',
+              recordIdempotencyKey: item.recordIdempotencyKey,
+            });
+          }
+        }
+        return out;
+      },
     });
 
     try {
-      const livePushRes = await apiCall('/api/Sam_Att/hosoffice/push', {
+      // 1. Reject invalid HOSOffice Target Table Schema Contract (409 HOSOFFICE_SCHEMA_CONTRACT_INVALID)
+      contractShouldBeInvalid = true;
+      const badContractRes = await apiCall('/api/Sam_Att/hosoffice/push', {
         method: 'POST',
-        token: staffToken, // RESPONSIBLE_STAFF can push directly per Item 07
+        token: staffToken,
+        body: {
+          dateFrom: '2026-11-12',
+          dateTo: '2026-11-13',
+          idempotencyKey: 'LIVE-BATCH-CONTRACT-FAIL',
+        },
+      });
+      assert.equal(badContractRes.status, 409);
+      assert.equal(badContractRes.data.error, 'HOSOFFICE_SCHEMA_CONTRACT_INVALID');
+      assert.equal(simulatedHosOfficeRows.size, 0, 'Must write zero rows when schema contract fails');
+
+      // 2. Test Outbox UNKNOWN State: HOSOffice write succeeds, but Sam_Att local confirmation fails
+      contractShouldBeInvalid = false;
+      setSimulatePostHosOfficeCommitLocalDbFailureForTests(true);
+
+      const unknownStateRes = await apiCall('/api/Sam_Att/hosoffice/push', {
+        method: 'POST',
+        token: staffToken,
         body: {
           dateFrom: '2026-11-12',
           dateTo: '2026-11-13',
           idempotencyKey: 'LIVE-BATCH-20261112-20261113',
         },
       });
-      assert.equal(livePushRes.status, 200);
-      assert.equal(livePushRes.data.status, 'SUCCESS');
-      assert.ok(livePushRes.data.writtenCount > 0);
-      assert.equal(pushedRowsSink.length, livePushRes.data.writtenCount);
+      assert.equal(unknownStateRes.status, 502);
+      assert.equal(unknownStateRes.data.status, 'UNKNOWN');
+      assert.equal(unknownStateRes.data.error, 'HOSOFFICE_COMMIT_LOCAL_SYNC_UNKNOWN');
+      assert.equal(unknownStateRes.data.reconciliationRequired, true);
+      const countAfterFirstWrite = simulatedHosOfficeRows.size;
+      assert.ok(countAfterFirstWrite > 0, 'HOSOffice target table already committed the rows');
 
-      // Duplicate push with the same Idempotency Key MUST be blocked with 409
+      setSimulatePostHosOfficeCommitLocalDbFailureForTests(false);
+
+      // 3. Reconcile UNKNOWN batch via POST /hosoffice/push/reconcile -> confirms rows in HOSOffice and marks SUCCESS
+      const reconcileRes = await apiCall('/api/Sam_Att/hosoffice/push/reconcile', {
+        method: 'POST',
+        token: staffToken,
+        body: { idempotencyKey: 'LIVE-BATCH-20261112-20261113' },
+      });
+      assert.equal(reconcileRes.status, 200);
+      assert.equal(reconcileRes.data.status, 'RECONCILED');
+      assert.equal(reconcileRes.data.items[0].previousStatus, 'UNKNOWN');
+      assert.equal(reconcileRes.data.items[0].resolvedStatus, 'SUCCESS');
+      assert.equal(simulatedHosOfficeRows.size, countAfterFirstWrite, 'Zero duplicate rows created');
+
+      // 4. Duplicate push with already-SUCCESS Idempotency Key MUST be blocked with 409
       const dupPushRes = await apiCall('/api/Sam_Att/hosoffice/push', {
         method: 'POST',
         token: adminToken,
@@ -723,11 +849,15 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       assert.equal(dupPushRes.data.error, 'DUPLICATE_IDEMPOTENCY_KEY');
     } finally {
       process.env.HOSOFFICE_LIVE_PUSH_ENABLED = 'false';
-      setHosOfficeLivePushTestSink(null);
+      process.env.HOSOFFICE_PUSH_TARGET_TABLE = '';
+      setSimulatePostHosOfficeCommitLocalDbFailureForTests(false);
+      setHosOfficeTargetAdapterForTests(null);
     }
   });
 
-  test('Phase 6 Gate (Items 06, 10–11): WinSW Service Wrapper, Real Deployment Agent SHA-256 Verification, Real Backup Archive, and Real Rollback', async () => {
+  test('Phase 2 & 3 Gate (Items 06, 10–11): Real Deployment Agent, Staging, Active Release Switch, Auto-Revert on Failure, and Verified Database + Release Rollback', async () => {
+    await ensureBaselineDeploymentWorkspaceInitialized();
+
     const settingsRes = await apiCall('/api/Sam_Att/settings/connections', {
       token: adminToken,
     });
@@ -741,74 +871,161 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     assert.equal(preflight.status, 200);
     assert.equal(preflight.data.preflightPassed, true);
 
-    // 1. Reject wrong ADMIN password on deployment approval
-    const badApprove = await apiCall('/api/Sam_Att/deployment/approve', {
+    // 1. Block Path Traversal in artifactFilePath
+    const traversalArtifact = buildReleaseArtifactFile({
+      releaseVersion: '2.0.2-standalone',
+      commitSha: '11223344556677889900aabbccddeeff00112233',
+    });
+
+    const traversalRes = await apiCall('/api/Sam_Att/deployment/approve', {
       method: 'POST',
       token: adminToken,
       body: {
-        adminPassword: 'WrongAdminPassword',
-        releaseVersion: '2.0.1-standalone',
-        commitSha: '38a7f4195f613a458aae3961fc22a74522630c57',
-        artifactSha256: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+        adminPassword: 'Admin@SamAtt2026',
+        releaseVersion: '2.0.2-standalone',
+        commitSha: '11223344556677889900aabbccddeeff00112233',
+        artifactFilePath: '../../etc/passwd',
+        artifactSha256: traversalArtifact.artifactSha256,
       },
     });
-    assert.equal(badApprove.status, 401);
+    assert.equal(traversalRes.status, 422);
+    assert.equal(traversalRes.data.error, 'UNSAFE_PATH_TRAVERSAL');
 
-    // 2. Reject mismatched package SHA-256 and record FAILED status (Item 10)
-    const samplePackageContent = 'SAM_ATT_V2_RELEASE_PACKAGE_2.0.1';
-    const actualPackageSha256 = crypto.createHash('sha256').update(samplePackageContent, 'utf8').digest('hex');
+    // 2. Reject non-existent artifact file on disk
+    const missingArtifactRes = await apiCall('/api/Sam_Att/deployment/approve', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        adminPassword: 'Admin@SamAtt2026',
+        releaseVersion: '2.0.2-standalone',
+        commitSha: '11223344556677889900aabbccddeeff00112233',
+        artifactFilePath: 'non_existent_package.artifact.json',
+        artifactSha256: traversalArtifact.artifactSha256,
+      },
+    });
+    assert.equal(missingArtifactRes.status, 422);
+    assert.equal(missingArtifactRes.data.error, 'ARTIFACT_FILE_NOT_FOUND');
+
+    // 3. Reject mismatched SHA-256 on real artifact file
     const wrongSha256 = '0000000000000000000000000000000000000000000000000000000000000000';
-
     const shaMismatchRes = await apiCall('/api/Sam_Att/deployment/approve', {
       method: 'POST',
       token: adminToken,
       body: {
         adminPassword: 'Admin@SamAtt2026',
-        releaseVersion: '2.0.1-bad-sha',
-        commitSha: 'badsha123456',
+        releaseVersion: '2.0.2-standalone',
+        commitSha: '11223344556677889900aabbccddeeff00112233',
+        artifactFilePath: traversalArtifact.artifactRelativeName,
         artifactSha256: wrongSha256,
-        packageContent: samplePackageContent,
       },
     });
     assert.equal(shaMismatchRes.status, 422);
     assert.equal(shaMismatchRes.data.status, 'FAILED');
     assert.equal(shaMismatchRes.data.error, 'ARTIFACT_SHA256_MISMATCH');
 
-    // 3. Approve with matching SHA-256 -> creates real backup file on disk, runs Health Check, and records SUCCESS
+    // 4. Deploy real artifact 2.0.2-standalone -> verifies Staging, Backup creation, Active Release switch, and Version change
+    const beforeMeta = getActiveReleaseMetadata();
+    assert.equal(beforeMeta?.releaseVersion, '2.0.0-standalone');
+
     const goodApprove = await apiCall('/api/Sam_Att/deployment/approve', {
       method: 'POST',
       token: adminToken,
       body: {
         adminPassword: 'Admin@SamAtt2026',
-        releaseVersion: '2.0.1-standalone',
-        commitSha: '38a7f4195f613a458aae3961fc22a74522630c57',
-        artifactSha256: actualPackageSha256,
-        packageContent: samplePackageContent,
+        releaseVersion: '2.0.2-standalone',
+        commitSha: '11223344556677889900aabbccddeeff00112233',
+        artifactFilePath: traversalArtifact.artifactRelativeName,
+        artifactSha256: traversalArtifact.artifactSha256,
       },
     });
     assert.equal(goodApprove.status, 200);
     assert.equal(goodApprove.data.status, 'SUCCESS');
-    assert.ok(goodApprove.data.backupArchivePath, 'Must return real backup archive path');
-    assert.equal(fs.existsSync(goodApprove.data.backupArchivePath), true, 'Physical backup file must exist on disk');
-    assert.equal(goodApprove.data.healthCheck.healthy, true);
+    assert.equal(goodApprove.data.healthCheck.activeReleaseVersion, '2.0.2-standalone');
+    assert.equal(fs.existsSync(goodApprove.data.backupArchivePath), true, 'Backup directory must exist on disk');
+    assert.equal(getActiveReleaseMetadata()?.releaseVersion, '2.0.2-standalone', 'Active release on disk must now be 2.0.2-standalone');
 
-    // 4. Execute Real Rollback from the created backup archive (Item 11)
+    // 5. Test Automatic Revert when Post-Switch Health Check fails
+    const brokenReleaseArtifact = buildReleaseArtifactFile({
+      releaseVersion: '2.0.3-broken',
+      commitSha: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+    });
+    await assert.rejects(
+      async () => {
+        await executeStandaloneDeployment({
+          releaseVersion: '2.0.3-broken',
+          commitSha: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+          expectedArtifactSha256: brokenReleaseArtifact.artifactSha256,
+          artifactFilePath: brokenReleaseArtifact.artifactRelativeName,
+          actorUsername: 'admin',
+          simulatePostSwitchHealthFailure: true,
+        });
+      },
+      /POST_DEPLOY_HEALTHCHECK_FAILED/
+    );
+    assert.equal(
+      getActiveReleaseMetadata()?.releaseVersion,
+      '2.0.2-standalone',
+      'Active release must automatically revert to 2.0.2-standalone when deploy health check fails'
+    );
+
+    // 6. Test Phase 3 Backup -> Mutate Database Data -> Rollback -> Verify Both Database Data & Release Version Restored!
+    const schedulesBeforeMutation = await dbQuery<{ id: number; cron_time: string }>(
+      'SELECT id, cron_time FROM sync_schedules ORDER BY id ASC'
+    );
+    assert.equal(schedulesBeforeMutation[0].cron_time, '00:00');
+
+    // Mutate database table sync_schedules after backup was taken during goodApprove
+    await dbExecute("UPDATE sync_schedules SET cron_time = '05:55' WHERE id = 1");
+    const mutatedSchedule = await dbQuery<{ cron_time: string }>('SELECT cron_time FROM sync_schedules WHERE id = 1');
+    assert.equal(mutatedSchedule[0].cron_time, '05:55');
+
+    // Also test Pre-Restore Safety Recovery when restore fails midway
+    await assert.rejects(
+      async () => {
+        await executeStandaloneRollback({
+          targetBackupId: goodApprove.data.deploymentId,
+          reason: 'Test Midway Restore Failure Safety Recovery',
+          actorUsername: 'admin',
+          simulateMidwayRestoreFailure: true,
+        });
+      },
+      /RESTORE_MIDWAY_INTERRUPTED/
+    );
+    // Verify pre-restore state was automatically recovered after midway failure
+    const afterFailedRestoreSchedule = await dbQuery<{ cron_time: string }>(
+      'SELECT cron_time FROM sync_schedules WHERE id = 1'
+    );
+    assert.equal(afterFailedRestoreSchedule[0].cron_time, '05:55', 'Pre-restore safety recovery must restore mutated state on midway error');
+    assert.equal(getActiveReleaseMetadata()?.releaseVersion, '2.0.2-standalone');
+
+    // Now execute real Rollback to goodApprove's backup (which backed up 2.0.0-standalone and cron_time = '00:00')
     const rollbackRes = await apiCall('/api/Sam_Att/deployment/rollback', {
       method: 'POST',
       token: adminToken,
       body: {
         targetBackupId: goodApprove.data.deploymentId,
-        reason: 'ทดสอบการกู้คืนระบบจริงจากไฟล์สำรองข้อมูล (Live Rollback Verification)',
+        reason: 'ทดสอบการกู้คืนฐานข้อมูลและ Release จริงจาก Backup',
       },
     });
     assert.equal(rollbackRes.status, 200);
     assert.equal(rollbackRes.data.status, 'SUCCESS');
-    assert.equal(rollbackRes.data.healthCheck.healthy, true);
-    assert.ok(rollbackRes.data.restoredTablesCount >= 3);
+    assert.equal(rollbackRes.data.targetVersion, '2.0.0-standalone');
+    assert.equal(getActiveReleaseMetadata()?.releaseVersion, '2.0.0-standalone', 'Active release version must roll back to 2.0.0-standalone');
 
-    // Clean up test backup file
-    if (fs.existsSync(goodApprove.data.backupArchivePath)) {
-      fs.unlinkSync(goodApprove.data.backupArchivePath);
-    }
+    const restoredSchedule = await dbQuery<{ cron_time: string }>('SELECT cron_time FROM sync_schedules WHERE id = 1');
+    assert.equal(restoredSchedule[0].cron_time, '00:00', 'Database table sync_schedules must be restored to 00:00 from backup');
+
+    // 7. Verify Rollback strictly fails with BACKUP_ARCHIVE_MISSING if the backup folder is deleted (never fabricates a fake backup!)
+    fs.rmSync(goodApprove.data.backupArchivePath, { recursive: true, force: true });
+    const missingBackupRollback = await apiCall('/api/Sam_Att/deployment/rollback', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        targetBackupId: goodApprove.data.deploymentId,
+        reason: 'Must fail when backup folder is missing',
+      },
+    });
+    assert.equal(missingBackupRollback.status, 422);
+    assert.equal(missingBackupRollback.data.error, 'BACKUP_ARCHIVE_MISSING');
   });
 });

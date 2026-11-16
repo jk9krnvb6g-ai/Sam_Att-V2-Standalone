@@ -71,10 +71,9 @@ export function AdminViews({
   const [deployStatus, setDeployStatus] = useState<any>(null);
   const [preflightData, setPreflightData] = useState<any>(null);
   const [adminPassword, setAdminPassword] = useState('');
-  const [commitSha, setCommitSha] = useState('38a7f4195f613a458aae3961fc22a74522630c57');
-  const [artifactSha256, setArtifactSha256] = useState(
-    'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'
-  );
+  const [commitSha, setCommitSha] = useState('a1b2c3d4e5f60718293a4b5c6d7e8f9012345678');
+  const [artifactFilePath, setArtifactFilePath] = useState('sam_att_release_2.0.1-standalone.artifact.json');
+  const [artifactSha256, setArtifactSha256] = useState('');
 
   // Sorting & Pagination for Audit Logs
   const [sortKey, setSortKey] = useState('created_at');
@@ -104,6 +103,11 @@ export function AdminViews({
       } else if (mode === 'deployment') {
         const res = await apiRequest('/deployment/status');
         setDeployStatus(res);
+        if (res?.candidateArtifact) {
+          setCommitSha(res.candidateArtifact.commitSha || 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678');
+          setArtifactFilePath(res.candidateArtifact.artifactFilePath || 'sam_att_release_2.0.1-standalone.artifact.json');
+          setArtifactSha256((prev) => prev || res.candidateArtifact.artifactSha256 || '');
+        }
       }
     } catch (err) {
       if (err instanceof ApiClientError) {
@@ -198,6 +202,7 @@ export function AdminViews({
           adminPassword,
           releaseVersion: '2.0.1-standalone',
           commitSha,
+          artifactFilePath,
           artifactSha256,
         }),
       });

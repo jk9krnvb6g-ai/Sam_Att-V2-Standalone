@@ -40,14 +40,26 @@ export function createExpressApp(options?: { serveStaticBuild?: boolean }): Expr
   app.use(express.json({ limit: '5mb' }));
 
   // ตั้งค่า HTTP Security Headers มาตรฐานระดับองค์กร (แก้ไขปัญหา P1 ข้อ 13)
+  // หมายเหตุ: ในโหมด Production และทุก API Endpoint บังคับ X-Frame-Options: DENY และ frame-ancestors 'none'
+  // ส่วนหน้าเว็บ HTML ในโหมด Development Preview อนุญาตให้แสดงผลใน iFrame ของระบบพรีวิวได้
   app.use((req, res, next) => {
+    const isApiRoute = req.path.startsWith(cfg.apiBasePath) || req.path.startsWith('/api/');
+    const disallowFraming = cfg.nodeEnv === 'production' || isApiRoute;
+
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
+    if (disallowFraming) {
+      res.setHeader('X-Frame-Options', 'DENY');
+    }
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+
+    const frameAncestorsDirective = disallowFraming
+      ? "frame-ancestors 'none'"
+      : "frame-ancestors 'self' https://*.google.com https://*.googleapis.com https://*.run.app";
+
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+      `default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' ws: wss:; ${frameAncestorsDirective}; base-uri 'self'; form-action 'self'`
     );
 
     if (req.secure || req.headers['x-forwarded-proto'] === 'https' || cfg.nodeEnv === 'production') {

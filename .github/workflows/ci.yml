@@ -2,7 +2,7 @@ name: Sam_Att V2 Standalone CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [ main, develop, 'fix/**' ]
   pull_request:
     branches: [ main ]
 
@@ -13,20 +13,20 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Security Gate — Verify Zero Committed Private Keys or Runtime SQLite Databases
+      - name: Security Gate — Verify Zero Committed Private Keys, SQLite Databases, or Conflicting Lockfiles
         run: |
           if [ -f "certs/server.key" ] || [ -f "data/sam_att_v2.sqlite" ] || [ -f "bun.lock" ]; then
             echo "SECURITY VIOLATION: Private keys, SQLite runtime files, or conflicting lockfiles must not be committed!"
             exit 1
           fi
 
-      - name: Setup Node.js (Target 26.13.1 from .nvmrc)
+      - name: Setup Node.js (from .nvmrc)
         uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
 
-      - name: Install Locked Dependencies (npm ci)
+      - name: Clean Install Locked Dependencies (npm ci)
         run: npm ci
 
       - name: TypeScript Strict Verification

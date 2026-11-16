@@ -114,8 +114,8 @@ export function loadConfig(): AppConfig {
       ? 'mysql'
       : 'sqlite_sandbox';
 
-  const rawPort = process.env.SAM_ATT_HTTPS_PORT || process.env.PORT;
-  const httpsPort = rawPort && rawPort !== '3000' ? Number(rawPort) : 4101;
+  const rawPort = process.env.SAM_ATT_HTTPS_PORT;
+  const httpsPort = rawPort ? Number(rawPort) : 4101;
 
   const rawJwtSecret = process.env.JWT_SECRET?.trim();
   const jwtExplicit = isValidConfiguredSecret(rawJwtSecret, 32);

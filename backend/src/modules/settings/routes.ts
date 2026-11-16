@@ -18,8 +18,10 @@ import { verifyPassword } from '../../utils/crypto.ts';
 import { requireAuth, requireRoles } from '../../middleware/auth.ts';
 import { writeAuditLog } from '../audit/service.ts';
 import {
+  ensureBaselineDeploymentWorkspaceInitialized,
   executeStandaloneDeployment,
   executeStandaloneRollback,
+  getActiveReleaseMetadata,
   isDeploymentInProgress,
 } from '../deployment/agent.ts';
 
@@ -434,16 +436,16 @@ settingsRouter.post(
   async (req, res, next) => {
     try {
       const password = String(req.body?.adminPassword || '');
-      const releaseVersion = String(req.body?.releaseVersion || '2.0.0-standalone').trim();
+      const releaseVersion = String(req.body?.releaseVersion || '2.0.1-standalone').trim();
       const commitSha = String(req.body?.commitSha || '').trim();
       const artifactSha256 = String(req.body?.artifactSha256 || '').trim();
-      const packageContent = typeof req.body?.packageContent === 'string' ? req.body.packageContent : undefined;
-      const artifactFilePath = typeof req.body?.artifactFilePath === 'string' ? req.body.artifactFilePath : undefined;
+      const artifactFilePath = String(req.body?.artifactFilePath || '').trim();
 
-      if (!password || !commitSha || !/^[a-f0-9]{64}$/i.test(artifactSha256)) {
+      if (!password || !commitSha || !artifactFilePath || !/^[a-f0-9]{64}$/i.test(artifactSha256)) {
         res.status(400).json({
           error: 'VALIDATION_ERROR',
-          message: 'ต้องยืนยันรหัสผ่าน ADMIN, รหัส Commit SHA และค่า SHA-256 (64 hex chars) ของแพ็กเกจ',
+          message:
+            'ต้องระบุรหัสผ่าน ADMIN, รหัส Commit SHA, พาธไฟล์ Artifact จริง (artifactFilePath) และค่า SHA-256 (64 hex chars)',
           requestId: req.requestId,
         });
         return;
@@ -478,7 +480,6 @@ settingsRouter.post(
           releaseVersion,
           commitSha,
           expectedArtifactSha256: artifactSha256,
-          packageContent,
           artifactFilePath,
           actorUsername: req.user!.username,
         });
@@ -504,10 +505,12 @@ settingsRouter.post(
           artifactSha256: outcome.artifactSha256,
           backupArchivePath: outcome.backupArchivePath,
           backupSha256: outcome.backupSha256,
+          stagedFileCount: outcome.stagedFileCount,
           healthCheck: outcome.healthCheck,
         });
       } catch (deployErr: unknown) {
         const code = (deployErr as { code?: string })?.code || 'DEPLOYMENT_EXECUTION_FAILED';
+        const statusCode = (deployErr as { statusCode?: number })?.statusCode || 422;
         const message = deployErr instanceof Error ? deployErr.message : String(deployErr);
 
         await writeAuditLog({
@@ -523,7 +526,7 @@ settingsRouter.post(
           detail: { message },
         });
 
-        res.status(422).json({
+        res.status(statusCode).json({
           status: 'FAILED',
           error: code,
           message,
@@ -571,6 +574,7 @@ settingsRouter.post(
           backupArchivePath: outcome.restoredFromPath,
           restoredTablesCount: outcome.restoredTablesCount,
           healthCheck: outcome.healthCheck,
+          healthCheckPassed: outcome.healthCheck.healthy,
         });
       } catch (rbErr: unknown) {
         const code = (rbErr as { code?: string })?.code || 'ROLLBACK_FAILED';
@@ -589,3 +593,4 @@ settingsRouter.post(
     }
   }
 );
+

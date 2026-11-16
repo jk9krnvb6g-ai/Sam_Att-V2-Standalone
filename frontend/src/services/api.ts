@@ -49,8 +49,10 @@ const API_BASE = '/api/Sam_Att';
 const LEGACY_LOCALSTORAGE_JWT_KEY = 'sam_att_v2_token';
 const CSRF_COOKIE_NAME = 'sam_att_csrf';
 
-// เก็บเฉพาะ CSRF Token ในหน่วยความจำ (ไม่เก็บ JWT ลง localStorage เด็ดขาด)
+// เก็บเฉพาะในหน่วยความจำ (In-Memory Only) ห้ามเก็บ JWT ลง localStorage เด็ดขาด (แก้ไข P1 ข้อ 12)
+// รองรับทั้ง HttpOnly Cookie (โหมดใช้งานจริง) และ In-Memory Bearer Fallback เมื่อเปิดผ่าน Cross-Origin Preview iFrame ที่เบราว์เซอร์บล็อก 3rd-party Cookie
 let inMemoryCsrfToken: string | null = null;
+let inMemorySessionJwt: string | null = null;
 
 function readCsrfCookie(): string | null {
   if (typeof document === 'undefined') return null;
@@ -83,7 +85,7 @@ export function getStoredToken(): string | null {
   } catch {
     // ignore storage access issues
   }
-  return inMemoryCsrfToken || readCsrfCookie();
+  return inMemoryCsrfToken || readCsrfCookie() || inMemorySessionJwt;
 }
 
 /**
@@ -91,6 +93,9 @@ export function getStoredToken(): string | null {
  */
 export function setStoredToken(csrfToken: string | null): void {
   inMemoryCsrfToken = csrfToken;
+  if (!csrfToken) {
+    inMemorySessionJwt = null;
+  }
   try {
     if (typeof localStorage !== 'undefined') {
       localStorage.removeItem(LEGACY_LOCALSTORAGE_JWT_KEY);
@@ -108,7 +113,7 @@ export async function apiRequest<T = any>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const csrfToken = getStoredToken();
+  const csrfToken = inMemoryCsrfToken || readCsrfCookie();
   const headers: Record<string, string> = {
     'X-Requested-With': 'SamAttV2Client',
     ...(options.headers as Record<string, string> | undefined),
@@ -119,6 +124,9 @@ export async function apiRequest<T = any>(
   }
   if (csrfToken) {
     headers['X-CSRF-Token'] = csrfToken;
+  }
+  if (inMemorySessionJwt && !headers['Authorization']) {
+    headers['Authorization'] = `Bearer ${inMemorySessionJwt}`;
   }
 
   const res = await fetch(`${API_BASE}${endpoint}`, {
@@ -147,8 +155,13 @@ export async function apiRequest<T = any>(
   }
 
   const jsonData = await res.json();
-  if (jsonData && typeof jsonData === 'object' && typeof jsonData.csrfToken === 'string') {
-    inMemoryCsrfToken = jsonData.csrfToken;
+  if (jsonData && typeof jsonData === 'object') {
+    if (typeof jsonData.csrfToken === 'string') {
+      inMemoryCsrfToken = jsonData.csrfToken;
+    }
+    if (typeof jsonData.token === 'string') {
+      inMemorySessionJwt = jsonData.token;
+    }
   }
   return jsonData as T;
 }
