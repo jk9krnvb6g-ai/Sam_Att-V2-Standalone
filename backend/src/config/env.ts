@@ -187,7 +187,7 @@ export function loadConfig(): AppConfig {
     },
     hosofficePush: {
       livePushEnabled: process.env.HOSOFFICE_LIVE_PUSH_ENABLED === 'true',
-      targetTable: process.env.HOSOFFICE_PUSH_TARGET_TABLE || 'fingle_scan_attendance',
+      targetTable: (process.env.HOSOFFICE_PUSH_TARGET_TABLE || '').trim(),
     },
   };
 }

@@ -203,13 +203,15 @@ export function AdminViews({
       });
       setAdminPassword('');
       setNotice(
-        `อนุมัติแพ็กเกจอัปเดตสำเร็จ (รหัสการติดตั้ง #${res.deploymentId}) พร้อมเตรียมไฟล์สำรองข้อมูลที่ ${res.backupArchivePath}`
+        res.message ||
+          `ดำเนินการอัปเดตสำเร็จ (รหัส #${res.deploymentId} · สถานะ ${res.status}) พร้อมสร้างไฟล์สำรองข้อมูลจริงที่ ${res.backupArchivePath}`
       );
       await loadData();
     } catch (err) {
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
       }
+      await loadData();
     }
   }
 
@@ -225,13 +227,15 @@ export function AdminViews({
         }),
       });
       setNotice(
-        `บันทึกคำสั่งย้อนกลับไปยังเวอร์ชัน ${res.targetVersion} เรียบร้อยแล้ว (รันสคริปต์ scripts/restore-test.ps1 บนเซิร์ฟเวอร์เพื่อสลับไฟล์จริง)`
+        res.message ||
+          `ดำเนินการย้อนกลับไปยังเวอร์ชัน ${res.targetVersion} สำเร็จ (สถานะ ${res.status} · ผลตรวจ Health Check: ${res.healthCheckPassed ? 'ผ่าน' : 'ไม่ผ่าน'})`
       );
       await loadData();
     } catch (err) {
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
       }
+      await loadData();
     }
   }
 
@@ -918,7 +922,17 @@ export function AdminViews({
                   </div>
                   <div className="font-mono text-[13px] text-[#596579]">{h.action_type}</div>
                 </div>
-                <span className="font-semibold text-[13px] text-[#047857] bg-emerald-50 px-2.5 py-0.5 rounded-md border border-emerald-200">
+                <span
+                  className={`font-semibold text-[13px] px-2.5 py-0.5 rounded-md border ${
+                    h.status === 'SUCCESS'
+                      ? 'text-[#047857] bg-emerald-50 border-emerald-200'
+                      : h.status === 'FAILED'
+                        ? 'text-[#B91C1C] bg-rose-50 border-rose-200'
+                        : h.status === 'RUNNING'
+                          ? 'text-[#0369A1] bg-sky-50 border-sky-200'
+                          : 'text-[#B45309] bg-amber-50 border-amber-200'
+                  }`}
+                >
                   {h.status}
                 </span>
               </div>
@@ -966,7 +980,21 @@ export function AdminViews({
                   <td className="py-4 px-5 font-mono text-[13px] text-[#273244]">
                     {h.backup_archive_path || '—'}
                   </td>
-                  <td className="py-4 px-5 font-semibold text-[#047857]">{h.status}</td>
+                  <td className="py-4 px-5">
+                    <span
+                      className={`font-semibold text-[12.5px] px-2.5 py-1 rounded-md border ${
+                        h.status === 'SUCCESS'
+                          ? 'text-[#047857] bg-emerald-50 border-emerald-200'
+                          : h.status === 'FAILED'
+                            ? 'text-[#B91C1C] bg-rose-50 border-rose-200'
+                            : h.status === 'RUNNING'
+                              ? 'text-[#0369A1] bg-sky-50 border-sky-200'
+                              : 'text-[#B45309] bg-amber-50 border-amber-200'
+                      }`}
+                    >
+                      {h.status}
+                    </span>
+                  </td>
                   <td className="py-4 px-5 text-right">
                     <button
                       type="button"
