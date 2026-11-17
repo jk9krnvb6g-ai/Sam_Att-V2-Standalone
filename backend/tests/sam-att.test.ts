@@ -83,8 +83,11 @@ async function apiCall(
   if (options.scannerToken) {
     headers['X-Scanner-Token'] = options.scannerToken;
   }
-  if (options.body !== undefined) {
+  const bodyBuffer =
+    options.body !== undefined ? Buffer.from(JSON.stringify(options.body), 'utf8') : null;
+  if (bodyBuffer) {
     headers['Content-Type'] = 'application/json';
+    headers['Content-Length'] = String(bodyBuffer.length);
   }
 
   return new Promise((resolve, reject) => {
@@ -129,8 +132,8 @@ async function apiCall(
       }
     );
     req.on('error', reject);
-    if (options.body !== undefined) {
-      req.write(JSON.stringify(options.body));
+    if (bodyBuffer) {
+      req.write(bodyBuffer);
     }
     req.end();
   });
@@ -621,6 +624,54 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       assert.equal(schedRun.status, 200);
       assert.ok(schedRun.data.triggeredSchedules.length >= 1, 'Scheduler must trigger the 08:00 schedule');
       assert.equal(schedRun.data.triggeredSchedules[0].status, 'SUCCESS');
+
+      // 4e. ScannerSyncCli.exe Wrapper JSON Contract ({ success, totalRead, machines, scans })
+      setScannerExeTestDouble(
+        JSON.stringify({
+          success: true,
+          totalRead: 2,
+          totalNew: 0,
+          duplicates: 2,
+          unmapped: 0,
+          affectedDates: ['2026-11-13'],
+          machines: [
+            {
+              machineNo: 1,
+              ip: '192.168.111.163',
+              read: 2,
+              new: 0,
+              duplicates: 2,
+              status: 'OK',
+            },
+          ],
+          scans: [
+            {
+              machineNo: 101,
+              enrollNumber: '1004',
+              scanDateTime: '2026-11-13 07:48:00',
+              verifyMode: 1,
+              inOutMode: 0,
+              workCode: 0,
+            },
+            {
+              machineNo: 101,
+              enrollNumber: '1004',
+              scanDateTime: '2026-11-13 16:04:00',
+              verifyMode: 1,
+              inOutMode: 1,
+              workCode: 0,
+            },
+          ],
+        })
+      );
+
+      const cliWrapperSyncRes = await apiCall('/api/Sam_Att/scanners/sync', {
+        method: 'POST',
+        token: staffToken,
+      });
+      assert.equal(cliWrapperSyncRes.status, 200);
+      assert.equal(cliWrapperSyncRes.data.totalRead, 2);
+      assert.equal(cliWrapperSyncRes.data.duplicatesSkipped, 2);
     } finally {
       setScannerExeTestDouble(null);
     }
@@ -1028,4 +1079,129 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     assert.equal(missingBackupRollback.status, 422);
     assert.equal(missingBackupRollback.data.error, 'BACKUP_ARCHIVE_MISSING');
   });
+
+  test('Suite 9: Shift Roster & Templates — Multi-Person/Multi-Day Bulk Conflict Preview, Transactional Bulk Assignment, Snapshot & Soft Cancel Preservation', async () => {
+    // 1. Snapshot existing assignments on 2026-11-12 to ensure they are NEVER modified
+    const beforeExisting = await dbQuery<{
+      id: number;
+      person_id: string;
+      shift_id: number;
+      work_date: string;
+      snapshot_shift_code: string;
+      updated_at: string;
+    }>(
+      "SELECT id, person_id, shift_id, work_date, snapshot_shift_code, updated_at FROM shift_assignments WHERE work_date = '2026-11-12' AND person_id IN ('SAM-P001', 'SAM-P002') ORDER BY id ASC"
+    );
+    assert.ok(beforeExisting.length >= 2, 'Seeded assignments on 2026-11-12 must exist');
+
+    // 2. Call POST /api/Sam_Att/shift-assignments/bulk-preview for SAM-P001 & SAM-P002 across 2026-11-12, 2026-11-18, 2026-11-19 with shiftId=1 (OFF-0816)
+    const previewRes = await apiCall('/api/Sam_Att/shift-assignments/bulk-preview', {
+      method: 'POST',
+      token: staffToken,
+      body: {
+        personIds: ['SAM-P001', 'SAM-P002'],
+        shiftId: 1,
+        workDates: ['2026-11-12', '2026-11-18', '2026-11-19'],
+      },
+    });
+    assert.equal(previewRes.status, 200);
+    assert.equal(previewRes.data.summary.totalRequested, 6);
+    assert.equal(previewRes.data.summary.readyCount, 4, '4 slots (Nov 18 & 19 for both personnel) should be READY');
+    assert.equal(previewRes.data.summary.conflictCount, 2, '2 slots on Nov 12 should be flagged as conflicts');
+    assert.equal(previewRes.data.summary.duplicateCount, 1, 'SAM-P001 on Nov 12 already has shiftId=1 (DUPLICATE_SAME_SHIFT)');
+    assert.equal(previewRes.data.summary.overlapCount, 1, 'SAM-P002 on Nov 12 already has MOR-0816 08:00-16:00 (TIME_OVERLAP_CONFLICT)');
+
+    // 3. Call POST /api/Sam_Att/shift-assignments/bulk with ABORT_ON_CONFLICT -> must return 409 and insert 0 rows
+    const abortBulkRes = await apiCall('/api/Sam_Att/shift-assignments/bulk', {
+      method: 'POST',
+      token: staffToken,
+      body: {
+        personIds: ['SAM-P001', 'SAM-P002'],
+        shiftId: 1,
+        workDates: ['2026-11-12', '2026-11-18', '2026-11-19'],
+        conflictStrategy: 'ABORT_ON_CONFLICT',
+      },
+    });
+    assert.equal(abortBulkRes.status, 409);
+    assert.equal(abortBulkRes.data.error, 'BULK_SHIFT_CONFLICT');
+
+    const checkAfterAbort = await dbQuery<{ id: number }>(
+      "SELECT id FROM shift_assignments WHERE work_date IN ('2026-11-18', '2026-11-19')"
+    );
+    assert.equal(checkAfterAbort.length, 0, 'ABORT_ON_CONFLICT must not insert any rows when conflicts exist');
+
+    // 4. Call POST /api/Sam_Att/shift-assignments/bulk with SKIP_CONFLICTS -> must insert the 4 READY rows and skip the 2 conflicts without modifying existing rows
+    const skipBulkRes = await apiCall('/api/Sam_Att/shift-assignments/bulk', {
+      method: 'POST',
+      token: staffToken,
+      body: {
+        personIds: ['SAM-P001', 'SAM-P002'],
+        shiftId: 1,
+        workDates: ['2026-11-12', '2026-11-18', '2026-11-19'],
+        conflictStrategy: 'SKIP_CONFLICTS',
+      },
+    });
+    assert.equal(skipBulkRes.status, 201);
+    assert.equal(skipBulkRes.data.insertedCount, 4);
+    assert.equal(skipBulkRes.data.skippedConflictCount, 2);
+
+    // 5. Verify existing assignments on 2026-11-12 were strictly untouched
+    const afterExisting = await dbQuery<{
+      id: number;
+      person_id: string;
+      shift_id: number;
+      work_date: string;
+      snapshot_shift_code: string;
+      updated_at: string;
+    }>(
+      "SELECT id, person_id, shift_id, work_date, snapshot_shift_code, updated_at FROM shift_assignments WHERE work_date = '2026-11-12' AND person_id IN ('SAM-P001', 'SAM-P002') ORDER BY id ASC"
+    );
+    assert.deepEqual(afterExisting, beforeExisting, 'Existing shift assignments must never be modified during bulk assignment');
+
+    // 6. Verify newly inserted rows have full Snapshot fields preserved
+    const newlyInserted = await dbQuery<{
+      id: number;
+      person_id: string;
+      work_date: string;
+      snapshot_shift_code: string;
+      snapshot_start_time: string;
+      snapshot_end_time: string;
+      snapshot_grace_minutes: number;
+      snapshot_cutoff_time: string;
+      status: string;
+    }>(
+      "SELECT id, person_id, work_date, snapshot_shift_code, snapshot_start_time, snapshot_end_time, snapshot_grace_minutes, snapshot_cutoff_time, status FROM shift_assignments WHERE work_date IN ('2026-11-18', '2026-11-19') ORDER BY work_date ASC, person_id ASC"
+    );
+    assert.equal(newlyInserted.length, 4);
+    assert.equal(newlyInserted[0].snapshot_shift_code, 'OFF-0816');
+    assert.equal(newlyInserted[0].snapshot_start_time, '08:00');
+    assert.equal(newlyInserted[0].snapshot_end_time, '16:00');
+    assert.equal(newlyInserted[0].snapshot_grace_minutes, 15);
+    assert.equal(newlyInserted[0].snapshot_cutoff_time, '10:30');
+    assert.equal(newlyInserted[0].status, 'ACTIVE');
+
+    // 7. Verify Soft Cancel preserves the row as CANCELLED and logs to shift_cancellation_logs
+    const targetCancelId = newlyInserted[0].id;
+    const cancelRes = await apiCall(`/api/Sam_Att/shift-assignments/${targetCancelId}`, {
+      method: 'DELETE',
+      token: staffToken,
+      body: { cancelReason: 'ทดสอบยกเลิกตารางเวรแบบบันทึกประวัติ (Soft Cancel)' },
+    });
+    assert.equal(cancelRes.status, 200);
+    assert.equal(cancelRes.data.status, 'CANCELLED');
+
+    const cancelledRow = await dbQuery<{ status: string }>(
+      'SELECT status FROM shift_assignments WHERE id = ?',
+      [targetCancelId]
+    );
+    assert.equal(cancelledRow[0].status, 'CANCELLED');
+
+    const cancelLog = await dbQuery<{ shift_assignment_id: number; cancel_reason: string }>(
+      'SELECT shift_assignment_id, cancel_reason FROM shift_cancellation_logs WHERE shift_assignment_id = ?',
+      [targetCancelId]
+    );
+    assert.equal(cancelLog.length, 1);
+    assert.equal(cancelLog[0].cancel_reason, 'ทดสอบยกเลิกตารางเวรแบบบันทึกประวัติ (Soft Cancel)');
+  });
 });
+

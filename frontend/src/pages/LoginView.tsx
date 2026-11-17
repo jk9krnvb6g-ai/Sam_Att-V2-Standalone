@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { HeartHandshake, Lock, User, ArrowRight } from 'lucide-react';
+import { HeartHandshake, Lock, User, ArrowRight, Eye, EyeOff } from 'lucide-react';
 import { apiRequest, setStoredToken, type AuthUser, ApiClientError } from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
 import { RequiredMark } from '../components/common/SharedComponents.tsx';
@@ -7,6 +7,7 @@ import { RequiredMark } from '../components/common/SharedComponents.tsx';
 export function LoginView({ onLoginSuccess }: { onLoginSuccess: (user: AuthUser) => void }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<{ code?: string; message: string } | null>(null);
 
@@ -75,8 +76,11 @@ export function LoginView({ onLoginSuccess }: { onLoginSuccess: (user: AuthUser)
               <label htmlFor="username" className="ent-label">
                 ชื่อบัญชีผู้ใช้งาน <RequiredMark />
               </label>
-              <div className="relative">
-                <User className="w-4.5 h-4.5 text-[#596579] absolute left-3.5 top-3" aria-hidden="true" />
+              <div className="relative flex items-center">
+                <User
+                  className="w-4 h-4 text-[#596579] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                  aria-hidden="true"
+                />
                 <input
                   id="username"
                   name="username"
@@ -85,7 +89,7 @@ export function LoginView({ onLoginSuccess }: { onLoginSuccess: (user: AuthUser)
                   required
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
-                  className="ent-input w-full pl-10 pr-4"
+                  className="ent-input ent-input-with-icon w-full pl-11 pr-4"
                   placeholder="ระบุชื่อบัญชีผู้ใช้งานของคุณ"
                 />
               </div>
@@ -95,19 +99,31 @@ export function LoginView({ onLoginSuccess }: { onLoginSuccess: (user: AuthUser)
               <label htmlFor="password" className="ent-label">
                 รหัสผ่าน <RequiredMark />
               </label>
-              <div className="relative">
-                <Lock className="w-4.5 h-4.5 text-[#596579] absolute left-3.5 top-3" aria-hidden="true" />
+              <div className="relative flex items-center">
+                <Lock
+                  className="w-4 h-4 text-[#596579] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                  aria-hidden="true"
+                />
                 <input
                   id="password"
                   name="password"
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   autoComplete="current-password"
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  className="ent-input w-full pl-10 pr-4"
+                  className="ent-input ent-input-with-icon w-full pl-11 pr-11"
                   placeholder="ระบุรหัสผ่าน"
                 />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((prev) => !prev)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 p-1 text-[#596579] hover:text-[#273244] rounded-md transition-colors"
+                  aria-label={showPassword ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}
+                  title={showPassword ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
               </div>
             </div>
 

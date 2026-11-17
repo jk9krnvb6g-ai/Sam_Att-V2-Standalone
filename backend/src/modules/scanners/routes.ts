@@ -256,51 +256,146 @@ export async function executeScannerReaderSync(options: {
       }
       if (!fs.existsSync(cfg.scanner.readerExePath)) {
         const err = new Error(
-          `SCANNER_EXE_NOT_FOUND: ไม่พบไฟล์ ScannerReader.exe ที่ ${cfg.scanner.readerExePath}`
+          `SCANNER_EXE_NOT_FOUND: ไม่พบไฟล์โปรแกรมดึงข้อมูลสแกนนิ้วที่ ${cfg.scanner.readerExePath}`
         );
         (err as Error & { code?: string }).code = 'SCANNER_EXE_NOT_FOUND';
         throw err;
       }
 
-      const args = machineNo ? ['--machine', String(machineNo)] : [];
+      const isScannerSyncCli = /ScannerSyncCli\.exe$/i.test(cfg.scanner.readerExePath);
+      const args: string[] = [];
+      if (isScannerSyncCli) {
+        args.push('--days', String(cfg.scanner.syncDays));
+        if (cfg.scanner.previewMode) {
+          args.push('--preview');
+        }
+      }
+      if (machineNo) {
+        args.push('--machine', String(machineNo));
+      }
+
+      const exeWorkingDir = cfg.scanner.readerExePath.replace(/[\\/][^\\/]+$/, '') || process.cwd();
       try {
         const { stdout } = await execFileAsync(cfg.scanner.readerExePath, args, {
+          cwd: exeWorkingDir,
           timeout: cfg.scanner.timeoutMs,
+          env: {
+            ...process.env,
+            SCANNER_MYSQL_CONNECTION_STRING: cfg.scanner.mysqlConnectionString,
+          },
         });
         stdoutText = stdout;
       } catch (execErr: any) {
         if (execErr?.killed || execErr?.signal === 'SIGTERM' || String(execErr?.code) === 'ETIMEDOUT') {
           const timeoutErr = new Error(
-            `SCANNER_TIMEOUT: เครื่องสแกนนิ้วหรือ ScannerReader.exe ไม่ตอบสนองภายในเวลาที่กำหนด (${cfg.scanner.timeoutMs} ms)`
+            `SCANNER_TIMEOUT: เครื่องสแกนนิ้วหรือโปรแกรมดึงสแกนไม่ตอบสนองภายในเวลาที่กำหนด (${cfg.scanner.timeoutMs} ms)`
           );
           (timeoutErr as Error & { code?: string }).code = 'SCANNER_TIMEOUT';
           throw timeoutErr;
         }
-        const unreachableErr = new Error(
-          `SCANNER_DEVICE_UNREACHABLE: ไม่สามารถดึงข้อมูลจากเครื่องสแกนได้ (${execErr?.message || 'Unknown EXE error'})`
-        );
-        (unreachableErr as Error & { code?: string }).code = 'SCANNER_DEVICE_UNREACHABLE';
-        throw unreachableErr;
+        // ScannerSyncCli.exe คืนค่า exitCode = 1 เมื่ออ่านสำเร็จบางเครื่อง หรือ exitCode = 2 พร้อมพิมพ์ JSON ลง stdout
+        if (typeof execErr?.stdout === 'string' && execErr.stdout.trim().length > 0) {
+          stdoutText = execErr.stdout;
+        } else {
+          const unreachableErr = new Error(
+            `SCANNER_DEVICE_UNREACHABLE: ไม่สามารถดึงข้อมูลจากเครื่องสแกนได้ (${execErr?.message || 'Unknown EXE error'})`
+          );
+          (unreachableErr as Error & { code?: string }).code = 'SCANNER_DEVICE_UNREACHABLE';
+          throw unreachableErr;
+        }
       }
     }
 
     let parsed: unknown;
     try {
-      parsed = JSON.parse(stdoutText);
+      const trimmedOut = stdoutText.trim();
+      try {
+        parsed = JSON.parse(trimmedOut);
+      } catch {
+        // กรณีมีบรรทัดข้อความอื่นนำหน้า JSON บน stdout ให้ตัดเฉพาะก้อน JSON มาแปลง
+        const firstBrace = trimmedOut.search(/[\[{]/);
+        if (firstBrace > 0) {
+          parsed = JSON.parse(trimmedOut.slice(firstBrace));
+        } else {
+          throw new Error('JSON parse failed');
+        }
+      }
     } catch {
-      const err = new Error('INVALID_EXE_JSON_OUTPUT: ผลลัพธ์จาก ScannerReader.exe ไม่ใช่ JSON ที่ถูกต้อง');
+      const err = new Error('INVALID_EXE_JSON_OUTPUT: ผลลัพธ์จากโปรแกรมดึงสแกนไม่ใช่ JSON ที่ถูกต้อง');
       (err as Error & { code?: string }).code = 'INVALID_EXE_JSON_OUTPUT';
       throw err;
     }
 
-    if (!Array.isArray(parsed)) {
-      const err = new Error('INVALID_EXE_CONTRACT: JSON จาก ScannerReader.exe ต้องเป็น Array ของ Event 6 ฟิลด์');
+    let eventsToIngest: unknown[];
+    if (Array.isArray(parsed)) {
+      eventsToIngest = parsed;
+    } else if (parsed && typeof parsed === 'object') {
+      const wrapper = parsed as {
+        success?: boolean;
+        message?: string;
+        error?: string;
+        exitCode?: number;
+        machines?: Array<{
+          machineNo?: number;
+          ip?: string;
+          read?: number;
+          new?: number;
+          duplicates?: number;
+          status?: string;
+        }>;
+        scans?: unknown[];
+      };
+
+      if (Array.isArray(wrapper.machines)) {
+        for (const m of wrapper.machines) {
+          if (typeof m.machineNo === 'number') {
+            const machineOk = String(m.status || '').toUpperCase() === 'OK';
+            await dbExecute(
+              `UPDATE scanner_devices
+               SET last_sync_at = CURRENT_TIMESTAMP,
+                   last_sync_status = ?,
+                   last_error_message = ?
+               WHERE machine_no = ?`,
+              [
+                machineOk ? 'SUCCESS' : 'FAILED',
+                machineOk ? null : `สถานะจาก ScannerSyncCli: ${m.status || 'FAILED'}`,
+                m.machineNo,
+              ]
+            );
+          }
+        }
+      }
+
+      if (wrapper.success === false) {
+        const errMsg = wrapper.error || wrapper.message || 'ไม่สามารถดึงข้อมูลจากเครื่องสแกนนิ้วได้';
+        if (errMsg.includes('Another sync process')) {
+          const conflictErr = new Error(`SYNC_ALREADY_RUNNING: ${errMsg}`);
+          (conflictErr as Error & { code?: string; statusCode?: number }).code = 'SYNC_ALREADY_RUNNING';
+          (conflictErr as Error & { code?: string; statusCode?: number }).statusCode = 409;
+          throw conflictErr;
+        }
+        const unreachableErr = new Error(`SCANNER_DEVICE_UNREACHABLE: ${errMsg}`);
+        (unreachableErr as Error & { code?: string }).code = 'SCANNER_DEVICE_UNREACHABLE';
+        throw unreachableErr;
+      }
+
+      if (!Array.isArray(wrapper.scans)) {
+        const err = new Error(
+          'INVALID_EXE_CONTRACT: JSON จากโปรแกรมสแกนนิ้วต้องเป็น Array 6 ฟิลด์ หรือ Object ที่มีฟิลด์ scans เป็น Array'
+        );
+        (err as Error & { code?: string }).code = 'INVALID_EXE_CONTRACT';
+        throw err;
+      }
+
+      eventsToIngest = wrapper.scans;
+    } else {
+      const err = new Error('INVALID_EXE_CONTRACT: JSON จากโปรแกรมสแกนนิ้วต้องเป็น Array ของ Event 6 ฟิลด์');
       (err as Error & { code?: string }).code = 'INVALID_EXE_CONTRACT';
       throw err;
     }
 
     const result = await ingestSixFieldEventsBatch(
-      parsed,
+      eventsToIngest,
       options.triggerMode,
       options.actorUsername,
       machineNo

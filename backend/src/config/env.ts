@@ -61,6 +61,9 @@ export interface AppConfig {
     autoSchedulerEnabled: boolean;
     readerExePath: string;
     timeoutMs: number;
+    syncDays: number;
+    previewMode: boolean;
+    mysqlConnectionString: string;
     ingestSharedToken: string;
     ingestTokenExplicitlyConfigured: boolean;
   };
@@ -132,6 +135,23 @@ export function loadConfig(): AppConfig {
       ? 'C:\\Sam_Att\\certs'
       : path.join(os.tmpdir(), 'sam_att_v2_dev_certs');
 
+  const samAttHost = process.env.SAM_ATT_DB_HOST || '127.0.0.1';
+  const samAttPort = Number(process.env.SAM_ATT_DB_PORT || 3306);
+  const samAttDatabase = process.env.SAM_ATT_DB_NAME || 'samchuk_attendance_v2';
+  const samAttUser = process.env.SAM_ATT_DB_USER || 'sam_att_app';
+  const samAttPassword = process.env.SAM_ATT_DB_PASSWORD || 'CHANGE_ME';
+
+  const hosHost = process.env.HOSOFFICE_DB_HOST || 'CHANGE_ME';
+  const hosPort = Number(process.env.HOSOFFICE_DB_PORT || 3306);
+  const hosDatabase = process.env.HOSOFFICE_DB_NAME || 'hosoffice';
+  const hosUser = process.env.HOSOFFICE_DB_USER || 'hosoffice_readonly';
+  const hosPassword = process.env.HOSOFFICE_DB_PASSWORD || 'CHANGE_ME';
+
+  const fallbackScannerMysqlConn =
+    hosHost && hosHost !== 'CHANGE_ME'
+      ? `Server=${hosHost};Port=${hosPort};Database=${hosDatabase};User ID=${hosUser};Password=${hosPassword};CharSet=utf8mb4;`
+      : `Server=${samAttHost};Port=${samAttPort};Database=${samAttDatabase};User ID=${samAttUser};Password=${samAttPassword};CharSet=utf8mb4;`;
+
   return {
     nodeEnv,
     host: process.env.HOST || '0.0.0.0',
@@ -147,21 +167,21 @@ export function loadConfig(): AppConfig {
       : path.join(defaultCertDir, 'server.key'),
     dbEngine,
     samAttDb: {
-      host: process.env.SAM_ATT_DB_HOST || '127.0.0.1',
-      port: Number(process.env.SAM_ATT_DB_PORT || 3306),
-      database: process.env.SAM_ATT_DB_NAME || 'samchuk_attendance_v2',
-      user: process.env.SAM_ATT_DB_USER || 'sam_att_app',
-      password: process.env.SAM_ATT_DB_PASSWORD || 'CHANGE_ME',
+      host: samAttHost,
+      port: samAttPort,
+      database: samAttDatabase,
+      user: samAttUser,
+      password: samAttPassword,
       sqlitePath: process.env.SAM_ATT_SQLITE_PATH
         ? path.resolve(process.cwd(), process.env.SAM_ATT_SQLITE_PATH)
         : defaultSqlitePath,
     },
     hosofficeDb: {
-      host: process.env.HOSOFFICE_DB_HOST || 'CHANGE_ME',
-      port: Number(process.env.HOSOFFICE_DB_PORT || 3306),
-      database: process.env.HOSOFFICE_DB_NAME || 'hosoffice',
-      user: process.env.HOSOFFICE_DB_USER || 'hosoffice_readonly',
-      password: process.env.HOSOFFICE_DB_PASSWORD || 'CHANGE_ME',
+      host: hosHost,
+      port: hosPort,
+      database: hosDatabase,
+      user: hosUser,
+      password: hosPassword,
       hrPersonTable: process.env.HOSOFFICE_HR_PERSON_TABLE || 'hr_person',
       pushWriteUser: process.env.HOSOFFICE_PUSH_WRITE_USER || process.env.HOSOFFICE_DB_USER || 'hosoffice_attendance_writer',
       pushWritePassword: process.env.HOSOFFICE_PUSH_WRITE_PASSWORD || process.env.HOSOFFICE_DB_PASSWORD || 'CHANGE_ME',
@@ -176,8 +196,35 @@ export function loadConfig(): AppConfig {
     scanner: {
       syncEnabled: process.env.SCANNER_SYNC_ENABLED === 'true',
       autoSchedulerEnabled: process.env.SCANNER_AUTO_SCHEDULER_ENABLED !== 'false',
-      readerExePath: process.env.SCANNER_READER_EXE_PATH || 'C:\\Sam_Att\\bin\\ScannerReader.exe',
+      readerExePath: (() => {
+        const rawExePath = process.env.SCANNER_READER_EXE_PATH?.trim();
+        if (rawExePath) {
+          if (/^[a-zA-Z]:[\\/]/.test(rawExePath) || path.isAbsolute(rawExePath)) {
+            return rawExePath;
+          }
+          return path.resolve(process.cwd(), rawExePath);
+        }
+        const localSyncCliExe = path.resolve(process.cwd(), 'ScannerReader', 'ScannerSyncCli.exe');
+        if (fs.existsSync(localSyncCliExe)) {
+          return localSyncCliExe;
+        }
+        const localReaderExe = path.resolve(process.cwd(), 'ScannerReader', 'ScannerReader.exe');
+        if (fs.existsSync(localReaderExe)) {
+          return localReaderExe;
+        }
+        if (fs.existsSync('C:\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe')) {
+          return 'C:\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe';
+        }
+        if (fs.existsSync('C:\\Sam_Att\\bin\\ScannerReader.exe')) {
+          return 'C:\\Sam_Att\\bin\\ScannerReader.exe';
+        }
+        return localSyncCliExe;
+      })(),
       timeoutMs: Number(process.env.SCANNER_READER_TIMEOUT_MS || 30000),
+      syncDays: Number(process.env.SCANNER_SYNC_DAYS || 3),
+      previewMode: process.env.SCANNER_CLI_PREVIEW_MODE !== 'false',
+      mysqlConnectionString:
+        process.env.SCANNER_MYSQL_CONNECTION_STRING?.trim() || fallbackScannerMysqlConn,
       ingestSharedToken: scannerTokenExplicit
         ? rawScannerToken!
         : nodeEnv === 'production'
