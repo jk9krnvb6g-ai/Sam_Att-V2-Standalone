@@ -14,28 +14,29 @@
   <description>ระบบบริหารเวลาปฏิบัติงานบุคลากร โรงพยาบาลสามชุก (Sam_Att V2 Standalone Single-Port HTTPS 4101)</description>
 
   <!-- พาธ Working Directory ของแอปพลิเคชัน -->
-  <workingdirectory>C:\Sam_Att\app</workingdirectory>
+  <workingdirectory>C:\inetpub\wwwroot\Sam_Att</workingdirectory>
 
-  <!-- รันผ่าน Node.js v26.13.1 -->
+  <!-- รันผ่าน Node.js -->
   <executable>C:\Program Files\nodejs\node.exe</executable>
-  <arguments>--import tsx C:\Sam_Att\app\server.ts</arguments>
+  <arguments>--import tsx C:\inetpub\wwwroot\Sam_Att\server.ts</arguments>
 
-  <!-- กำหนด Environment Variables สำหรับ Production (ใบรับรอง TLS จัดเก็บนอก Repository) -->
+  <!-- กำหนด Environment Variables สำหรับ Production -->
   <env name="NODE_ENV" value="production" />
   <env name="PORT" value="4101" />
   <env name="SAM_ATT_HTTPS_PORT" value="4101" />
   <env name="PUBLIC_BASE_PATH" value="/Sam_Att/" />
   <env name="API_BASE_PATH" value="/api/Sam_Att" />
   <env name="SAM_ATT_DB_ENGINE" value="mysql" />
-  <env name="TLS_CERT_PATH" value="C:\Sam_Att\certs\server.crt" />
-  <env name="TLS_KEY_PATH" value="C:\Sam_Att\certs\server.key" />
-  <env name="SAM_ATT_BACKUP_DIR" value="C:\Sam_Att\backups" />
+  <env name="TLS_CERT_PATH" value="C:\inetpub\wwwroot\Sam_Att\certs\server.crt" />
+  <env name="TLS_KEY_PATH" value="C:\inetpub\wwwroot\Sam_Att\certs\server.key" />
+  <env name="SAM_ATT_BACKUP_DIR" value="C:\inetpub\wwwroot\Sam_Att\backups" />
+  <env name="SCANNER_READER_EXE_PATH" value="C:\inetpub\wwwroot\Sam_Att\ScannerReader\ScannerSyncCli.exe" />
 
   <!-- กำหนดการเริ่มทำงานอัตโนมัติเมื่อเปิดเครื่อง (Automatic Startup on Boot) -->
   <startmode>Automatic</startmode>
   <delayedAutoStart>true</delayedAutoStart>
 
-  <!-- บัญชี Service Account มาตรฐานที่มีสิทธิ์จำกัดเฉพาะโฟลเดอร์ C:\Sam_Att -->
+  <!-- บัญชี Service Account มาตรฐานที่มีสิทธิ์จำกัดเฉพาะโฟลเดอร์ C:\inetpub\wwwroot\Sam_Att -->
   <serviceaccount>
     <domain>NT AUTHORITY</domain>
     <user>NetworkService</user>
@@ -51,7 +52,7 @@
   <stoptimeout>15 sec</stoptimeout>
 
   <!-- กำหนดพาธจัดเก็บไฟล์ Log แบบหมุนเวียน (Rolling Logs) -->
-  <logpath>C:\Sam_Att\logs</logpath>
+  <logpath>C:\inetpub\wwwroot\Sam_Att\logs</logpath>
   <log mode="roll-by-size-time">
     <sizeThreshold>10240</sizeThreshold>
     <pattern>yyyyMMdd</pattern>

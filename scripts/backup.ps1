@@ -5,8 +5,8 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$AppDir = "C:\Sam_Att\app",
-  [string]$BackupRoot = "C:\Sam_Att\backups",
+  [string]$AppDir = "C:\inetpub\wwwroot\Sam_Att",
+  [string]$BackupRoot = "C:\inetpub\wwwroot\Sam_Att\backups",
   [string]$DbHost = "127.0.0.1",
   [int]$DbPort = 3306,
   [string]$DbName = "samchuk_attendance_v2",

@@ -129,10 +129,12 @@ export function loadConfig(): AppConfig {
   // ในโหมด development/test ใช้ไฟล์ชั่วคราวใน os.tmpdir() หากไม่ได้กำหนดพาธ เพื่อไม่ให้เกิดไฟล์ .sqlite ค้างใน Repository (แก้ไข P0 ข้อ 02)
   const defaultSqlitePath = path.join(os.tmpdir(), 'sam_att_v2_dev_runtime.sqlite');
 
-  // พาธใบรับรอง TLS: ใน Production แนะนำเก็บนอก Repository เช่น C:\Sam_Att\certs\
+  // พาธใบรับรอง TLS: รองรับ C:\inetpub\wwwroot\Sam_Att\certs (ซึ่งอยู่ใน .gitignore ไม่ถูก Commit ขึ้น Git) หรือ C:\Sam_Att\certs
   const defaultCertDir =
     nodeEnv === 'production'
-      ? 'C:\\Sam_Att\\certs'
+      ? fs.existsSync('C:\\inetpub\\wwwroot\\Sam_Att\\certs')
+        ? 'C:\\inetpub\\wwwroot\\Sam_Att\\certs'
+        : 'C:\\Sam_Att\\certs'
       : path.join(os.tmpdir(), 'sam_att_v2_dev_certs');
 
   const samAttHost = process.env.SAM_ATT_DB_HOST || '127.0.0.1';
@@ -211,6 +213,9 @@ export function loadConfig(): AppConfig {
         const localReaderExe = path.resolve(process.cwd(), 'ScannerReader', 'ScannerReader.exe');
         if (fs.existsSync(localReaderExe)) {
           return localReaderExe;
+        }
+        if (fs.existsSync('C:\\inetpub\\wwwroot\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe')) {
+          return 'C:\\inetpub\\wwwroot\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe';
         }
         if (fs.existsSync('C:\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe')) {
           return 'C:\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe';

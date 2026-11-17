@@ -6,7 +6,7 @@
 param(
   [Parameter(Mandatory=$true)][string]$ArtifactZipPath,
   [Parameter(Mandatory=$true)][string]$ExpectedSha256,
-  [string]$AppDir = "C:\Sam_Att\app",
+  [string]$AppDir = "C:\inetpub\wwwroot\Sam_Att",
   [string]$ServiceName = "SamAttV2Standalone",
   [int]$HttpsPort = 4101
 )

@@ -7,7 +7,7 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory=$true)][string]$BackupFolder,
-  [string]$AppDir = "C:\Sam_Att\app",
+  [string]$AppDir = "C:\inetpub\wwwroot\Sam_Att",
   [string]$ServiceName = "Sam_Att_V2_Standalone",
   [string]$DbHost = "127.0.0.1",
   [int]$DbPort = 3306,

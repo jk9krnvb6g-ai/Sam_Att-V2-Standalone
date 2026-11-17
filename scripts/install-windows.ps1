@@ -13,11 +13,11 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$InstallDir = "C:\Sam_Att\app",
-  [string]$CertsDir = "C:\Sam_Att\certs",
-  [string]$LogsDir = "C:\Sam_Att\logs",
-  [string]$BackupsDir = "C:\Sam_Att\backups",
-  [string]$WinSwExePath = "C:\Sam_Att\bin\WinSW-x64.exe",
+  [string]$InstallDir = "C:\inetpub\wwwroot\Sam_Att",
+  [string]$CertsDir = "C:\inetpub\wwwroot\Sam_Att\certs",
+  [string]$LogsDir = "C:\inetpub\wwwroot\Sam_Att\logs",
+  [string]$BackupsDir = "C:\inetpub\wwwroot\Sam_Att\backups",
+  [string]$WinSwExePath = "C:\inetpub\wwwroot\Sam_Att\bin\WinSW-x64.exe",
   [string]$ServiceName = "SamAttV2Standalone",
   [string]$ServiceAccount = "NT AUTHORITY\NetworkService",
   [int]$HttpsPort = 4101
