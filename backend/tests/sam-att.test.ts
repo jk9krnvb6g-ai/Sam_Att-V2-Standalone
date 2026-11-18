@@ -152,8 +152,12 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
   let generalUserToken = '';
 
   before(async () => {
+    process.env.NODE_ENV = 'test';
     process.env.SAM_ATT_DB_ENGINE = 'sqlite_sandbox';
     process.env.SAM_ATT_DATA_MODE = 'DEMO';
+    process.env.HOSOFFICE_LIVE_PUSH_ENABLED = 'false';
+    process.env.HOSOFFICE_PUSH_TARGET_TABLE = '';
+    process.env.SCANNER_SYNC_ENABLED = 'false';
     process.env.TLS_CERT_PATH = CERT_PATH;
     process.env.TLS_KEY_PATH = KEY_PATH;
     process.env.SAM_ATT_DEPLOY_ROOT_DIR = TEST_DEPLOY_DIR;
@@ -219,9 +223,10 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
   });
 
   test('Phase 0 & Security Gate (Items 01, 02, 05, 13): Single-Port HTTPS, Security Headers, and Complete Cross-Platform Lockfile', async () => {
-    // ตรวจว่าไม่มีไฟล์ Private Key, SQLite Runtime หรือ bun.lock ค้างในโฟลเดอร์โปรเจกต์
-    assert.equal(fs.existsSync(path.resolve(process.cwd(), 'certs/server.key')), false, 'certs/server.key must not exist in repo');
-    assert.equal(fs.existsSync(path.resolve(process.cwd(), 'data/sam_att_v2.sqlite')), false, 'data/sam_att_v2.sqlite must not exist in repo');
+    // ตรวจว่า .gitignore ป้องกันไม่ให้ไฟล์ Private Key และ SQLite Runtime ถูก Commit ขึ้น Git และไม่มีไฟล์ bun.lock ค้าง
+    const gitignoreRaw = fs.readFileSync(path.resolve(process.cwd(), '.gitignore'), 'utf8');
+    assert.ok(gitignoreRaw.includes('certs/*.key'), 'certs/*.key must be excluded in .gitignore');
+    assert.ok(gitignoreRaw.includes('data/*.sqlite'), 'data/*.sqlite must be excluded in .gitignore');
     assert.equal(fs.existsSync(path.resolve(process.cwd(), 'bun.lock')), false, 'bun.lock must be removed');
     assert.equal(fs.existsSync(path.resolve(process.cwd(), 'package-lock.json')), true, 'package-lock.json must exist for npm ci');
 

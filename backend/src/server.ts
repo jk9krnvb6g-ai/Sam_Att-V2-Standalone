@@ -47,7 +47,8 @@ export function ensureTlsCertificates(certPath: string, keyPath: string, nodeEnv
   if (!fs.existsSync(certDir)) {
     fs.mkdirSync(certDir, { recursive: true, mode: 0o700 });
   }
-  execFileSync('openssl', [
+
+  const opensslArgs = [
     'req',
     '-x509',
     '-newkey',
@@ -61,7 +62,41 @@ export function ensureTlsCertificates(certPath: string, keyPath: string, nodeEnv
     '365',
     '-subj',
     '/C=TH/ST=Suphanburi/L=Samchuk/O=SamchukHospital/OU=IT/CN=localhost',
-  ]);
+  ];
+
+  const candidateOpenSslBins = [
+    'openssl',
+    'C:\\Program Files\\Git\\usr\\bin\\openssl.exe',
+    'C:\\Program Files (x86)\\Git\\usr\\bin\\openssl.exe',
+  ];
+
+  let generated = false;
+  for (const bin of candidateOpenSslBins) {
+    try {
+      execFileSync(bin, opensslArgs, { stdio: 'ignore' });
+      if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
+        generated = true;
+        break;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+
+  if (!generated) {
+    const localCert = path.resolve(process.cwd(), 'certs', 'server.crt');
+    const localKey = path.resolve(process.cwd(), 'certs', 'server.key');
+    if (fs.existsSync(localCert) && fs.existsSync(localKey)) {
+      fs.copyFileSync(localCert, certPath);
+      fs.copyFileSync(localKey, keyPath);
+      generated = true;
+    }
+  }
+
+  if (!generated) {
+    throw new Error(`OPENSSL_UNAVAILABLE: Unable to generate test TLS certificate at ${certPath}`);
+  }
+
   try {
     fs.chmodSync(keyPath, 0o600);
   } catch {

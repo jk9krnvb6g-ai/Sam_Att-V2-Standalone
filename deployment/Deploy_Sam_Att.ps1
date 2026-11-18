@@ -202,41 +202,44 @@ function Invoke-HttpsProbe {
     }
   }
 
-  if ($PSVersionTable.PSVersion.Major -ge 6) {
-    if ($ParseJson) {
-      $Resp = Invoke-WebRequest -Uri $Url -SkipCertificateCheck -TimeoutSec $TimeoutSec -UseBasicParsing
-      $Parsed = $Resp.Content | ConvertFrom-Json
-      return [PSCustomObject]@{
-        StatusCode = [int]$Resp.StatusCode
-        Json       = $Parsed
-      }
-    } else {
-      $Resp = Invoke-WebRequest -Uri $Url -SkipCertificateCheck -TimeoutSec $TimeoutSec -UseBasicParsing
-      return [PSCustomObject]@{
-        StatusCode = [int]$Resp.StatusCode
-        Content    = $Resp.Content
-      }
+  # Use Node.js HTTPS client (rejectUnauthorized: false) to avoid Windows PowerShell 5.1 Schannel / TLS 1.3 self-signed certificate errors
+  $NodeProbeScript = @"
+const https = require('https');
+const req = https.get('$Url', { rejectUnauthorized: false, timeout: $($TimeoutSec * 1000) }, (res) => {
+  const chunks = [];
+  res.on('data', (c) => chunks.push(c));
+  res.on('end', () => {
+    const body = Buffer.concat(chunks).toString('utf8');
+    console.log(JSON.stringify({ statusCode: res.statusCode || 0, body }));
+    process.exit(0);
+  });
+});
+req.on('timeout', () => { req.destroy(new Error('TIMEOUT')); });
+req.on('error', (err) => { console.error(err.message); process.exit(2); });
+"@
+
+  $NodeRes = Invoke-NativeCli -Executable "node" -Arguments @("-e", $NodeProbeScript)
+  if ($NodeRes.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($NodeRes.Output)) {
+    throw "HTTPS_PROBE_FAILED: Cannot connect to $Url ($($NodeRes.Output))"
+  }
+
+  $JsonLine = ($NodeRes.Output -split "`r?`n" | Where-Object { $_.Trim().StartsWith("{") } | Select-Object -Last 1)
+  if ([string]::IsNullOrWhiteSpace($JsonLine)) {
+    throw "HTTPS_PROBE_INVALID_OUTPUT: Unexpected probe output from $Url"
+  }
+
+  $ProbeObj = $JsonLine | ConvertFrom-Json
+  if ($ParseJson) {
+    $ParsedBody = $ProbeObj.body | ConvertFrom-Json
+    return [PSCustomObject]@{
+      StatusCode = [int]$ProbeObj.statusCode
+      Json       = $ParsedBody
     }
-  } else {
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
-    $OldCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
-    try {
-      [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-      $Resp = Invoke-WebRequest -Uri $Url -TimeoutSec $TimeoutSec -UseBasicParsing
-      if ($ParseJson) {
-        $Parsed = $Resp.Content | ConvertFrom-Json
-        return [PSCustomObject]@{
-          StatusCode = [int]$Resp.StatusCode
-          Json       = $Parsed
-        }
-      }
-      return [PSCustomObject]@{
-        StatusCode = [int]$Resp.StatusCode
-        Content    = $Resp.Content
-      }
-    } finally {
-      [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $OldCallback
-    }
+  }
+
+  return [PSCustomObject]@{
+    StatusCode = [int]$ProbeObj.statusCode
+    Content    = [string]$ProbeObj.body
   }
 }
 
@@ -248,8 +251,8 @@ function Test-SamAttHealthEndpoint {
     [int]$MaxRetries = 6,
     [int]$RetryDelaySec = 2
   )
-  $FrontendUrl = "https://localhost:$TargetPort/Sam_Att/"
-  $HealthUrl = "https://localhost:$TargetPort/api/Sam_Att/health"
+  $FrontendUrl = "https://127.0.0.1:$TargetPort/Sam_Att/"
+  $HealthUrl = "https://127.0.0.1:$TargetPort/api/Sam_Att/health"
   $LastError = ""
 
   for ($Attempt = 1; $Attempt -le $MaxRetries; $Attempt++) {
@@ -340,6 +343,7 @@ $State = [ordered]@{
   BackendServiceName    = ""
   BackendPm2Name        = ""
   VerifiedSamAttPid     = 0
+  BackendRestarted      = $false
   ExpectedDbEngine      = "mysql"
   ExpectedDbName        = "samchuk_attendance_v2"
   ExpectedDbHost        = "10.1.0.201"
@@ -392,24 +396,29 @@ function Invoke-SafeRollback {
       Pop-Location
     }
 
-    # 3. Restart Sam_Att backend process only (never touch Procurement or IIS)
-    Write-DeployLog -Message "Restarting Sam_Att backend process after rollback (Mode=$($State.BackendProcessMode))..."
-    Restart-SamAttBackendOnly -IsRollback $true
-
-    # 4. Verify Health Check after Rollback
-    if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["postRollbackHealthy"]) {
-      if ($MockConfig.postRollbackHealthy -eq $false) {
+    # 3. Verify or Restart Sam_Att backend process only (never touch Procurement or IIS)
+    if ($null -ne $MockConfig) {
+      Restart-SamAttBackendOnly -IsRollback $true
+      if ($null -ne $MockConfig.PSObject.Properties["postRollbackHealthy"] -and $MockConfig.postRollbackHealthy -eq $false) {
         throw "POST_ROLLBACK_HEALTH_FAILED: System failed Health Check after Rollback"
       }
     } else {
-      $PostRollbackHealth = Test-SamAttHealthEndpoint -TargetPort $Port -ExpectedDbEngine $State.ExpectedDbEngine -ExpectedDbName $State.ExpectedDbName -MaxRetries 5 -RetryDelaySec 2
-      if (-not $PostRollbackHealth.Healthy) {
-        throw "POST_ROLLBACK_HEALTH_FAILED: $($PostRollbackHealth.Error)"
+      $QuickHealth = Test-SamAttHealthEndpoint -TargetPort $Port -ExpectedDbEngine $State.ExpectedDbEngine -ExpectedDbName $State.ExpectedDbName -MaxRetries 2 -RetryDelaySec 1
+      if ($State.BackendRestarted -or (-not $QuickHealth.Healthy)) {
+        Write-DeployLog -Message "Restarting Sam_Att backend process after rollback (Mode=$($State.BackendProcessMode))..."
+        Restart-SamAttBackendOnly -IsRollback $true
+        $PostRollbackHealth = Test-SamAttHealthEndpoint -TargetPort $Port -ExpectedDbEngine $State.ExpectedDbEngine -ExpectedDbName $State.ExpectedDbName -MaxRetries 6 -RetryDelaySec 2
+        if (-not $PostRollbackHealth.Healthy) {
+          throw "POST_ROLLBACK_HEALTH_FAILED: $($PostRollbackHealth.Error)"
+        }
+      } else {
+        Write-DeployLog -Message "Existing Sam_Att backend process was untouched and remains healthy on port $Port."
       }
     }
 
     Write-DeployLog -Message "Rollback completed and verified healthy on port $Port." -Level "INFO"
   } catch {
+    Write-Host "  [ROLLBACK DETAIL] $($_.Exception.Message)" -ForegroundColor Red
     Write-DeployLog -Message "CRITICAL ROLLBACK ERROR: $($_.Exception.Message)" -Level "ERROR"
     $RollbackSuccess = $false
   }
@@ -430,9 +439,12 @@ function Restart-SamAttBackendOnly {
     if ($null -ne $MockConfig.PSObject.Properties["simulateBackendStartFailure"] -and $MockConfig.simulateBackendStartFailure -eq $true -and (-not $IsRollback)) {
       throw "BACKEND_START_FAILED: Sam_Att Backend process failed to start on port $Port"
     }
+    $State.BackendRestarted = $true
     Write-DeployLog -Message "[MockMode] Restarted Sam_Att backend isolated process (Mode=$($State.BackendProcessMode), IsRollback=$IsRollback)"
     return
   }
+
+  $State.BackendRestarted = $true
 
   switch ($State.BackendProcessMode) {
     "WINDOWS_SERVICE" {
@@ -459,26 +471,40 @@ function Restart-SamAttBackendOnly {
         $ExistingProc = Get-Process -Id $State.VerifiedSamAttPid -ErrorAction SilentlyContinue
         if ($null -ne $ExistingProc) {
           Write-DeployLog -Message "Stopping verified Sam_Att Node.js process (PID=$($State.VerifiedSamAttPid))..."
-          Stop-Process -Id $State.VerifiedSamAttPid -Force -ErrorAction Stop
-          Start-Sleep -Seconds 2
+          Stop-Process -Id $State.VerifiedSamAttPid -Force -ErrorAction SilentlyContinue
         }
       }
 
-      $StdOutLog = Join-Path $LogsDir "sam_att_runtime_stdout.log"
-      $StdErrLog = Join-Path $LogsDir "sam_att_runtime_stderr.log"
-      $NpmCmd = if ($env:OS -like "*Windows*") { "npm.cmd" } else { "npm" }
+      # Wait up to 8 seconds for port 4101 to release
+      for ($WaitIdx = 1; $WaitIdx -le 8; $WaitIdx++) {
+        $StillListening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $StillListening) {
+          break
+        }
+        $HoldPid = [int]$StillListening.OwningProcess
+        $HoldWmi = Get-CimInstance Win32_Process -Filter "ProcessId = $HoldPid" -ErrorAction SilentlyContinue
+        if ($null -ne $HoldWmi -and ($HoldWmi.CommandLine -match "Sam_Att" -or $HoldWmi.CommandLine -match "server\.ts")) {
+          Stop-Process -Id $HoldPid -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 1
+      }
 
-      Write-DeployLog -Message "Starting single Sam_Att V2 Standalone process (npm start -> tsx server.ts) in $AppDir..."
-      $StartedProc = Start-Process -FilePath $NpmCmd `
-        -ArgumentList @("start") `
+      $StdOutLog = Join-Path $LogsDir "sam_att_runtime_stdout_$Timestamp.log"
+      $StdErrLog = Join-Path $LogsDir "sam_att_runtime_stderr_$Timestamp.log"
+      $NodeExe = (Get-Command node -ErrorAction Stop).Source
+
+      Write-DeployLog -Message "Starting single Sam_Att V2 Standalone process ($NodeExe --import tsx server.ts) in $AppDir..."
+      $StartedProc = Start-Process -FilePath $NodeExe `
+        -ArgumentList @("--import", "tsx", "server.ts") `
         -WorkingDirectory $AppDir `
         -RedirectStandardOutput $StdOutLog `
         -RedirectStandardError $StdErrLog `
         -WindowStyle Hidden `
         -PassThru
-      Start-Sleep -Seconds 3
+      Start-Sleep -Seconds 4
       if ($StartedProc.HasExited) {
-        throw "BACKEND_PROCESS_EXITED_IMMEDIATELY: Sam_Att process exited immediately (ExitCode=$($StartedProc.ExitCode)). Check $StdErrLog"
+        $ErrText = if (Test-Path $StdErrLog) { (Get-Content -Path $StdErrLog -Raw -ErrorAction SilentlyContinue) } else { "" }
+        throw "BACKEND_PROCESS_EXITED_IMMEDIATELY: Sam_Att process exited immediately (ExitCode=$($StartedProc.ExitCode)). Details: $ErrText"
       }
       $State.VerifiedSamAttPid = $StartedProc.Id
       Write-DeployLog -Message "Started Sam_Att V2 Standalone process (New PID=$($State.VerifiedSamAttPid))."
@@ -795,12 +821,15 @@ try {
     Copy-Item -Path $DistDir -Destination (Join-Path $BackupDir "dist") -Recurse -Force -ErrorAction Stop
   }
 
-  foreach ($CfgFile in @("package.json", "package-lock.json", "server.ts", "vite.config.ts", "tsconfig.json")) {
+  foreach ($CfgFile in @("package.json", "package-lock.json", "tsconfig.json")) {
     $SrcPath = Join-Path $AppDir $CfgFile
     if (Test-Path $SrcPath) {
       Copy-Item -Path $SrcPath -Destination (Join-Path $BackupDir $CfgFile) -Force -ErrorAction Stop
     }
   }
+
+  # Remove any legacy .ts files inside backups/ from earlier runs so tsc never scans them
+  Get-ChildItem -Path $BackupsRootDir -Filter "*.ts" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 
   $BackupManifest = [ordered]@{
     serviceName          = "Sam_Att V2 Standalone"
