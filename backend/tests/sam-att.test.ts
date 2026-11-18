@@ -152,12 +152,25 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
   let generalUserToken = '';
 
   before(async () => {
+    const strayBunLock = path.resolve(process.cwd(), 'bun.lock');
+    if (fs.existsSync(strayBunLock)) {
+      try {
+        fs.unlinkSync(strayBunLock);
+      } catch {
+        // ignore
+      }
+    }
     process.env.NODE_ENV = 'test';
     process.env.SAM_ATT_DB_ENGINE = 'sqlite_sandbox';
     process.env.SAM_ATT_DATA_MODE = 'DEMO';
+    process.env.PUBLIC_BASE_PATH = '/Sam_Att/';
+    process.env.API_BASE_PATH = '/api/Sam_Att';
+    process.env.AUTH_RATE_LIMIT_MAX_ATTEMPTS = '5';
+    process.env.AUTH_RATE_LIMIT_WINDOW_MINUTES = '15';
     process.env.HOSOFFICE_LIVE_PUSH_ENABLED = 'false';
     process.env.HOSOFFICE_PUSH_TARGET_TABLE = '';
     process.env.SCANNER_SYNC_ENABLED = 'false';
+    process.env.SCANNER_AUTO_SCHEDULER_ENABLED = 'false';
     process.env.TLS_CERT_PATH = CERT_PATH;
     process.env.TLS_KEY_PATH = KEY_PATH;
     process.env.SAM_ATT_DEPLOY_ROOT_DIR = TEST_DEPLOY_DIR;

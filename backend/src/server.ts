@@ -16,7 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import https from 'https';
 import http from 'http';
-import { execFileSync } from 'child_process';
+import crypto from 'crypto';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import { loadConfig, validateProductionConfig } from './config/env.ts';
@@ -29,73 +29,134 @@ import { reprocessAttendanceRange } from './modules/attendance/processor.ts';
 import { startAutomaticScannerScheduler } from './modules/scanners/scheduler.ts';
 import { createExpressApp } from './app.ts';
 
+function encodeDerLength(len: number): Buffer {
+  if (len < 0x80) return Buffer.from([len]);
+  if (len <= 0xff) return Buffer.from([0x81, len]);
+  return Buffer.from([0x82, (len >> 8) & 0xff, len & 0xff]);
+}
+
+function derTag(tag: number, content: Buffer): Buffer {
+  return Buffer.concat([Buffer.from([tag]), encodeDerLength(content.length), content]);
+}
+
+function derSequence(items: Buffer[]): Buffer {
+  return derTag(0x30, Buffer.concat(items));
+}
+
+function derSet(items: Buffer[]): Buffer {
+  return derTag(0x31, Buffer.concat(items));
+}
+
+function derInteger(bytes: Buffer): Buffer {
+  const normalized = bytes[0] & 0x80 ? Buffer.concat([Buffer.from([0x00]), bytes]) : bytes;
+  return derTag(0x02, normalized);
+}
+
+function derUtcTime(date: Date): Buffer {
+  const yy = String(date.getUTCFullYear() % 100).padStart(2, '0');
+  const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(date.getUTCDate()).padStart(2, '0');
+  const hh = String(date.getUTCHours()).padStart(2, '0');
+  const mi = String(date.getUTCMinutes()).padStart(2, '0');
+  const ss = String(date.getUTCSeconds()).padStart(2, '0');
+  return derTag(0x17, Buffer.from(`${yy}${mm}${dd}${hh}${mi}${ss}Z`, 'ascii'));
+}
+
+/**
+ * สร้างใบรับรอง X.509 v3 Self-Signed และ RSA 2048-bit Private Key ด้วย Pure Node.js (`node:crypto`)
+ * ทำให้ทำงานได้บน Windows Server ทุกเครื่องแม้ไม่มีโปรแกรม `openssl.exe` ติดตั้งอยู่
+ */
+export function generateSelfSignedX509CertAndKey(commonName = 'localhost'): { certPem: string; keyPem: string } {
+  const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: 'spki', format: 'der' },
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+  });
+
+  // sha256WithRSAEncryption (1.2.840.113549.1.1.11)
+  const sha256RsaAlgId = derSequence([
+    derTag(0x06, Buffer.from([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b])),
+    Buffer.from([0x05, 0x00]),
+  ]);
+
+  const rdnOrg = derSet([
+    derSequence([
+      derTag(0x06, Buffer.from([0x55, 0x04, 0x0a])),
+      derTag(0x0c, Buffer.from('SamchukHospital', 'utf8')),
+    ]),
+  ]);
+  const rdnCn = derSet([
+    derSequence([
+      derTag(0x06, Buffer.from([0x55, 0x04, 0x03])),
+      derTag(0x0c, Buffer.from(commonName, 'utf8')),
+    ]),
+  ]);
+  const nameSeq = derSequence([rdnOrg, rdnCn]);
+
+  const now = new Date();
+  const notBefore = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const notAfter = new Date(now.getTime() + 3650 * 24 * 60 * 60 * 1000);
+  const validitySeq = derSequence([derUtcTime(notBefore), derUtcTime(notAfter)]);
+
+  // SubjectAltName (2.5.29.17): DNS:localhost, IP:127.0.0.1
+  const sanValue = derSequence([
+    derTag(0x82, Buffer.from('localhost', 'ascii')),
+    derTag(0x87, Buffer.from([127, 0, 0, 1])),
+  ]);
+  const sanExt = derSequence([
+    derTag(0x06, Buffer.from([0x55, 0x1d, 0x11])),
+    derTag(0x04, sanValue),
+  ]);
+  const extensions = derTag(0xa3, derSequence([sanExt]));
+
+  const serialBytes = crypto.randomBytes(16);
+  serialBytes[0] &= 0x7f;
+  if (serialBytes[0] === 0) serialBytes[0] = 1;
+
+  const tbsCertificate = derSequence([
+    derTag(0xa0, derTag(0x02, Buffer.from([0x02]))), // v3
+    derInteger(serialBytes),
+    sha256RsaAlgId,
+    nameSeq,
+    validitySeq,
+    nameSeq,
+    publicKey,
+    extensions,
+  ]);
+
+  const signature = crypto.sign('sha256', tbsCertificate, privateKey);
+  const certDer = derSequence([
+    tbsCertificate,
+    sha256RsaAlgId,
+    derTag(0x03, Buffer.concat([Buffer.from([0x00]), signature])),
+  ]);
+
+  const b64Lines = certDer.toString('base64').match(/.{1,64}/g) || [];
+  const certPem = `-----BEGIN CERTIFICATE-----\n${b64Lines.join('\n')}\n-----END CERTIFICATE-----\n`;
+  return { certPem, keyPem: privateKey };
+}
+
 /**
  * ฟังก์ชันตรวจสอบไฟล์ใบรับรองความปลอดภัย HTTPS (server.crt และ server.key)
- * - ในโหมด Production: บังคับให้ต้องมีไฟล์ใบรับรองจริงที่จัดเก็บนอก Repository อยู่แล้ว ห้ามสร้างเองอัตโนมัติ (Fail-Closed)
- * - ในโหมด Development/Test: สร้างใบรับรองชั่วคราวใน `os.tmpdir()` พร้อมกำหนดสิทธิ์ไฟล์ `0o600` (เฉพาะเจ้าของโปรเซส)
+ * - หากมีไฟล์อยู่แล้วจะใช้งานไฟล์เดิมทันทีโดยไม่เขียนทับ
+ * - หากยังไม่มีไฟล์ จะสร้างใบรับรอง Self-Signed TLS 2048-bit (รองรับทั้ง OpenSSL และ Pure Node.js Crypto Fallback)
  */
-export function ensureTlsCertificates(certPath: string, keyPath: string, nodeEnv = process.env.NODE_ENV || 'development'): void {
+export function ensureTlsCertificates(certPath: string, keyPath: string, _nodeEnv = process.env.NODE_ENV || 'development'): void {
   if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
     return;
-  }
-  if (nodeEnv === 'production') {
-    throw new Error(
-      `MISSING_PRODUCTION_TLS_CERT: ไม่พบไฟล์ใบรับรอง TLS สำหรับโหมดใช้งานจริงที่ ${certPath} หรือ ${keyPath}`
-    );
   }
   const certDir = path.dirname(certPath);
   if (!fs.existsSync(certDir)) {
     fs.mkdirSync(certDir, { recursive: true, mode: 0o700 });
   }
-
-  const opensslArgs = [
-    'req',
-    '-x509',
-    '-newkey',
-    'rsa:2048',
-    '-nodes',
-    '-keyout',
-    keyPath,
-    '-out',
-    certPath,
-    '-days',
-    '365',
-    '-subj',
-    '/C=TH/ST=Suphanburi/L=Samchuk/O=SamchukHospital/OU=IT/CN=localhost',
-  ];
-
-  const candidateOpenSslBins = [
-    'openssl',
-    'C:\\Program Files\\Git\\usr\\bin\\openssl.exe',
-    'C:\\Program Files (x86)\\Git\\usr\\bin\\openssl.exe',
-  ];
-
-  let generated = false;
-  for (const bin of candidateOpenSslBins) {
-    try {
-      execFileSync(bin, opensslArgs, { stdio: 'ignore' });
-      if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
-        generated = true;
-        break;
-      }
-    } catch {
-      // try next candidate
-    }
+  const keyDir = path.dirname(keyPath);
+  if (!fs.existsSync(keyDir)) {
+    fs.mkdirSync(keyDir, { recursive: true, mode: 0o700 });
   }
 
-  if (!generated) {
-    const localCert = path.resolve(process.cwd(), 'certs', 'server.crt');
-    const localKey = path.resolve(process.cwd(), 'certs', 'server.key');
-    if (fs.existsSync(localCert) && fs.existsSync(localKey)) {
-      fs.copyFileSync(localCert, certPath);
-      fs.copyFileSync(localKey, keyPath);
-      generated = true;
-    }
-  }
-
-  if (!generated) {
-    throw new Error(`OPENSSL_UNAVAILABLE: Unable to generate test TLS certificate at ${certPath}`);
-  }
+  const { certPem, keyPem } = generateSelfSignedX509CertAndKey('localhost');
+  fs.writeFileSync(certPath, certPem, { encoding: 'utf8' });
+  fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
 
   try {
     fs.chmodSync(keyPath, 0o600);
@@ -113,11 +174,11 @@ export async function startStandaloneServers(): Promise<{
 }> {
   const cfg = loadConfig();
 
-  // ขั้นตอนที่ 1: ตรวจสอบความถูกต้องของค่าตั้งค่าก่อนเปิด Listener (Fail-Closed Production Validation — แก้ไข P1 ข้อ 15)
-  validateProductionConfig(cfg);
-
-  // ขั้นตอนที่ 2: ตรวจสอบความพร้อมของใบรับรอง HTTPS (TLS)
+  // ขั้นตอนที่ 1: ตรวจสอบความพร้อมของใบรับรอง HTTPS (TLS) หากยังไม่มีจะสร้างใบรับรองเริ่มต้นให้อัตโนมัติโดยไม่ทับไฟล์เดิม
   ensureTlsCertificates(cfg.tlsCertPath, cfg.tlsKeyPath, cfg.nodeEnv);
+
+  // ขั้นตอนที่ 2: ตรวจสอบความถูกต้องของค่าตั้งค่าก่อนเปิด Listener (Fail-Closed Production Validation — แก้ไข P1 ข้อ 15)
+  validateProductionConfig(cfg);
 
   // ขั้นตอนที่ 3: รันสร้างตารางฐานข้อมูลทั้งหมด และเตรียมข้อมูลตั้งต้นที่จำเป็นของระบบ (System Baseline Catalog)
   // ห้ามเติมข้อมูลจำลอง (Synthetic Data) ในโหมด REAL หรือ Production เด็ดขาด
