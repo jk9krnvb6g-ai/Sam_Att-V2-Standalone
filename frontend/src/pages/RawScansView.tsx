@@ -32,7 +32,7 @@ import {
   RequiredMark,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
-import { formatThaiDateTime } from '../utils/thaiFormat.ts';
+import { formatThaiDateTime, getCurrentBangkokDateParts } from '../utils/thaiFormat.ts';
 
 export function RawScansView({
   mode,
@@ -41,6 +41,7 @@ export function RawScansView({
   mode: 'rawScans' | 'scanners';
   user: AuthUser;
 }) {
+  const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
   const [rawScans, setRawScans] = useState<any[]>([]);
   const [scannerData, setScannerData] = useState<any>(null);
   const [search, setSearch] = useState('');
@@ -62,7 +63,7 @@ export function RawScansView({
   const [selectedScanModal, setSelectedScanModal] = useState<any | null>(null);
 
   // New Scanner Device form (ADMIN only)
-  const [machineNo, setMachineNo] = useState(104);
+  const [machineNo, setMachineNo] = useState(4);
   const [deviceName, setDeviceName] = useState('');
   const [ipAddress, setIpAddress] = useState('192.168.10.104');
   const [locationName, setLocationName] = useState('');
@@ -72,21 +73,21 @@ export function RawScansView({
   const [cronTime, setCronTime] = useState('12:30');
 
   // 6-Field EXE Contract Payload Ingestion Test Harness
-  const [jsonPayloadText, setJsonPayloadText] = useState(
+  const [jsonPayloadText, setJsonPayloadText] = useState(() =>
     JSON.stringify(
       [
         {
-          machineNo: 101,
+          machineNo: 1,
           enrollNumber: '1001',
-          scanDateTime: '2026-11-13 07:48:00',
+          scanDateTime: `${initialBkk.todayYmd} 07:48:00`,
           verifyMode: 1,
           inOutMode: 0,
           workCode: 0,
         },
         {
-          machineNo: 101,
+          machineNo: 1,
           enrollNumber: '1001',
-          scanDateTime: '2026-11-13 16:04:00',
+          scanDateTime: `${initialBkk.todayYmd} 16:04:00`,
           verifyMode: 1,
           inOutMode: 1,
           workCode: 0,

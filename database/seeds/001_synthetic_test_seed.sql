@@ -1,8 +1,10 @@
 -- ============================================================================
--- Sam_Att V2 Standalone — Synthetic Non-PII Test Seed Data (001)
--- Used strictly for automated test verification & non-production sandbox.
--- Contains ZERO real hospital personnel data or real secrets.
+-- Sam_Att V2 Standalone — Baseline System Catalog & Non-Production Seed (001)
+-- WARNING: Device IDs 101-103 are strictly for DEMO/Test mode.
+-- For Real Hospital Production, use database/seeds/001_real_system_baseline.sql
 -- ============================================================================
+
+SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 INSERT IGNORE INTO personnel_type_rules (
   personnel_type_code, personnel_type_name, default_grace_minutes,

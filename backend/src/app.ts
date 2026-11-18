@@ -46,6 +46,9 @@ export function createExpressApp(options?: { serveStaticBuild?: boolean }): Expr
     const isApiRoute = req.path.startsWith(cfg.apiBasePath) || req.path.startsWith('/api/');
     const disallowFraming = cfg.nodeEnv === 'production' || isApiRoute;
 
+    if (isApiRoute && !req.path.endsWith('.csv')) {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    }
     res.setHeader('X-Content-Type-Options', 'nosniff');
     if (disallowFraming) {
       res.setHeader('X-Frame-Options', 'DENY');
@@ -80,6 +83,7 @@ export function createExpressApp(options?: { serveStaticBuild?: boolean }): Expr
         status: 'OK',
         service: 'Sam_Att V2 Standalone',
         version: '2.0.0-standalone',
+        dataMode: cfg.dataMode,
         targetNodeEngine: '26.13.1',
         runtimeNodeVersion: process.version,
         httpsPort: cfg.port,

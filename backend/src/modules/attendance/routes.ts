@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { dbQuery, dbExecute } from '../../database/adapter.ts';
+import { getCurrentBangkokDateParts } from '../../utils/crypto.ts';
 import { requireAuth, requireRoles, enforceOwnPersonMapping } from '../../middleware/auth.ts';
 import { previewReprocessRange, reprocessAttendanceRange } from './processor.ts';
 import { writeAuditLog } from '../audit/service.ts';
@@ -14,8 +15,9 @@ attendanceRouter.get(
   async (req, res, next) => {
     try {
       const personId = req.user!.approvedPersonId!;
-      const dateFrom = String(req.query.dateFrom || '2026-01-01').trim();
-      const dateTo = String(req.query.dateTo || '2026-12-31').trim();
+      const bkk = getCurrentBangkokDateParts();
+      const dateFrom = String(req.query.dateFrom || `${bkk.currentYear}-01-01`).trim();
+      const dateTo = String(req.query.dateTo || `${bkk.currentYear}-12-31`).trim();
 
       const items = await dbQuery<{
         id: number;
@@ -104,8 +106,9 @@ attendanceRouter.get(
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
   async (req, res, next) => {
     try {
-      const dateFrom = String(req.query.dateFrom || '2026-11-01').trim();
-      const dateTo = String(req.query.dateTo || '2026-11-30').trim();
+      const bkk = getCurrentBangkokDateParts();
+      const dateFrom = String(req.query.dateFrom || bkk.monthStartYmd).trim();
+      const dateTo = String(req.query.dateTo || bkk.monthEndYmd).trim();
       const department = String(req.query.department || '').trim();
       const personnelType = String(req.query.personnelType || '').trim();
       const status = String(req.query.status || '').trim();
@@ -154,8 +157,9 @@ attendanceRouter.get(
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
   async (req, res, next) => {
     try {
-      const dateFrom = String(req.query.dateFrom || '2026-11-01').trim();
-      const dateTo = String(req.query.dateTo || '2026-11-30').trim();
+      const bkk = getCurrentBangkokDateParts();
+      const dateFrom = String(req.query.dateFrom || bkk.monthStartYmd).trim();
+      const dateTo = String(req.query.dateTo || bkk.monthEndYmd).trim();
       const statusFilter = String(req.query.status || '').trim();
 
       const conditions = [
@@ -360,8 +364,9 @@ attendanceRouter.post(
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
   async (req, res, next) => {
     try {
-      const dateFrom = String(req.body?.dateFrom || '2026-11-12').trim();
-      const dateTo = String(req.body?.dateTo || '2026-11-13').trim();
+      const bkk = getCurrentBangkokDateParts();
+      const dateFrom = String(req.body?.dateFrom || bkk.yesterdayYmd).trim();
+      const dateTo = String(req.body?.dateTo || bkk.todayYmd).trim();
       const personId = req.body?.personId ? String(req.body.personId).trim() : undefined;
       const referenceNowBkk = req.body?.referenceNowBkk
         ? String(req.body.referenceNowBkk).trim()
@@ -388,8 +393,9 @@ attendanceRouter.post(
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
   async (req, res, next) => {
     try {
-      const dateFrom = String(req.body?.dateFrom || '2026-11-12').trim();
-      const dateTo = String(req.body?.dateTo || '2026-11-13').trim();
+      const bkk = getCurrentBangkokDateParts();
+      const dateFrom = String(req.body?.dateFrom || bkk.yesterdayYmd).trim();
+      const dateTo = String(req.body?.dateTo || bkk.todayYmd).trim();
       const personId = req.body?.personId ? String(req.body.personId).trim() : undefined;
       const referenceNowBkk = req.body?.referenceNowBkk
         ? String(req.body.referenceNowBkk).trim()

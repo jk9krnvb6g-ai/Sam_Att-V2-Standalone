@@ -36,6 +36,7 @@ import {
   formatThaiDate,
   formatThaiDateTime,
   resolvePeriodRange,
+  getCurrentBangkokDateParts,
   type PeriodMode,
 } from '../utils/thaiFormat.ts';
 import { type NavViewKey } from '../components/layout/Sidebar.tsx';
@@ -49,13 +50,15 @@ export function DashboardView({
   user?: AuthUser;
   onNavigate?: (view: NavViewKey) => void;
 }) {
-  // Period Filter State (Daily / Monthly / Yearly / Custom)
+  const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
+
+  // Period Filter State (Daily / Monthly / Yearly / Custom) — initialized to real current Asia/Bangkok date
   const [periodMode, setPeriodMode] = useState<PeriodMode>('MONTHLY');
-  const [dailyDate, setDailyDate] = useState('2026-11-13');
-  const [monthValue, setMonthValue] = useState('2026-11');
-  const [yearValue, setYearValue] = useState('2026');
-  const [customFrom, setCustomFrom] = useState('2026-11-01');
-  const [customTo, setCustomTo] = useState('2026-11-30');
+  const [dailyDate, setDailyDate] = useState(initialBkk.todayYmd);
+  const [monthValue, setMonthValue] = useState(initialBkk.currentYearMonth);
+  const [yearValue, setYearValue] = useState(initialBkk.currentYear);
+  const [customFrom, setCustomFrom] = useState(initialBkk.monthStartYmd);
+  const [customTo, setCustomTo] = useState(initialBkk.monthEndYmd);
 
   const [department, setDepartment] = useState('');
   const [personnelType, setPersonnelType] = useState('');
@@ -112,10 +115,12 @@ export function DashboardView({
       setData(summaryRes);
       setAttendanceRows(attRes.items || []);
     } catch (err) {
+      setData(null);
+      setAttendanceRows([]);
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
       } else {
-        setError({ message: 'ไม่สามารถดึงข้อมูลสรุปแดชบอร์ดได้' });
+        setError({ message: 'ไม่สามารถดึงข้อมูลสรุปแดชบอร์ดจากฐานข้อมูลได้' });
       }
     } finally {
       setLoading(false);
@@ -128,6 +133,18 @@ export function DashboardView({
 
   const kpi = data?.kpi;
   const telemetry = data?.scannerTelemetry;
+  const availableDepartments: string[] =
+    Array.isArray(data?.availableDepartments) && data.availableDepartments.length > 0
+      ? data.availableDepartments
+      : ['กลุ่มงานการแพทย์', 'กลุ่มงานการพยาบาล', 'กลุ่มงานบริหารทั่วไป', 'กลุ่มงานเภสัชกรรม'];
+  const availablePersonnelTypes: Array<{ code: string; name: string }> =
+    Array.isArray(data?.availablePersonnelTypes) && data.availablePersonnelTypes.length > 0
+      ? data.availablePersonnelTypes
+      : [
+          { code: 'CIVIL_SERVANT', name: 'ข้าราชการ' },
+          { code: 'PUBLIC_HEALTH_EMP', name: 'พนักงานกระทรวงสาธารณสุข (พกส.)' },
+          { code: 'TEMP_EMPLOYEE', name: 'ลูกจ้างชั่วคราว' },
+        ];
 
   function handleSortRanking(key: string) {
     if (rankSortKey === key) {
@@ -220,7 +237,7 @@ export function DashboardView({
 
     setDrillModal({
       title,
-      subtitle: `${resolvedRange.thaiPeriodLabel} · พบทั้งหมด ${rows.length} รายการ`,
+      subtitle: `${resolvedRange.thaiPeriodLabel} · แสดงครบทั้งหมด ${rows.length} รายการจากฐานข้อมูลจริง`,
       rows,
       targetNav,
       targetNavLabel,
@@ -241,19 +258,24 @@ export function DashboardView({
     (r) => r.status === 'PENDING_MAPPING' || r.status === 'NO_SCHEDULE'
   ).length;
 
-  const normalPct = Number(((statusNormalCount / totalShiftsSafe) * 100).toFixed(1));
-  const lateOnlyPct = Number(((statusLateOnlyCount / totalShiftsSafe) * 100).toFixed(1));
-  const missingOutPct = Number(((statusMissingOutCount / totalShiftsSafe) * 100).toFixed(1));
-  const noScanPct = Number(((statusNoScanCount / totalShiftsSafe) * 100).toFixed(1));
-  const pendingMapPct = Number(((statusPendingMappingCount / totalShiftsSafe) * 100).toFixed(1));
+  const normalPct = totalShiftsCount > 0 ? Number(((statusNormalCount / totalShiftsSafe) * 100).toFixed(1)) : 0;
+  const lateOnlyPct = totalShiftsCount > 0 ? Number(((statusLateOnlyCount / totalShiftsSafe) * 100).toFixed(1)) : 0;
+  const missingOutPct = totalShiftsCount > 0 ? Number(((statusMissingOutCount / totalShiftsSafe) * 100).toFixed(1)) : 0;
+  const noScanPct = totalShiftsCount > 0 ? Number(((statusNoScanCount / totalShiftsSafe) * 100).toFixed(1)) : 0;
+  const pendingMapPct = totalShiftsCount > 0 ? Number(((statusPendingMappingCount / totalShiftsSafe) * 100).toFixed(1)) : 0;
 
   return (
     <div className="space-y-6">
       {/* 1. Welcome & Operational Context Header */}
       <div className="ent-card p-4 sm:p-6 bg-gradient-to-r from-[#FFF1F3] via-white to-white border border-[#F9E8EB] flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 sm:gap-5">
         <div className="space-y-1.5">
-          <div className="text-[13px] sm:text-[13.5px] font-semibold text-[#9F3F50]">
-            ภาพรวมการปฏิบัติงาน · โรงพยาบาลสามชุก
+          <div className="flex flex-wrap items-center gap-2 text-[13px] sm:text-[13.5px] font-semibold text-[#9F3F50]">
+            <span>ภาพรวมการปฏิบัติงาน · โรงพยาบาลสามชุก</span>
+            {data?.dataMode === 'DEMO' && (
+              <span className="px-2 py-0.5 rounded-md bg-amber-100 border border-amber-300 text-[#92400E] text-[12px] font-bold">
+                โหมดข้อมูลตัวอย่าง (DEMO)
+              </span>
+            )}
           </div>
           <h1 className="text-[21px] sm:text-[24px] lg:text-[27px] font-bold text-[#273244] tracking-tight">
             {user ? `สวัสดีคุณ${user.displayName}` : 'แดชบอร์ดบริหารเวลาปฏิบัติงาน'}
@@ -308,10 +330,11 @@ export function DashboardView({
               className="ent-input w-full sm:w-auto"
             >
               <option value="">ทุกกลุ่มงาน / หน่วยงาน</option>
-              <option value="กลุ่มงานการแพทย์">กลุ่มงานการแพทย์</option>
-              <option value="กลุ่มงานการพยาบาล">กลุ่มงานการพยาบาล</option>
-              <option value="กลุ่มงานบริหารทั่วไป">กลุ่มงานบริหารทั่วไป</option>
-              <option value="กลุ่มงานเภสัชกรรม">กลุ่มงานเภสัชกรรม</option>
+              {availableDepartments.map((dept) => (
+                <option key={dept} value={dept}>
+                  {dept}
+                </option>
+              ))}
             </select>
 
             <select
@@ -321,9 +344,11 @@ export function DashboardView({
               className="ent-input w-full sm:w-auto"
             >
               <option value="">ทุกประเภทบุคลากร</option>
-              <option value="CIVIL_SERVANT">ข้าราชการ</option>
-              <option value="PUBLIC_HEALTH_EMP">พนักงานกระทรวงสาธารณสุข (พกส.)</option>
-              <option value="TEMP_EMPLOYEE">ลูกจ้างชั่วคราว</option>
+              {availablePersonnelTypes.map((pt) => (
+                <option key={pt.code} value={pt.code}>
+                  {pt.name}
+                </option>
+              ))}
             </select>
 
             <button
@@ -346,8 +371,26 @@ export function DashboardView({
             <div key={i} className="ent-card p-6 h-36 animate-pulse bg-white" />
           ))}
         </div>
-      ) : kpi ? (
+      ) : !error && kpi ? (
         <>
+          {data?.isEmptyPeriod && (
+            <div className="ent-card p-4 bg-[#FFF9F9] border border-[#E7E2E5] flex flex-wrap items-center justify-between gap-3 text-[13.5px] text-[#596579]">
+              <div>
+                <strong className="text-[#273244]">ยังไม่มีข้อมูลสำหรับช่วงเวลาที่เลือก ({resolvedRange.thaiPeriodLabel}):</strong>{' '}
+                ตัวเลข 0 ด้านล่างเป็นผลลัพธ์จริงจากฐานข้อมูลโดยไม่มีการแทรกข้อมูลจำลอง
+              </div>
+              {onNavigate && (
+                <button
+                  type="button"
+                  onClick={() => onNavigate('shifts')}
+                  className="font-semibold text-[#9F3F50] hover:underline inline-flex items-center gap-1"
+                >
+                  <span>ไปกำหนดตารางเวรหรือประมวลผลเวลา</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          )}
           {/* 3. What is happening? — 4 Operational KPI Cards (preserving all 8 metrics & drill-downs) */}
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
             {/* Card 1: Personnel & Total Shifts */}

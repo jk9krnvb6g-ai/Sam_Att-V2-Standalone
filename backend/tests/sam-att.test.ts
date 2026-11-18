@@ -9,6 +9,7 @@ import type { AddressInfo } from 'net';
 import {
   resetSqliteInstanceForTests,
   runMigrations,
+  ensureBaselineSystemCatalog,
   seedBaselineAndSyntheticData,
   setSimulatedDatabaseDown,
   dbQuery,
@@ -42,7 +43,12 @@ import {
 } from '../src/modules/deployment/agent.ts';
 import { ensureTlsCertificates } from '../src/server.ts';
 import { createExpressApp } from '../src/app.ts';
-import { sanitizeCsvCell } from '../src/utils/crypto.ts';
+import {
+  sanitizeCsvCell,
+  hasThaiMojibake,
+  repairThaiMojibakeIfCorrupted,
+  getCurrentBangkokDateParts,
+} from '../src/utils/crypto.ts';
 
 // ใช้โฟลเดอร์ชั่วคราวใน os.tmpdir() สำหรับฐานข้อมูลและใบรับรองการทดสอบ เพื่อไม่ให้มีไฟล์ .sqlite หรือ .key ตกค้างใน Git Repository (แก้ไข P0 ข้อ 01–02)
 const TEST_RUN_ID = `${process.pid}_${Date.now()}`;
@@ -146,6 +152,7 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
 
   before(async () => {
     process.env.SAM_ATT_DB_ENGINE = 'sqlite_sandbox';
+    process.env.SAM_ATT_DATA_MODE = 'DEMO';
     process.env.TLS_CERT_PATH = CERT_PATH;
     process.env.TLS_KEY_PATH = KEY_PATH;
     process.env.SAM_ATT_DEPLOY_ROOT_DIR = TEST_DEPLOY_DIR;
@@ -1202,6 +1209,126 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     );
     assert.equal(cancelLog.length, 1);
     assert.equal(cancelLog[0].cancel_reason, 'ทดสอบยกเลิกตารางเวรแบบบันทึกประวัติ (Soft Cancel)');
+  });
+
+  test('22. REAL vs DEMO Data Mode Isolation, Thai Mojibake Repair (TIS-620/Latin-1 -> UTF-8), Read-Only Data Integrity Audit & Dynamic Bangkok Dates', async () => {
+    // 1. Verify Thai Mojibake detection & repair for Windows-874 / TIS-620 ("เธเธนเน...")
+    const cleanThai = 'ผู้ดูแลระบบสูงสุด (โรงพยาบาลสามชุก)';
+    const utf8Bytes = Buffer.from(cleanThai, 'utf8');
+    const tis620CorruptedChars: string[] = [];
+    for (const b of utf8Bytes) {
+      if (b < 0x80) {
+        tis620CorruptedChars.push(String.fromCharCode(b));
+      } else if (b >= 0xa1 && b <= 0xfb) {
+        tis620CorruptedChars.push(String.fromCharCode(b + 0x0d60));
+      } else if (b === 0x85) {
+        tis620CorruptedChars.push('\u2026');
+      } else {
+        tis620CorruptedChars.push(String.fromCharCode(b));
+      }
+    }
+    const corruptedTis620String = tis620CorruptedChars.join('');
+    assert.ok(corruptedTis620String.includes('เธ'), 'Simulated TIS-620 Mojibake must contain เธ pattern');
+    assert.equal(hasThaiMojibake(corruptedTis620String), true, 'Must detect TIS-620 Mojibake');
+    assert.equal(hasThaiMojibake(cleanThai), false, 'Valid Thai string must not be flagged as Mojibake');
+
+    const repairedTis620 = repairThaiMojibakeIfCorrupted(corruptedTis620String, 'fallback');
+    assert.equal(repairedTis620.wasCorrupted, true);
+    assert.equal(repairedTis620.text, cleanThai, 'Must accurately reverse TIS-620 Mojibake back to clean UTF-8 Thai');
+
+    // Simulate UTF-8 bytes misread as Latin-1
+    const corruptedLatin1String = utf8Bytes.toString('latin1');
+    assert.equal(hasThaiMojibake(corruptedLatin1String), true, 'Must detect Latin-1 Mojibake');
+    const repairedLatin1 = repairThaiMojibakeIfCorrupted(corruptedLatin1String, 'fallback');
+    assert.equal(repairedLatin1.wasCorrupted, true);
+    assert.equal(repairedLatin1.text, cleanThai, 'Must accurately reverse Latin-1 Mojibake back to clean UTF-8 Thai');
+
+    // 2. Verify Read-Only Data Integrity Audit endpoint (/api/Sam_Att/settings/data-integrity-audit)
+    const auditRes = await apiCall('/api/Sam_Att/settings/data-integrity-audit', {
+      token: adminToken,
+    });
+    assert.equal(auditRes.status, 200);
+    assert.equal(auditRes.data.readOnlyInspection, true);
+    assert.equal(auditRes.data.syntheticRecordsFound.personnelCount, 5);
+    assert.ok(Array.isArray(auditRes.data.mojibakeDetected));
+
+    // 3. Verify Dashboard Summary returns dynamic filter options & dataMode
+    const dashRes = await apiCall('/api/Sam_Att/dashboard/summary?dateFrom=2026-11-01&dateTo=2026-11-30', {
+      token: adminToken,
+    });
+    assert.equal(dashRes.status, 200);
+    assert.equal(dashRes.data.dataMode, 'DEMO');
+    assert.equal(dashRes.data.isEmptyPeriod, false);
+    assert.ok(Array.isArray(dashRes.data.availableDepartments));
+    assert.ok(dashRes.data.availableDepartments.length > 0);
+    assert.ok(dashRes.data.availableDepartments.some((d: string) => d.includes('กลุ่มงาน')));
+    assert.ok(Array.isArray(dashRes.data.availablePersonnelTypes));
+    assert.ok(dashRes.data.availablePersonnelTypes.some((t: any) => t.code === 'CIVIL_SERVANT'));
+
+    // 4. Verify Production Config Fail-Closed blocks SAM_ATT_DATA_MODE=DEMO in production
+    const baseProdCfg = loadConfig();
+    assert.throws(
+      () =>
+        validateProductionConfig({
+          ...baseProdCfg,
+          nodeEnv: 'production',
+          dataMode: 'DEMO',
+          dbEngine: 'mysql',
+        }),
+      (err: unknown) => err instanceof ProductionConfigError && err.violations.some((v) => v.includes('DEMO'))
+    );
+
+    // 5. Verify REAL mode on a clean SQLite database seeds ONLY baseline catalog and ZERO synthetic personnel/scans
+    const realModeSqlitePath = path.join(os.tmpdir(), `sam_att_real_mode_${TEST_RUN_ID}.sqlite`);
+    try {
+      process.env.SAM_ATT_DATA_MODE = 'REAL';
+      resetSqliteInstanceForTests(realModeSqlitePath);
+      await runMigrations();
+      await ensureBaselineSystemCatalog();
+      // Calling seedBaselineAndSyntheticData in REAL mode must NOT insert synthetic data
+      await seedBaselineAndSyntheticData();
+
+      const realPersonnel = await dbQuery<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM personnel');
+      const realRawScans = await dbQuery<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM raw_scans');
+      const realUsers = await dbQuery<{ username: string; display_name: string; approved_person_id: string | null }>(
+        'SELECT username, display_name, approved_person_id FROM users'
+      );
+      const realShifts = await dbQuery<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM shifts');
+      const realRules = await dbQuery<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM personnel_type_rules');
+      const realScanners = await dbQuery<{ machine_no: number }>('SELECT machine_no FROM scanner_devices ORDER BY machine_no ASC');
+
+      assert.equal(Number(realPersonnel[0].cnt), 0, 'REAL mode must have 0 synthetic personnel');
+      assert.equal(Number(realRawScans[0].cnt), 0, 'REAL mode must have 0 synthetic raw scans');
+      assert.equal(realUsers.length, 1, 'REAL mode must only create 1 initial admin bootstrap account');
+      assert.equal(realUsers[0].username, 'admin');
+      assert.equal(realUsers[0].approved_person_id, null, 'REAL mode admin must not be bound to fake SAM-P001');
+      assert.equal(realUsers[0].display_name, 'ผู้ดูแลระบบหลัก (System Admin)');
+      assert.equal(Number(realShifts[0].cnt), 5, 'REAL mode must have 5 standard shift templates');
+      assert.equal(Number(realRules[0].cnt), 3, 'REAL mode must have 3 personnel type rules');
+      assert.deepEqual(
+        realScanners.map((s) => Number(s.machine_no)),
+        [1, 2, 3],
+        'REAL mode must register hospital scanner devices 1, 2, 3 (not demo 101-103)'
+      );
+
+      // Verify getCurrentBangkokDateParts returns valid YYYY-MM-DD in Asia/Bangkok
+      const bkkParts = getCurrentBangkokDateParts();
+      assert.match(bkkParts.todayYmd, /^\d{4}-\d{2}-\d{2}$/);
+      assert.match(bkkParts.currentYearMonth, /^\d{4}-\d{2}$/);
+    } finally {
+      process.env.SAM_ATT_DATA_MODE = 'DEMO';
+      resetSqliteInstanceForTests(TEST_SQLITE_PATH);
+      for (const ext of ['', '-shm', '-wal']) {
+        const f = `${realModeSqlitePath}${ext}`;
+        if (fs.existsSync(f)) {
+          try {
+            fs.unlinkSync(f);
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
   });
 });
 

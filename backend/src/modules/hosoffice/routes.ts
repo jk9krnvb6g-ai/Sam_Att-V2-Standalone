@@ -21,6 +21,7 @@ import mysql from 'mysql2/promise';
 import { Router } from 'express';
 import { loadConfig } from '../../config/env.ts';
 import { dbQuery, dbExecute } from '../../database/adapter.ts';
+import { getCurrentBangkokDateParts } from '../../utils/crypto.ts';
 import { requireAuth, requireRoles } from '../../middleware/auth.ts';
 import { writeAuditLog } from '../audit/service.ts';
 
@@ -563,8 +564,9 @@ hosofficeRouter.post(
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
   async (req, res, next) => {
     try {
-      const dateFrom = String(req.body?.dateFrom || '2026-11-12').trim();
-      const dateTo = String(req.body?.dateTo || '2026-11-13').trim();
+      const bkk = getCurrentBangkokDateParts();
+      const dateFrom = String(req.body?.dateFrom || bkk.yesterdayYmd).trim();
+      const dateTo = String(req.body?.dateTo || bkk.todayYmd).trim();
       const cfg = loadConfig();
 
       const batch = await evaluatePushBatch(dateFrom, dateTo);
@@ -619,6 +621,7 @@ hosofficeRouter.post(
 
       res.json({
         mode: 'DRY_RUN_PREVIEW',
+        dataMode: cfg.dataMode,
         livePushEnabled: cfg.hosofficePush.livePushEnabled,
         targetTable: cfg.hosofficePush.targetTable,
         idempotencyKey,
@@ -644,8 +647,9 @@ hosofficeRouter.post(
   async (req, res, next) => {
     try {
       const cfg = loadConfig();
-      const dateFrom = String(req.body?.dateFrom || '2026-11-12').trim();
-      const dateTo = String(req.body?.dateTo || '2026-11-13').trim();
+      const bkk = getCurrentBangkokDateParts();
+      const dateFrom = String(req.body?.dateFrom || bkk.yesterdayYmd).trim();
+      const dateTo = String(req.body?.dateTo || bkk.todayYmd).trim();
       const idempotencyKey = String(req.body?.idempotencyKey || `LIVE-${dateFrom}-${dateTo}`).trim();
 
       if (!cfg.hosofficePush.livePushEnabled || !cfg.hosofficePush.targetTable) {
@@ -670,6 +674,30 @@ hosofficeRouter.post(
           code: 'BLOCKED_BY_EXTERNAL_CONTRACT',
           message:
             'ปิดการส่งข้อมูลจริงเข้า HOSOffice (HOSOFFICE_LIVE_PUSH_ENABLED=false หรือยังไม่ได้ระบุ HOSOFFICE_PUSH_TARGET_TABLE)',
+          sideEffectsWritten: 0,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      // ห้ามส่งข้อมูลจำลองจาก DEMO Mode เข้าฐานข้อมูลจริงของ HOSOffice เด็ดขาด (ยกเว้นกรณีรัน Automated Test Sink ที่จำลอง Adapter เอง)
+      if (cfg.dataMode === 'DEMO' && !customHosOfficeTargetAdapter) {
+        await writeAuditLog({
+          requestId: req.requestId,
+          actorUsername: req.user!.username,
+          actorRole: req.user!.role,
+          ipAddress: req.ip || '127.0.0.1',
+          action: 'HOSOFFICE_LIVE_PUSH_BLOCKED_DEMO_MODE',
+          targetType: 'HOSOFFICE_PUSH',
+          targetId: idempotencyKey,
+          result: 'BLOCKED',
+          errorCode: 'DEMO_MODE_LIVE_PUSH_FORBIDDEN',
+        });
+
+        res.status(403).json({
+          error: 'DEMO_MODE_LIVE_PUSH_FORBIDDEN',
+          code: 'BLOCKED_BY_DEMO_MODE',
+          message: 'ไม่อนุญาตให้ส่งข้อมูลจากโหมดข้อมูลตัวอย่าง (DEMO Mode) เข้าสู่ฐานข้อมูล HOSOffice จริงเด็ดขาด',
           sideEffectsWritten: 0,
           requestId: req.requestId,
         });

@@ -18,6 +18,7 @@ import {
   verifyPassword,
   signJwt,
   computeCsrfToken,
+  repairThaiMojibakeIfCorrupted,
   type UserRole,
 } from '../../utils/crypto.ts';
 import {
@@ -209,14 +210,20 @@ authRouter.post('/auth/login', async (req, res, next) => {
       result: 'SUCCESS',
     });
 
+    const cleanDisplayName = repairThaiMojibakeIfCorrupted(
+      user.display_name,
+      user.username === 'admin' ? 'ผู้ดูแลระบบสูงสุด (โรงพยาบาลสามชุก)' : user.username
+    ).text;
+
     res.json({
       token,
       csrfToken,
       expiresAt: expiresAtIso,
+      dataMode: cfg.dataMode,
       user: {
         id: user.id,
         username: user.username,
-        displayName: user.display_name,
+        displayName: cleanDisplayName,
         role: user.role,
         approvedPersonId: user.approved_person_id,
       },
@@ -243,13 +250,21 @@ authRouter.get('/auth/me', requireAuth, async (req, res, next) => {
         'SELECT person_id, fingle_id, full_name, position_name, department_name, personnel_type_name FROM personnel WHERE person_id = ? LIMIT 1',
         [u.approvedPersonId]
       );
-      personProfile = rows[0] || null;
+      if (rows[0]) {
+        personProfile = {
+          ...rows[0],
+          full_name: repairThaiMojibakeIfCorrupted(rows[0].full_name, rows[0].person_id).text,
+          department_name: repairThaiMojibakeIfCorrupted(rows[0].department_name, '-').text,
+          personnel_type_name: repairThaiMojibakeIfCorrupted(rows[0].personnel_type_name, '-').text,
+        };
+      }
     }
 
     const csrfToken = computeCsrfToken(u.jti, cfg.auth.jwtSecret);
 
     res.json({
       csrfToken,
+      dataMode: cfg.dataMode,
       user: {
         id: u.id,
         username: u.username,
@@ -316,7 +331,13 @@ authRouter.get('/users', requireAuth, requireRoles('ADMIN'), async (_req, res, n
        LEFT JOIN personnel p ON p.person_id = u.approved_person_id
        ORDER BY u.id ASC`
     );
-    res.json({ items: rows });
+    const items = rows.map((r) => ({
+      ...r,
+      display_name: repairThaiMojibakeIfCorrupted(r.display_name, r.username).text,
+      full_name: r.full_name ? repairThaiMojibakeIfCorrupted(r.full_name, r.approved_person_id || '').text : null,
+      department_name: r.department_name ? repairThaiMojibakeIfCorrupted(r.department_name, '-').text : null,
+    }));
+    res.json({ items });
   } catch (err) {
     next(err);
   }

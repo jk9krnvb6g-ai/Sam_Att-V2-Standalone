@@ -13,7 +13,7 @@ import fs from 'fs';
 import mysql from 'mysql2/promise';
 import { Router } from 'express';
 import { loadConfig, validateProductionConfig } from '../../config/env.ts';
-import { dbQuery } from '../../database/adapter.ts';
+import { dbQuery, inspectDatabaseIntegrityReadOnly } from '../../database/adapter.ts';
 import { verifyPassword } from '../../utils/crypto.ts';
 import { requireAuth, requireRoles } from '../../middleware/auth.ts';
 import { writeAuditLog } from '../audit/service.ts';
@@ -80,6 +80,7 @@ settingsRouter.get(
         system: {
           appName: 'Sam_Att V2 Standalone',
           version: '2.0.0-standalone',
+          dataMode: cfg.dataMode,
           targetNodeEngine: '26.13.1',
           runtimeNodeVersion: process.version,
           nodeEnv: cfg.nodeEnv,
@@ -141,6 +142,7 @@ settingsRouter.get(
 
       res.json({
         status: 'HEALTHY',
+        dataMode: cfg.dataMode,
         samAttDb: {
           connected: true,
           engine: cfg.dbEngine,
@@ -159,6 +161,21 @@ settingsRouter.get(
             : 'รอการติดตั้งร่วมกับไฟล์ ScannerReader.exe เดิมบน Windows Server',
         },
       });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// B13.2 Read-Only Synthetic Data & Mojibake Inspector (Zero Automatic Deletion)
+settingsRouter.get(
+  '/settings/data-integrity-audit',
+  requireAuth,
+  requireRoles('ADMIN'),
+  async (_req, res, next) => {
+    try {
+      const report = await inspectDatabaseIntegrityReadOnly();
+      res.json(report);
     } catch (err) {
       next(err);
     }
@@ -202,14 +219,16 @@ settingsRouter.post(
             user: cfg.hosofficeDb.user,
             password: cfg.hosofficeDb.password,
             database: cfg.hosofficeDb.database,
+            charset: 'utf8mb4',
             connectTimeout: 3000,
           });
+          await conn.query('SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci');
           await conn.query('SELECT 1');
           await conn.end();
           res.json({
             target,
             reachable: true,
-            message: 'เชื่อมต่อฐานข้อมูล HOSOffice Read-only สำเร็จ',
+            message: 'เชื่อมต่อฐานข้อมูล HOSOffice Read-only สำเร็จ (UTF-8 / utf8mb4)',
           });
         } catch (connErr: unknown) {
           console.error('[HOSOffice Connection Test Error]', connErr);

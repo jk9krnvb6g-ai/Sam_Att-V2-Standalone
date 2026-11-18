@@ -78,6 +78,52 @@ export function formatThaiDateTime(tsStr?: string | null): string {
 export type PeriodMode = 'DAILY' | 'MONTHLY' | 'YEARLY' | 'CUSTOM';
 
 /**
+ * ดึงค่าวันที่ปัจจุบันตามเขตเวลา Asia/Bangkok (+07:00) สำหรับใช้เป็นค่าเริ่มต้นแทนการ Hardcode วันที่คงที่
+ */
+export function getCurrentBangkokDateParts(referenceDate: Date = new Date()): {
+  todayYmd: string;
+  yesterdayYmd: string;
+  currentYearMonth: string;
+  currentYear: string;
+  monthStartYmd: string;
+  monthEndYmd: string;
+  nowDateTimeBkk: string;
+} {
+  const bkkMs = referenceDate.getTime() + 7 * 3600 * 1000;
+  const bkkDate = new Date(bkkMs);
+  const year = bkkDate.getUTCFullYear();
+  const month = bkkDate.getUTCMonth() + 1;
+  const day = bkkDate.getUTCDate();
+  const hh = String(bkkDate.getUTCHours()).padStart(2, '0');
+  const mi = String(bkkDate.getUTCMinutes()).padStart(2, '0');
+  const ss = String(bkkDate.getUTCSeconds()).padStart(2, '0');
+
+  const mm = String(month).padStart(2, '0');
+  const dd = String(day).padStart(2, '0');
+  const todayYmd = `${year}-${mm}-${dd}`;
+
+  const yesterdayDate = new Date(bkkMs - 24 * 3600 * 1000);
+  const yYear = yesterdayDate.getUTCFullYear();
+  const yMonth = String(yesterdayDate.getUTCMonth() + 1).padStart(2, '0');
+  const yDay = String(yesterdayDate.getUTCDate()).padStart(2, '0');
+  const yesterdayYmd = `${yYear}-${yMonth}-${yDay}`;
+
+  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const monthStartYmd = `${year}-${mm}-01`;
+  const monthEndYmd = `${year}-${mm}-${String(lastDay).padStart(2, '0')}`;
+
+  return {
+    todayYmd,
+    yesterdayYmd,
+    currentYearMonth: `${year}-${mm}`,
+    currentYear: String(year),
+    monthStartYmd,
+    monthEndYmd,
+    nowDateTimeBkk: `${todayYmd} ${hh}:${mi}:${ss}`,
+  };
+}
+
+/**
  * คำนวณค่า dateFrom, dateTo และป้ายกำกับภาษาไทย (thaiPeriodLabel)
  * ตามโหมดช่วงเวลาที่ผู้ใช้เลือกในแถบตัวกรอง PeriodFilterBar
  */
@@ -90,17 +136,19 @@ export function resolvePeriodRange(params: {
   customTo: string;
 }): { dateFrom: string; dateTo: string; thaiPeriodLabel: string } {
   const { mode, dailyDate, monthValue, yearValue, customFrom, customTo } = params;
+  const bkk = getCurrentBangkokDateParts();
 
   if (mode === 'DAILY') {
+    const activeDay = dailyDate || bkk.todayYmd;
     return {
-      dateFrom: dailyDate,
-      dateTo: dailyDate,
-      thaiPeriodLabel: `รายวัน: ${formatThaiDate(dailyDate)}`,
+      dateFrom: activeDay,
+      dateTo: activeDay,
+      thaiPeriodLabel: `รายวัน: ${formatThaiDate(activeDay)}`,
     };
   }
 
   if (mode === 'MONTHLY') {
-    const [yStr, mStr] = (monthValue || '2026-11').split('-');
+    const [yStr, mStr] = (monthValue || bkk.currentYearMonth).split('-');
     const year = Number(yStr);
     const month = Number(mStr);
     // หาวันสุดท้ายของเดือนนั้น (เช่น 28, 29, 30 หรือ 31)
@@ -116,7 +164,7 @@ export function resolvePeriodRange(params: {
   }
 
   if (mode === 'YEARLY') {
-    const year = Number(yearValue || '2026');
+    const year = Number(yearValue || bkk.currentYear);
     return {
       dateFrom: `${year}-01-01`,
       dateTo: `${year}-12-31`,
@@ -125,8 +173,8 @@ export function resolvePeriodRange(params: {
   }
 
   return {
-    dateFrom: customFrom,
-    dateTo: customTo,
-    thaiPeriodLabel: `ช่วงวันที่ ${formatThaiDate(customFrom)} ถึง ${formatThaiDate(customTo)}`,
+    dateFrom: customFrom || bkk.monthStartYmd,
+    dateTo: customTo || bkk.monthEndYmd,
+    thaiPeriodLabel: `ช่วงวันที่ ${formatThaiDate(customFrom || bkk.monthStartYmd)} ถึง ${formatThaiDate(customTo || bkk.monthEndYmd)}`,
   };
 }

@@ -4,7 +4,13 @@ import { apiRequest, setStoredToken, type AuthUser, ApiClientError } from '../se
 import { ErrorBanner } from '../components/StatusText.tsx';
 import { RequiredMark } from '../components/common/SharedComponents.tsx';
 
-export function LoginView({ onLoginSuccess }: { onLoginSuccess: (user: AuthUser) => void }) {
+export function LoginView({
+  dataMode = 'REAL',
+  onLoginSuccess,
+}: {
+  dataMode?: 'REAL' | 'DEMO';
+  onLoginSuccess: (user: AuthUser, resolvedMode?: 'REAL' | 'DEMO') => void;
+}) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -16,13 +22,18 @@ export function LoginView({ onLoginSuccess }: { onLoginSuccess: (user: AuthUser)
     setError(null);
     setLoading(true);
     try {
-      const res = await apiRequest<{ token: string; csrfToken?: string; user: AuthUser }>('/auth/login', {
+      const res = await apiRequest<{
+        token: string;
+        csrfToken?: string;
+        dataMode?: 'REAL' | 'DEMO';
+        user: AuthUser;
+      }>('/auth/login', {
         method: 'POST',
         body: JSON.stringify({ username, password }),
       });
       setStoredToken(res.csrfToken || 'cookie-session-active');
-      const me = await apiRequest<{ user: AuthUser }>('/auth/me');
-      onLoginSuccess(me.user);
+      const me = await apiRequest<{ user: AuthUser; dataMode?: 'REAL' | 'DEMO' }>('/auth/me');
+      onLoginSuccess(me.user, me.dataMode || res.dataMode || dataMode);
     } catch (err) {
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
@@ -60,11 +71,18 @@ export function LoginView({ onLoginSuccess }: { onLoginSuccess: (user: AuthUser)
 
       <div className="mt-7 sm:mx-auto sm:w-full sm:max-w-lg">
         <div className="ent-card py-8 px-6 sm:px-9 space-y-6">
-          <div className="border-b border-[#E7E2E5] pb-4">
-            <h2 className="text-[19px] font-bold text-[#273244]">
-              ลงชื่อเข้าใช้งานสำหรับบุคลากร
-            </h2>
-            <p className="mt-1 text-[14px] text-[#596579] leading-relaxed">
+          <div className="border-b border-[#E7E2E5] pb-4 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-[19px] font-bold text-[#273244]">
+                ลงชื่อเข้าใช้งานสำหรับบุคลากร
+              </h2>
+              {dataMode === 'DEMO' && (
+                <span className="px-2.5 py-1 rounded-md bg-amber-100 border border-amber-300 text-[#92400E] text-[12px] font-bold">
+                  โหมดข้อมูลตัวอย่าง (DEMO)
+                </span>
+              )}
+            </div>
+            <p className="text-[14px] text-[#596579] leading-relaxed">
               ตรวจสอบเวลาเข้า–ออกงาน ตารางเวรหมุนเวียน และรายงานประจำเดือนตามสิทธิ์การปฏิบัติงาน
             </p>
           </div>
@@ -137,54 +155,56 @@ export function LoginView({ onLoginSuccess }: { onLoginSuccess: (user: AuthUser)
             </button>
           </form>
 
-          <div className="pt-5 border-t border-[#E7E2E5] space-y-3">
-            <div className="text-[13.5px] font-semibold text-[#273244]">
-              บัญชีสำหรับทดสอบระบบตามระดับสิทธิ์ (คลิกเพื่อกรอกข้อมูลอัตโนมัติ):
-            </div>
-            <div className="grid grid-cols-1 gap-2">
-              <button
-                type="button"
-                onClick={() => fillQuickTestAccount('admin', 'Admin@SamAtt2026')}
-                className="text-left px-4 py-3 text-[13.5px] border border-[#E7E2E5] rounded-xl bg-[#FFF9F9] hover:bg-[#F9E8EB]/60 hover:border-[#B45363]/40 flex items-center justify-between transition-colors"
-              >
-                <div>
-                  <div className="font-semibold text-[#9F3F50]">1. ผู้ดูแลระบบ (ADMIN)</div>
-                  <div className="text-[12.5px] text-[#596579]">ดูแลระบบทั้งหมด เครื่องสแกน และผู้ใช้งาน</div>
-                </div>
-                <span className="font-mono text-[12.5px] text-[#273244] bg-white px-2.5 py-1 rounded-md border border-[#E7E2E5]">
-                  admin · SAM-P001
-                </span>
-              </button>
+          {dataMode === 'DEMO' && (
+            <div className="pt-5 border-t border-[#E7E2E5] space-y-3">
+              <div className="text-[13.5px] font-semibold text-[#273244]">
+                บัญชีสำหรับทดสอบระบบตามระดับสิทธิ์ (แสดงเฉพาะโหมด DEMO — คลิกเพื่อกรอกอัตโนมัติ):
+              </div>
+              <div className="grid grid-cols-1 gap-2">
+                <button
+                  type="button"
+                  onClick={() => fillQuickTestAccount('admin', 'Admin@SamAtt2026')}
+                  className="text-left px-4 py-3 text-[13.5px] border border-[#E7E2E5] rounded-xl bg-[#FFF9F9] hover:bg-[#F9E8EB]/60 hover:border-[#B45363]/40 flex items-center justify-between transition-colors"
+                >
+                  <div>
+                    <div className="font-semibold text-[#9F3F50]">1. ผู้ดูแลระบบ (ADMIN)</div>
+                    <div className="text-[12.5px] text-[#596579]">ดูแลระบบทั้งหมด เครื่องสแกน และผู้ใช้งาน</div>
+                  </div>
+                  <span className="font-mono text-[12.5px] text-[#273244] bg-white px-2.5 py-1 rounded-md border border-[#E7E2E5]">
+                    admin · SAM-P001
+                  </span>
+                </button>
 
-              <button
-                type="button"
-                onClick={() => fillQuickTestAccount('hrstaff', 'Staff@SamAtt2026')}
-                className="text-left px-4 py-3 text-[13.5px] border border-[#E7E2E5] rounded-xl bg-[#FFF9F9] hover:bg-[#F9E8EB]/60 hover:border-[#B45363]/40 flex items-center justify-between transition-colors"
-              >
-                <div>
-                  <div className="font-semibold text-[#2563EB]">2. เจ้าหน้าที่งานบุคคล (HR)</div>
-                  <div className="text-[12.5px] text-[#596579]">จัดการตารางเวร ตรวจสอบเวลา และออกรายงาน</div>
-                </div>
-                <span className="font-mono text-[12.5px] text-[#273244] bg-white px-2.5 py-1 rounded-md border border-[#E7E2E5]">
-                  hrstaff · SAM-P002
-                </span>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => fillQuickTestAccount('hrstaff', 'Staff@SamAtt2026')}
+                  className="text-left px-4 py-3 text-[13.5px] border border-[#E7E2E5] rounded-xl bg-[#FFF9F9] hover:bg-[#F9E8EB]/60 hover:border-[#B45363]/40 flex items-center justify-between transition-colors"
+                >
+                  <div>
+                    <div className="font-semibold text-[#2563EB]">2. เจ้าหน้าที่งานบุคคล (HR)</div>
+                    <div className="text-[12.5px] text-[#596579]">จัดการตารางเวร ตรวจสอบเวลา และออกรายงาน</div>
+                  </div>
+                  <span className="font-mono text-[12.5px] text-[#273244] bg-white px-2.5 py-1 rounded-md border border-[#E7E2E5]">
+                    hrstaff · SAM-P002
+                  </span>
+                </button>
 
-              <button
-                type="button"
-                onClick={() => fillQuickTestAccount('user1003', 'User@SamAtt2026')}
-                className="text-left px-4 py-3 text-[13.5px] border border-[#E7E2E5] rounded-xl bg-[#FFF9F9] hover:bg-[#F9E8EB]/60 hover:border-[#B45363]/40 flex items-center justify-between transition-colors"
-              >
-                <div>
-                  <div className="font-semibold text-[#273244]">3. บุคลากรทั่วไป (Own-Only)</div>
-                  <div className="text-[12.5px] text-[#596579]">ดูประวัติการลงเวลาและตารางเวรเฉพาะของตนเอง</div>
-                </div>
-                <span className="font-mono text-[12.5px] text-[#273244] bg-white px-2.5 py-1 rounded-md border border-[#E7E2E5]">
-                  user1003 · SAM-P003
-                </span>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => fillQuickTestAccount('user1003', 'User@SamAtt2026')}
+                  className="text-left px-4 py-3 text-[13.5px] border border-[#E7E2E5] rounded-xl bg-[#FFF9F9] hover:bg-[#F9E8EB]/60 hover:border-[#B45363]/40 flex items-center justify-between transition-colors"
+                >
+                  <div>
+                    <div className="font-semibold text-[#273244]">3. บุคลากรทั่วไป (Own-Only)</div>
+                    <div className="text-[12.5px] text-[#596579]">ดูประวัติการลงเวลาและตารางเวรเฉพาะของตนเอง</div>
+                  </div>
+                  <span className="font-mono text-[12.5px] text-[#273244] bg-white px-2.5 py-1 rounded-md border border-[#E7E2E5]">
+                    user1003 · SAM-P003
+                  </span>
+                </button>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
     </div>

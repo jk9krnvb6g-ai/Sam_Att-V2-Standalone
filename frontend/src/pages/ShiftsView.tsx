@@ -45,7 +45,11 @@ import {
   RequiredMark,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
-import { formatThaiDate, formatThaiDateTime } from '../utils/thaiFormat.ts';
+import {
+  formatThaiDate,
+  formatThaiDateTime,
+  getCurrentBangkokDateParts,
+} from '../utils/thaiFormat.ts';
 
 type MainTabKey = 'ROSTER' | 'TEMPLATES';
 type RosterViewMode = 'MONTHLY_GRID' | 'DETAIL_LIST';
@@ -72,7 +76,8 @@ const THAI_FULL_MONTHS = [
 const THAI_SHORT_WEEKDAYS = ['อา.', 'จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.'];
 
 function formatThaiMonthTitle(monthValue: string): string {
-  const [yStr, mStr] = (monthValue || '2026-11').split('-');
+  const bkk = getCurrentBangkokDateParts();
+  const [yStr, mStr] = (monthValue || bkk.currentYearMonth).split('-');
   const year = Number(yStr);
   const month = Number(mStr);
   if (Number.isNaN(year) || Number.isNaN(month) || month < 1 || month > 12) {
@@ -95,9 +100,10 @@ function getMonthDateBounds(monthValue: string): {
     isWeekend: boolean;
   }>;
 } {
-  const [yStr, mStr] = (monthValue || '2026-11').split('-');
-  const year = Number(yStr) || 2026;
-  const month = Number(mStr) || 11;
+  const bkk = getCurrentBangkokDateParts();
+  const [yStr, mStr] = (monthValue || bkk.currentYearMonth).split('-');
+  const year = Number(yStr) || Number(bkk.currentYear);
+  const month = Number(mStr) || 1;
   const daysInMonth = new Date(year, month, 0).getDate();
   const mm = String(month).padStart(2, '0');
   const allDates: Array<{
@@ -132,8 +138,9 @@ function getMonthDateBounds(monthValue: string): {
 }
 
 function shiftMonthString(monthValue: string, deltaMonths: number): string {
-  const [yStr, mStr] = (monthValue || '2026-11').split('-');
-  const dt = new Date(Number(yStr) || 2026, (Number(mStr) || 11) - 1 + deltaMonths, 1);
+  const bkk = getCurrentBangkokDateParts();
+  const [yStr, mStr] = (monthValue || bkk.currentYearMonth).split('-');
+  const dt = new Date(Number(yStr) || Number(bkk.currentYear), (Number(mStr) || 1) - 1 + deltaMonths, 1);
   const y = dt.getFullYear();
   const m = String(dt.getMonth() + 1).padStart(2, '0');
   return `${y}-${m}`;
@@ -191,6 +198,8 @@ const SHIFT_CATEGORY_LABELS: Record<string, string> = {
 };
 
 export function ShiftsView() {
+  const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
+
   // แท็บหลัก: ตารางเวร (ค่าเริ่มต้น) หรือ จัดการแม่แบบกะ
   const [activeTab, setActiveTab] = useState<MainTabKey>('ROSTER');
   // มุมมองภายในแท็บตารางเวร: ตารางเวรประจำเดือน (ค่าเริ่มต้น) หรือ มุมมองรายการ
@@ -208,7 +217,7 @@ export function ShiftsView() {
   const [notice, setNotice] = useState<string | null>(null);
 
   // ตัวกรองตารางเวร
-  const [selectedMonth, setSelectedMonth] = useState('2026-11');
+  const [selectedMonth, setSelectedMonth] = useState(initialBkk.currentYearMonth);
   const [searchText, setSearchText] = useState('');
   const [departmentFilter, setDepartmentFilter] = useState('ALL');
   const [shiftFilter, setShiftFilter] = useState<string>('ALL');
@@ -230,15 +239,15 @@ export function ShiftsView() {
 
   // หน้าต่างมอบหมายเวร (Bulk & Single Assignment Dialog)
   const [assignModalOpen, setAssignModalOpen] = useState(false);
-  const [selectedPersonIds, setSelectedPersonIds] = useState<string[]>(['SAM-P001']);
+  const [selectedPersonIds, setSelectedPersonIds] = useState<string[]>([]);
   const [modalPersonDeptFilter, setModalPersonDeptFilter] = useState('ALL');
   const [modalPersonSearch, setModalPersonSearch] = useState('');
   const [assignShiftId, setAssignShiftId] = useState<number>(1);
   const [dateSelectionMode, setDateSelectionMode] = useState<DateSelectionMode>('DATE_RANGE');
-  const [rangeStartDate, setRangeStartDate] = useState('2026-11-14');
-  const [rangeEndDate, setRangeEndDate] = useState('2026-11-16');
+  const [rangeStartDate, setRangeStartDate] = useState(initialBkk.todayYmd);
+  const [rangeEndDate, setRangeEndDate] = useState(initialBkk.todayYmd);
   const [weekdayFilter, setWeekdayFilter] = useState<WeekdayFilterMode>('ALL_DAYS');
-  const [multiPickedDates, setMultiPickedDates] = useState<string[]>(['2026-11-14']);
+  const [multiPickedDates, setMultiPickedDates] = useState<string[]>([initialBkk.todayYmd]);
   const [conflictStrategy, setConflictStrategy] = useState<ConflictStrategyMode>('SKIP_CONFLICTS');
 
   // สถานะการตรวจสอบความขัดแย้ง (Preview) และการบันทึก
@@ -293,10 +302,15 @@ export function ShiftsView() {
         apiRequest('/personnel'),
       ]);
       const loadedShifts = shRes.items || [];
+      const loadedPersonnel = pRes.items || [];
       setShifts(loadedShifts);
       setAssignments(saRes.items || []);
       setCancellationLogs(saRes.cancellationLogs || []);
-      setPersonnel(pRes.items || []);
+      setPersonnel(loadedPersonnel);
+
+      if (loadedPersonnel.length > 0 && selectedPersonIds.length === 0) {
+        setSelectedPersonIds([String(loadedPersonnel[0].person_id)]);
+      }
 
       if (loadedShifts.length > 0 && !loadedShifts.some((s: any) => Number(s.id) === assignShiftId)) {
         setAssignShiftId(Number(loadedShifts[0].id));
@@ -814,7 +828,7 @@ export function ShiftsView() {
                     type="month"
                     aria-label="เลือกเดือนตารางเวร"
                     value={selectedMonth}
-                    onChange={(e) => setSelectedMonth(e.target.value || '2026-11')}
+                    onChange={(e) => setSelectedMonth(e.target.value || initialBkk.currentYearMonth)}
                     className="px-2.5 py-1 bg-transparent text-[13.5px] font-mono font-semibold text-slate-800 focus:outline-none"
                   />
                   <button

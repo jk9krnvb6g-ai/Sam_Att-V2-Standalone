@@ -45,19 +45,32 @@ import { AdminViews } from './pages/AdminViews.tsx';
 
 export default function App() {
   const [user, setUser] = useState<AuthUser | null>(null);
+  const [dataMode, setDataMode] = useState<'REAL' | 'DEMO'>('REAL');
   const [activeView, setActiveView] = useState<NavViewKey>('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [initializing, setInitializing] = useState(true);
 
   useEffect(() => {
     async function restoreSession() {
+      try {
+        const health = await apiRequest<{ dataMode?: 'REAL' | 'DEMO' }>('/health');
+        if (health.dataMode === 'DEMO' || health.dataMode === 'REAL') {
+          setDataMode(health.dataMode);
+        }
+      } catch {
+        // ignore health check failure during bootstrap
+      }
+
       const token = getStoredToken();
       if (!token) {
         setInitializing(false);
         return;
       }
       try {
-        const res = await apiRequest<{ user: AuthUser }>('/auth/me');
+        const res = await apiRequest<{ user: AuthUser; dataMode?: 'REAL' | 'DEMO' }>('/auth/me');
+        if (res.dataMode === 'DEMO' || res.dataMode === 'REAL') {
+          setDataMode(res.dataMode);
+        }
         setUser(res.user);
         setActiveView(res.user.role === 'GENERAL_USER' ? 'myAttendance' : 'dashboard');
       } catch {
@@ -79,7 +92,10 @@ export default function App() {
     setUser(null);
   }
 
-  function handleLoginSuccess(loggedInUser: AuthUser) {
+  function handleLoginSuccess(loggedInUser: AuthUser, resolvedMode?: 'REAL' | 'DEMO') {
+    if (resolvedMode === 'DEMO' || resolvedMode === 'REAL') {
+      setDataMode(resolvedMode);
+    }
     setUser(loggedInUser);
     setActiveView(loggedInUser.role === 'GENERAL_USER' ? 'myAttendance' : 'dashboard');
   }
@@ -93,7 +109,7 @@ export default function App() {
   }
 
   if (!user) {
-    return <LoginView onLoginSuccess={handleLoginSuccess} />;
+    return <LoginView dataMode={dataMode} onLoginSuccess={handleLoginSuccess} />;
   }
 
   const breadcrumb = getNavBreadcrumb(activeView);
@@ -101,6 +117,20 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#FFF9F9] flex flex-col overflow-x-hidden">
+      {dataMode === 'DEMO' && (
+        <div
+          role="status"
+          aria-label="แถบแจ้งเตือนโหมดข้อมูลตัวอย่าง"
+          className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-center text-[13px] font-semibold text-[#B45309] flex flex-wrap items-center justify-center gap-2"
+        >
+          <span className="px-2 py-0.5 rounded-md bg-amber-200/80 text-[#92400E] font-bold">
+            โหมดข้อมูลตัวอย่าง (DEMO)
+          </span>
+          <span>
+            ระบบกำลังแสดงข้อมูลจำลองในฐานข้อมูลแยกเฉพาะสำหรับการทดสอบ ไม่ปะปนกับข้อมูลจริงและปิดการส่งข้อมูลเข้า HOSOffice จริง
+          </span>
+        </div>
+      )}
       {/* Topbar: Responsive height (60px mobile, 68px desktop) */}
       <header className="bg-white border-b border-[#E7E2E5] px-3 sm:px-6 lg:px-8 h-[60px] sm:h-[68px] flex items-center justify-between gap-2 sm:gap-4 lg:gap-8 sticky top-0 z-20">
         {/* Zone 1: Mobile Drawer Toggle + Hospital Brand Identity */}

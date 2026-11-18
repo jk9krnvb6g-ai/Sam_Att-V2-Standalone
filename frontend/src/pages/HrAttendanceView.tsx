@@ -32,6 +32,7 @@ import {
   formatThaiDate,
   formatThaiDateTime,
   resolvePeriodRange,
+  getCurrentBangkokDateParts,
   type PeriodMode,
 } from '../utils/thaiFormat.ts';
 
@@ -44,12 +45,14 @@ const REASON_LABELS: Record<string, string> = {
 };
 
 export function HrAttendanceView({ mode }: { mode: 'management' | 'review' }) {
+  const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
+
   const [periodMode, setPeriodMode] = useState<PeriodMode>('MONTHLY');
-  const [dailyDate, setDailyDate] = useState('2026-11-13');
-  const [monthValue, setMonthValue] = useState('2026-11');
-  const [yearValue, setYearValue] = useState('2026');
-  const [customFrom, setCustomFrom] = useState('2026-11-01');
-  const [customTo, setCustomTo] = useState('2026-11-30');
+  const [dailyDate, setDailyDate] = useState(initialBkk.todayYmd);
+  const [monthValue, setMonthValue] = useState(initialBkk.currentYearMonth);
+  const [yearValue, setYearValue] = useState(initialBkk.currentYear);
+  const [customFrom, setCustomFrom] = useState(initialBkk.monthStartYmd);
+  const [customTo, setCustomTo] = useState(initialBkk.monthEndYmd);
 
   const [statusFilter, setStatusFilter] = useState('');
   const [search, setSearch] = useState('');
@@ -73,8 +76,8 @@ export function HrAttendanceView({ mode }: { mode: 'management' | 'review' }) {
   const [reviewComment, setReviewComment] = useState('');
 
   // Reprocess Preview / Execute state
-  const [reprocessFrom, setReprocessFrom] = useState('2026-11-12');
-  const [reprocessTo, setReprocessTo] = useState('2026-11-13');
+  const [reprocessFrom, setReprocessFrom] = useState(initialBkk.yesterdayYmd);
+  const [reprocessTo, setReprocessTo] = useState(initialBkk.todayYmd);
   const [previewResult, setPreviewResult] = useState<any>(null);
 
   const resolvedRange = useMemo(
@@ -206,12 +209,13 @@ export function HrAttendanceView({ mode }: { mode: 'management' | 'review' }) {
     setError(null);
     setNotice(null);
     try {
+      const bkk = getCurrentBangkokDateParts();
       const res = await apiRequest('/attendance/reprocess/preview', {
         method: 'POST',
         body: JSON.stringify({
           dateFrom: reprocessFrom,
           dateTo: reprocessTo,
-          referenceNowBkk: '2026-11-13 18:00:00',
+          referenceNowBkk: bkk.nowDateTimeBkk,
         }),
       });
       setPreviewResult(res);
@@ -226,12 +230,13 @@ export function HrAttendanceView({ mode }: { mode: 'management' | 'review' }) {
     setError(null);
     setNotice(null);
     try {
+      const bkk = getCurrentBangkokDateParts();
       const res = await apiRequest('/attendance/reprocess', {
         method: 'POST',
         body: JSON.stringify({
           dateFrom: reprocessFrom,
           dateTo: reprocessTo,
-          referenceNowBkk: '2026-11-13 18:00:00',
+          referenceNowBkk: bkk.nowDateTimeBkk,
         }),
       });
       setPreviewResult(null);

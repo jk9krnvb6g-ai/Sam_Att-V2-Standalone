@@ -32,16 +32,19 @@ import {
   formatThaiDate,
   formatThaiDateTime,
   resolvePeriodRange,
+  getCurrentBangkokDateParts,
   type PeriodMode,
 } from '../utils/thaiFormat.ts';
 
 export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
+  const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
+
   const [periodMode, setPeriodMode] = useState<PeriodMode>('MONTHLY');
-  const [dailyDate, setDailyDate] = useState('2026-11-13');
-  const [monthValue, setMonthValue] = useState('2026-11');
-  const [yearValue, setYearValue] = useState('2026');
-  const [customFrom, setCustomFrom] = useState('2026-11-01');
-  const [customTo, setCustomTo] = useState('2026-11-30');
+  const [dailyDate, setDailyDate] = useState(initialBkk.todayYmd);
+  const [monthValue, setMonthValue] = useState(initialBkk.currentYearMonth);
+  const [yearValue, setYearValue] = useState(initialBkk.currentYear);
+  const [customFrom, setCustomFrom] = useState(initialBkk.monthStartYmd);
+  const [customTo, setCustomTo] = useState(initialBkk.monthEndYmd);
   const [personnelType, setPersonnelType] = useState('');
 
   const [loading, setLoading] = useState(true);

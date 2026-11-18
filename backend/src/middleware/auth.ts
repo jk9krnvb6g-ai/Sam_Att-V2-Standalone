@@ -22,6 +22,7 @@ import {
   verifyJwt,
   parseCookies,
   verifyCsrfToken,
+  repairThaiMojibakeIfCorrupted,
   type UserRole,
 } from '../utils/crypto.ts';
 import { writeAuditLog } from '../modules/audit/service.ts';
@@ -157,10 +158,14 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     }
 
     const dbUser = users[0];
+    const cleanDisplayName = repairThaiMojibakeIfCorrupted(
+      dbUser.display_name,
+      dbUser.username === 'admin' ? 'ผู้ดูแลระบบสูงสุด (โรงพยาบาลสามชุก)' : dbUser.username
+    ).text;
     req.user = {
       id: dbUser.id,
       username: dbUser.username,
-      displayName: dbUser.display_name,
+      displayName: cleanDisplayName,
       role: dbUser.role,
       approvedPersonId: dbUser.approved_person_id,
       jti: payload.jti,

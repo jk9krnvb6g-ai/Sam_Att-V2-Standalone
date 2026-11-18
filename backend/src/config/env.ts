@@ -20,9 +20,11 @@ import { generateCryptographicSecret } from '../utils/crypto.ts';
 dotenv.config();
 
 export type DbEngineMode = 'mysql' | 'sqlite_sandbox';
+export type DataMode = 'REAL' | 'DEMO';
 
 export interface AppConfig {
   nodeEnv: string;
+  dataMode: DataMode;
   host: string;
   port: number;
   previewHttpPort: number;
@@ -117,6 +119,17 @@ export function loadConfig(): AppConfig {
       ? 'mysql'
       : 'sqlite_sandbox';
 
+  // กำหนดโหมดข้อมูล (SAM_ATT_DATA_MODE):
+  // - หากระบุ SAM_ATT_DATA_MODE=REAL หรือ DEMO จะใช้ค่านั้น (แต่ถ้า NODE_ENV=production แล้วตั้ง DEMO จะถูกบล็อกแบบ Fail-Closed ใน validateProductionConfig)
+  // - หากไม่ได้ระบุ: ถ้าใช้ MySQL หรืออยู่ในโหมด Production จะเป็น REAL เสมอ; ถ้าเป็น sqlite_sandbox ในโหมดพัฒนาจะเป็น DEMO
+  const rawDataMode = process.env.SAM_ATT_DATA_MODE?.trim().toUpperCase();
+  const dataMode: DataMode =
+    rawDataMode === 'REAL' || rawDataMode === 'DEMO'
+      ? (rawDataMode as DataMode)
+      : nodeEnv === 'production' || dbEngine === 'mysql'
+        ? 'REAL'
+        : 'DEMO';
+
   const rawPort = process.env.SAM_ATT_HTTPS_PORT;
   const httpsPort = rawPort ? Number(rawPort) : 4101;
 
@@ -126,8 +139,11 @@ export function loadConfig(): AppConfig {
   const rawScannerToken = process.env.SCANNER_INGEST_SHARED_TOKEN?.trim();
   const scannerTokenExplicit = isValidConfiguredSecret(rawScannerToken, 24);
 
-  // ในโหมด development/test ใช้ไฟล์ชั่วคราวใน os.tmpdir() หากไม่ได้กำหนดพาธ เพื่อไม่ให้เกิดไฟล์ .sqlite ค้างใน Repository (แก้ไข P0 ข้อ 02)
-  const defaultSqlitePath = path.join(os.tmpdir(), 'sam_att_v2_dev_runtime.sqlite');
+  // ในโหมด development/test ใช้ไฟล์แยกตามโหมดใน os.tmpdir() เพื่อไม่ให้ข้อมูล DEMO ปะปนกับฐานข้อมูลจริง
+  const defaultSqlitePath = path.join(
+    os.tmpdir(),
+    dataMode === 'DEMO' ? 'sam_att_v2_demo_sandbox.sqlite' : 'sam_att_v2_real_runtime.sqlite'
+  );
 
   // พาธใบรับรอง TLS: รองรับ C:\inetpub\wwwroot\Sam_Att\certs (ซึ่งอยู่ใน .gitignore ไม่ถูก Commit ขึ้น Git) หรือ C:\Sam_Att\certs
   const defaultCertDir =
@@ -155,6 +171,7 @@ export function loadConfig(): AppConfig {
 
   return {
     nodeEnv,
+    dataMode,
     host: process.env.HOST || '0.0.0.0',
     port: httpsPort,
     previewHttpPort: Number(process.env.PREVIEW_HTTP_PORT || 3000),
@@ -257,7 +274,24 @@ export function validateProductionConfig(cfg: AppConfig = loadConfig()): {
     violations.push(`INVALID_PORT: พอร์ต HTTPS (${cfg.port}) ต้องเป็นตัวเลขระหว่าง 1 ถึง 65535`);
   }
 
+  if (cfg.dataMode === 'DEMO' && process.env.HOSOFFICE_LIVE_PUSH_ENABLED === 'true') {
+    violations.push(
+      'DEMO_MODE_LIVE_PUSH_FORBIDDEN: ห้ามเปิด HOSOFFICE_LIVE_PUSH_ENABLED=true ขณะทำงานในโหมดข้อมูลตัวอย่าง (DEMO)'
+    );
+  }
+
+  if (cfg.dataMode === 'DEMO' && cfg.dbEngine === 'mysql') {
+    violations.push(
+      'DEMO_MODE_MYSQL_FORBIDDEN: ห้ามรันโหมดข้อมูลตัวอย่าง (DEMO) บนฐานข้อมูล MySQL จริง เพื่อป้องกันข้อมูลจำลองปะปนกับข้อมูลโรงพยาบาล'
+    );
+  }
+
   if (cfg.nodeEnv === 'production') {
+    if (cfg.dataMode !== 'REAL') {
+      violations.push(
+        'INVALID_DATA_MODE: โหมด Production ต้องใช้ SAM_ATT_DATA_MODE=REAL เท่านั้น ห้ามใช้โหมด DEMO ในสภาพแวดล้อมใช้งานจริง'
+      );
+    }
     if (cfg.dbEngine !== 'mysql') {
       violations.push('INVALID_DB_ENGINE: โหมด Production ต้องใช้ SAM_ATT_DB_ENGINE=mysql เท่านั้น');
     }

@@ -56,7 +56,7 @@ export function AdminViews({
   const [newPassword, setNewPassword] = useState('');
   const [newDisplayName, setNewDisplayName] = useState('');
   const [newRole, setNewRole] = useState<UserRole>('GENERAL_USER');
-  const [newPersonId, setNewPersonId] = useState('SAM-P005');
+  const [newPersonId, setNewPersonId] = useState('');
 
   // Audit logs state
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
@@ -66,6 +66,7 @@ export function AdminViews({
   // Settings state
   const [connections, setConnections] = useState<any>(null);
   const [health, setHealth] = useState<any>(null);
+  const [integrityAudit, setIntegrityAudit] = useState<any>(null);
 
   // Deployment state
   const [deployStatus, setDeployStatus] = useState<any>(null);
@@ -94,12 +95,14 @@ export function AdminViews({
         const res = await apiRequest(`/system-logs?${qs.toString()}`);
         setAuditLogs(res.items || []);
       } else if (mode === 'settings') {
-        const [cRes, hRes] = await Promise.all([
+        const [cRes, hRes, iRes] = await Promise.all([
           apiRequest('/settings/connections'),
           apiRequest('/settings/connections/health'),
+          apiRequest('/settings/data-integrity-audit'),
         ]);
         setConnections(cRes);
         setHealth(hRes);
+        setIntegrityAudit(iRes);
       } else if (mode === 'deployment') {
         const res = await apiRequest('/deployment/status');
         setDeployStatus(res);
@@ -719,6 +722,20 @@ export function AdminViews({
                   </dd>
                 </div>
                 <div className="py-3 flex flex-col sm:flex-row sm:justify-between gap-1 sm:gap-4">
+                  <dt className="text-[#596579]">โหมดข้อมูลระบบ (SAM_ATT_DATA_MODE)</dt>
+                  <dd className="font-mono font-bold">
+                    {connections.system.dataMode === 'DEMO' ? (
+                      <span className="px-2 py-0.5 rounded-md bg-amber-100 border border-amber-300 text-[#92400E]">
+                        DEMO (ข้อมูลตัวอย่างใน Sandbox แยกเฉพาะ)
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-[#047857]">
+                        REAL (ข้อมูลปฏิบัติงานจริง)
+                      </span>
+                    )}
+                  </dd>
+                </div>
+                <div className="py-3 flex flex-col sm:flex-row sm:justify-between gap-1 sm:gap-4">
                   <dt className="text-[#596579]">สถานะใบรับรองความปลอดภัย (TLS)</dt>
                   <dd className="font-semibold text-[#047857]">
                     {connections.tls.certificateReady ? 'พร้อมใช้งาน' : 'ไม่พบไฟล์ใบรับรอง'}
@@ -785,6 +802,78 @@ export function AdminViews({
                   ตรวจสอบไฟล์ ScannerReader.exe
                 </button>
               </div>
+            </div>
+          </div>
+        )}
+
+        {integrityAudit && (
+          <div className="ent-card p-4 sm:p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E7E2E5] pb-3">
+              <div>
+                <h2 className="text-[18px] font-bold text-[#273244]">
+                  3. รายงานตรวจสอบข้อมูลจำลองตกค้างและรหัสภาษาไทย (Read-Only Data Integrity Audit)
+                </h2>
+                <p className="text-[13.5px] text-[#596579] mt-0.5">
+                  ตรวจสอบแบบอ่านอย่างเดียว (ห้ามใช้ DELETE / TRUNCATE / DROP อัตโนมัติ) เพื่อรายงานจำนวนข้อมูลทดสอบและตรวจหาอักขระภาษาไทยเพี้ยน (Mojibake)
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={loadData}
+                className="ent-btn-secondary"
+              >
+                <RotateCcw className="w-4 h-4" />
+                <span>ตรวจสอบซ้ำ (Read-Only)</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-[13.5px]">
+              <div className="p-3 rounded-xl bg-[#FFF9F9] border border-[#E7E2E5]">
+                <div className="text-[#596579]">บุคลากรจำลอง (SAM-P*)</div>
+                <div className="mt-1 text-[20px] font-mono font-bold text-[#273244]">
+                  {integrityAudit.syntheticRecordsFound?.personnelCount ?? 0} รายการ
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-[#FFF9F9] border border-[#E7E2E5]">
+                <div className="text-[#596579]">บัญชีทดสอบ</div>
+                <div className="mt-1 text-[20px] font-mono font-bold text-[#273244]">
+                  {integrityAudit.syntheticRecordsFound?.testUsersCount ?? 0} บัญชี
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-[#FFF9F9] border border-[#E7E2E5]">
+                <div className="text-[#596579]">เครื่องสแกนจำลอง (101–103)</div>
+                <div className="mt-1 text-[20px] font-mono font-bold text-[#273244]">
+                  {integrityAudit.syntheticRecordsFound?.demoScannersCount ?? 0} เครื่อง
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-[#FFF9F9] border border-[#E7E2E5]">
+                <div className="text-[#596579]">สแกนดิบจำลอง</div>
+                <div className="mt-1 text-[20px] font-mono font-bold text-[#273244]">
+                  {integrityAudit.syntheticRecordsFound?.syntheticRawScansCount ?? 0} แถว
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-[#FFF9F9] border border-[#E7E2E5]">
+                <div className="text-[#596579]">ตารางเวรจำลอง</div>
+                <div className="mt-1 text-[20px] font-mono font-bold text-[#273244]">
+                  {integrityAudit.syntheticRecordsFound?.syntheticShiftAssignmentsCount ?? 0} เวร
+                </div>
+              </div>
+              <div className="p-3 rounded-xl bg-[#FFF9F9] border border-[#E7E2E5]">
+                <div className="text-[#596579]">ข้อความภาษาไทยเพี้ยน</div>
+                <div
+                  className={`mt-1 text-[20px] font-mono font-bold ${
+                    (integrityAudit.mojibakeDetected?.length ?? 0) === 0
+                      ? 'text-[#047857]'
+                      : 'text-[#B91C1C]'
+                  }`}
+                >
+                  {integrityAudit.mojibakeDetected?.length ?? 0} รายการ
+                </div>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-[#F8F6F7] border border-[#E7E2E5] text-[13.5px] text-[#273244]">
+              <strong>สรุปผลการตรวจสอบและผลกระทบ Foreign Key:</strong> {integrityAudit.recommendation}
             </div>
           </div>
         )}

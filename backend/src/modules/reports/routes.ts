@@ -1,6 +1,7 @@
 import { Router } from 'express';
+import { loadConfig } from '../../config/env.ts';
 import { dbQuery } from '../../database/adapter.ts';
-import { sanitizeCsvCell } from '../../utils/crypto.ts';
+import { sanitizeCsvCell, getCurrentBangkokDateParts } from '../../utils/crypto.ts';
 import { requireAuth, requireRoles } from '../../middleware/auth.ts';
 import { writeAuditLog } from '../audit/service.ts';
 
@@ -33,8 +34,9 @@ async function queryFilteredAttendance(query: Record<string, unknown>): Promise<
   personnelType: string;
   rows: AttendanceJoinedRow[];
 }> {
-  const dateFrom = String(query.dateFrom || '2026-11-01').trim();
-  const dateTo = String(query.dateTo || '2026-11-30').trim();
+  const bkk = getCurrentBangkokDateParts();
+  const dateFrom = String(query.dateFrom || bkk.monthStartYmd).trim();
+  const dateTo = String(query.dateTo || bkk.monthEndYmd).trim();
   const department = String(query.department || '').trim();
   const personnelType = String(query.personnelType || '').trim();
 
@@ -216,6 +218,7 @@ reportsRouter.get(
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
   async (req, res, next) => {
     try {
+      const cfg = loadConfig();
       const { dateFrom, dateTo, department, personnelType, rows } = await queryFilteredAttendance(
         req.query as Record<string, unknown>
       );
@@ -224,6 +227,21 @@ reportsRouter.get(
       const totalPersonnelDb = await dbQuery<{ cnt: number }>(
         'SELECT COUNT(*) as cnt FROM personnel WHERE is_active = 1'
       );
+      const distinctDeptRows = await dbQuery<{ department_name: string }>(
+        "SELECT DISTINCT department_name FROM personnel WHERE is_active = 1 AND department_name <> '' ORDER BY department_name ASC"
+      );
+      const distinctTypeRows = await dbQuery<{
+        personnel_type_code: string;
+        personnel_type_name: string;
+      }>(
+        `SELECT DISTINCT personnel_type_code, personnel_type_name
+         FROM personnel
+         WHERE is_active = 1 AND personnel_type_code <> ''
+         UNION
+         SELECT personnel_type_code, personnel_type_name FROM personnel_type_rules
+         ORDER BY personnel_type_code ASC`
+      );
+
       const lastSyncRuns = await dbQuery<{
         id: number;
         started_at: string;
@@ -241,7 +259,14 @@ reportsRouter.get(
       );
 
       res.json({
+        dataMode: cfg.dataMode,
+        isEmptyPeriod: rows.length === 0,
         filters: { dateFrom, dateTo, department, personnelType },
+        availableDepartments: distinctDeptRows.map((d) => d.department_name),
+        availablePersonnelTypes: distinctTypeRows.map((t) => ({
+          code: t.personnel_type_code,
+          name: t.personnel_type_name,
+        })),
         activePersonnelTotal: Number(totalPersonnelDb[0]?.cnt || 0),
         ...aggregated,
         scannerTelemetry: {

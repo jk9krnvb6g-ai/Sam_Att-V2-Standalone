@@ -59,10 +59,12 @@ async function fetchFromHosOfficeReadOnly(): Promise<HosOfficeHrPersonRow[]> {
     user: cfg.hosofficeDb.user,
     password: cfg.hosofficeDb.password,
     database: cfg.hosofficeDb.database,
+    charset: 'utf8mb4',
     connectTimeout: 4000,
   });
 
   try {
+    await conn.query('SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci');
     const table = cfg.hosofficeDb.hrPersonTable.replace(/[^a-zA-Z0-9_]/g, '');
     const [rows] = await conn.query(
       `SELECT PERSON_ID, FINGLE_ID, TITLE_NAME, FIRST_NAME, LAST_NAME,

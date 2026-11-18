@@ -2,8 +2,11 @@
 -- Sam_Att V2 Standalone — MySQL 8+ Baseline Schema Migration (001)
 -- Database: samchuk_attendance_v2
 -- Timezone Policy: Asia/Bangkok (+07:00)
+-- Charset Policy: UTF-8 (utf8mb4_unicode_ci)
 -- Safety Rule: Additive idempotent DDL only. No DROP or TRUNCATE statements.
 -- ============================================================================
+
+SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version VARCHAR(64) NOT NULL PRIMARY KEY,

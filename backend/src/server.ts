@@ -20,7 +20,11 @@ import { execFileSync } from 'child_process';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import { loadConfig, validateProductionConfig } from './config/env.ts';
-import { runMigrations, seedBaselineAndSyntheticData } from './database/adapter.ts';
+import {
+  runMigrations,
+  ensureBaselineSystemCatalog,
+  seedDemoSyntheticData,
+} from './database/adapter.ts';
 import { reprocessAttendanceRange } from './modules/attendance/processor.ts';
 import { startAutomaticScannerScheduler } from './modules/scanners/scheduler.ts';
 import { createExpressApp } from './app.ts';
@@ -80,16 +84,21 @@ export async function startStandaloneServers(): Promise<{
   // ขั้นตอนที่ 2: ตรวจสอบความพร้อมของใบรับรอง HTTPS (TLS)
   ensureTlsCertificates(cfg.tlsCertPath, cfg.tlsKeyPath, cfg.nodeEnv);
 
-  // ขั้นตอนที่ 3: รันสร้างตารางฐานข้อมูลทั้งหมด และเติมข้อมูลตัวอย่างเฉพาะในโหมดพัฒนา
+  // ขั้นตอนที่ 3: รันสร้างตารางฐานข้อมูลทั้งหมด และเตรียมข้อมูลตั้งต้นที่จำเป็นของระบบ (System Baseline Catalog)
+  // ห้ามเติมข้อมูลจำลอง (Synthetic Data) ในโหมด REAL หรือ Production เด็ดขาด
   await runMigrations();
-  if (cfg.nodeEnv !== 'production') {
-    await seedBaselineAndSyntheticData();
-    await reprocessAttendanceRange({
-      dateFrom: '2026-11-12',
-      dateTo: '2026-11-13',
-      referenceNowBkk: '2026-11-13 18:00:00',
-      actorUsername: 'system_startup',
-    });
+  await ensureBaselineSystemCatalog();
+
+  if (cfg.dataMode === 'DEMO' && cfg.nodeEnv !== 'production' && cfg.dbEngine === 'sqlite_sandbox') {
+    const demoSeed = await seedDemoSyntheticData();
+    if (demoSeed.seeded) {
+      await reprocessAttendanceRange({
+        dateFrom: '2026-11-12',
+        dateTo: '2026-11-13',
+        referenceNowBkk: '2026-11-13 18:00:00',
+        actorUsername: 'system_demo_startup',
+      });
+    }
   }
 
   // ขั้นตอนที่ 4: เริ่มต้น Background Scheduler สำหรับดึงข้อมูลสแกนนิ้วอัตโนมัติตามตาราง sync_schedules (00:00 และ 08:00 น.)
