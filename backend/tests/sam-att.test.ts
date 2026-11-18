@@ -1342,7 +1342,15 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     assert.ok(fs.existsSync(deployBatPath), 'deployment/Deploy_Sam_Att.bat must exist');
     assert.ok(fs.existsSync(deployPs1Path), 'deployment/Deploy_Sam_Att.ps1 must exist');
 
+    const rootBatContent = fs.readFileSync(rootBatPath, 'utf8');
+    const deployBatContent = fs.readFileSync(deployBatPath, 'utf8');
     const ps1Content = fs.readFileSync(deployPs1Path, 'utf8');
+
+    // Enforce 100% 7-bit ASCII in .bat and .ps1 files so Windows PowerShell 5.1 (Windows-874 default ANSI codepage) never misparses UTF-8 bytes as curly quotes
+    assert.match(rootBatContent, /^[\x00-\x7F]*$/, 'Root Deploy_Sam_Att.bat must be 100% 7-bit ASCII');
+    assert.match(deployBatContent, /^[\x00-\x7F]*$/, 'deployment/Deploy_Sam_Att.bat must be 100% 7-bit ASCII');
+    assert.match(ps1Content, /^[\x00-\x7F]*$/, 'deployment/Deploy_Sam_Att.ps1 must be 100% 7-bit ASCII');
+
     // Must support -CheckOnly and -ApproveMigrations
     assert.ok(ps1Content.includes('[switch]$CheckOnly'), 'Deploy_Sam_Att.ps1 must support -CheckOnly');
     assert.ok(ps1Content.includes('[switch]$ApproveMigrations'), 'Deploy_Sam_Att.ps1 must support -ApproveMigrations');

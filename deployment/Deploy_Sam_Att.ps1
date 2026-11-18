@@ -1,14 +1,16 @@
 <#
 .SYNOPSIS
-  Sam_Att V2 Standalone — One-Click Production Deployment & Rollback Script (Samchuk Hospital)
+  Sam_Att V2 Standalone - One-Click Production Deployment & Rollback Script (Samchuk Hospital)
 .DESCRIPTION
-  สคริปต์อัปเดตระบบ Sam_Att V2 Standalone จาก GitHub (origin/main) สำหรับ Windows Server + IIS
-  - ตรวจสอบความพร้อมก่อนอัปเดตครบถ้วน (Preflight Check)
-  - ห้ามใช้ git reset --hard หรือ git clean -fd อัตโนมัติ และหยุดทันทีหากมีไฟล์ถูกแก้ไขค้างไว้
-  - รักษาไฟล์ .env, ใบรับรอง TLS (certs/), logs/, backups/, และ ScannerReader EXE เดิม 100%
-  - ปกป้องระบบอื่นบนเครื่องเดียวกัน (เช่น Procurement, CentralApiGateway) ห้ามใช้ iisreset และห้ามฆ่าโปรเซสจากหมายเลขพอร์ตอย่างเดียว
-  - ห้ามรัน Database Migration อัตโนมัติ (หากมีไฟล์ Migration ใหม่จะแสดงรายการและขออนุมัติแยกต่างหาก)
-  - รองรับการสำรองข้อมูล (Backup) และย้อนกลับอัตโนมัติ (Automatic Rollback) พร้อมตรวจสอบ Health Check จริงบนพอร์ต HTTPS 4101
+  Production deployment script for Sam_Att V2 Standalone from GitHub (origin/main) on Windows Server + IIS.
+  - Pure 7-bit ASCII source file to guarantee 100% compatibility with Windows PowerShell 5.1 (without BOM issues).
+  - Step 1: Preflight Check (Git repo, branch, clean working tree, Node/npm, disk space, .env REAL/mysql, IIS, Port 4101 owner)
+  - Step 2: GitHub Update (git fetch & git pull --ff-only; forbids git reset --hard / git clean -fd; gates migrations)
+  - Step 3: Backup (Timestamped backup of dist/ and core configuration with SHA-256 manifest)
+  - Step 4: Install Dependencies (npm ci / npm install)
+  - Step 5: Typecheck / Test / Build (npm run typecheck, isolated sandbox npm test, npm run build -> dist/index.html)
+  - Step 6: IIS / Backend Update (Isolated to Sam_Att on Port 4101 only; never touches Procurement or runs iisreset)
+  - Step 7: Health Check & Automatic Safe Rollback (https://localhost:4101/Sam_Att/ and /api/Sam_Att/health)
 #>
 [CmdletBinding()]
 param(
@@ -27,7 +29,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # ==============================================================================
-# 0. กำหนดพาธหลักและการตั้งค่าเริ่มต้น
+# 0. Resolve Application Directory & Logging Paths
 # ==============================================================================
 if ([string]::IsNullOrWhiteSpace($AppDir)) {
   $ScriptDir = $PSScriptRoot
@@ -55,7 +57,7 @@ $SensitiveSecretsToMask = New-Object System.Collections.Generic.List[string]
 $MockConfig = $null
 if (-not [string]::IsNullOrWhiteSpace($MockEnvFile)) {
   if (-not (Test-Path $MockEnvFile)) {
-    Write-Error "MOCK_ENV_FILE_NOT_FOUND: ไม่พบไฟล์จำลองการทดสอบที่ $MockEnvFile"
+    Write-Error "MOCK_ENV_FILE_NOT_FOUND: Mock environment file not found at $MockEnvFile"
     exit 1
   }
   $MockConfig = Get-Content -Path $MockEnvFile -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -99,7 +101,7 @@ function Write-DeployLog {
     }
     Add-Content -Path $LogFilePath -Value $Line -Encoding UTF8 -ErrorAction SilentlyContinue
   } catch {
-    # Ignore log write error during early preflight
+    # Ignore early log error
   }
 }
 
@@ -153,6 +155,26 @@ function Read-DotEnvFileSafe {
   return $Map
 }
 
+function Invoke-NativeCli {
+  param(
+    [Parameter(Mandatory=$true)][string]$Executable,
+    [string[]]$Arguments = @()
+  )
+  $PrevEap = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $OutputLines = & $Executable @Arguments 2>&1
+    $ExitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+    $CombinedText = ($OutputLines | ForEach-Object { "$_" }) -join "`r`n"
+    return [PSCustomObject]@{
+      ExitCode = $ExitCode
+      Output   = $CombinedText.Trim()
+    }
+  } finally {
+    $ErrorActionPreference = $PrevEap
+  }
+}
+
 function Invoke-HttpsProbe {
   param(
     [string]$Url,
@@ -163,7 +185,7 @@ function Invoke-HttpsProbe {
     $ProbeCfg = $MockConfig.healthProbe
     if ($Url -like "*/api/Sam_Att/health") {
       if ($ProbeCfg.apiReachable -eq $false) {
-        throw "HEALTH_API_UNREACHABLE: ไม่สามารถเชื่อมต่อ $Url"
+        throw "HEALTH_API_UNREACHABLE: Cannot connect to $Url"
       }
       return [PSCustomObject]@{
         StatusCode = [int]$ProbeCfg.apiStatusCode
@@ -171,7 +193,7 @@ function Invoke-HttpsProbe {
       }
     } else {
       if ($ProbeCfg.frontendReachable -eq $false) {
-        throw "FRONTEND_HTTPS_UNREACHABLE: ไม่สามารถเชื่อมต่อ $Url"
+        throw "FRONTEND_HTTPS_UNREACHABLE: Cannot connect to $Url"
       }
       return [PSCustomObject]@{
         StatusCode = [int]$ProbeCfg.frontendStatusCode
@@ -196,7 +218,6 @@ function Invoke-HttpsProbe {
       }
     }
   } else {
-    # Windows PowerShell 5.1 compatibility for local self-signed HTTPS certificate
     [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
     $OldCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
     try {
@@ -235,35 +256,35 @@ function Test-SamAttHealthEndpoint {
     try {
       $FrontRes = Invoke-HttpsProbe -Url $FrontendUrl -TimeoutSec 8
       if ($FrontRes.StatusCode -ne 200) {
-        throw "FRONTEND_HTTP_STATUS_$($FrontRes.StatusCode): หน้าเว็บ $FrontendUrl ตอบกลับ HTTP $($FrontRes.StatusCode) (ต้องการ 200)"
+        throw "FRONTEND_HTTP_STATUS_$($FrontRes.StatusCode): Frontend $FrontendUrl returned HTTP $($FrontRes.StatusCode) (expected 200)"
       }
 
       $ApiRes = Invoke-HttpsProbe -Url $HealthUrl -ParseJson -TimeoutSec 8
       if ($ApiRes.StatusCode -ne 200) {
-        throw "API_HTTP_STATUS_$($ApiRes.StatusCode): Health API ตอบกลับ HTTP $($ApiRes.StatusCode) (ต้องการ 200)"
+        throw "API_HTTP_STATUS_$($ApiRes.StatusCode): Health API returned HTTP $($ApiRes.StatusCode) (expected 200)"
       }
 
       $Body = $ApiRes.Json
       if ($null -eq $Body) {
-        throw "API_INVALID_JSON: Health API ไม่ได้ตอบกลับเป็น JSON ที่ถูกต้อง"
+        throw "API_INVALID_JSON: Health API did not return valid JSON"
       }
       if ($Body.status -ne "OK") {
-        throw "API_STATUS_NOT_OK: Health API รายงาน status=$($Body.status)"
+        throw "API_STATUS_NOT_OK: Health API reported status=$($Body.status)"
       }
       if ($Body.service -ne "Sam_Att V2 Standalone") {
-        throw "API_WRONG_SERVICE: บริการที่ตอบกลับไม่ใช่ Sam_Att V2 Standalone (ได้รับ: $($Body.service))"
+        throw "API_WRONG_SERVICE: Unexpected service '$($Body.service)' (expected 'Sam_Att V2 Standalone')"
       }
       if ($null -eq $Body.database -or $Body.database.connected -ne $true) {
-        throw "MYSQL_DISCONNECTED: Health API รายงานว่าไม่สามารถเชื่อมต่อฐานข้อมูลได้ (database.connected != true)"
+        throw "MYSQL_DISCONNECTED: Health API reported database.connected != true"
       }
       if ($Body.database.engine -ne $ExpectedDbEngine) {
-        throw "WRONG_DB_ENGINE: ระบบไม่ได้ใช้ฐานข้อมูล '$ExpectedDbEngine' (ได้รับ: $($Body.database.engine))"
+        throw "WRONG_DB_ENGINE: Database engine is '$($Body.database.engine)' (expected '$ExpectedDbEngine')"
       }
       if ($Body.database.databaseName -ne $ExpectedDbName) {
-        throw "WRONG_DB_NAME: ชื่อฐานข้อมูลไม่ตรงกับ '$ExpectedDbName' (ได้รับ: $($Body.database.databaseName))"
+        throw "WRONG_DB_NAME: Database name is '$($Body.database.databaseName)' (expected '$ExpectedDbName')"
       }
       if ($null -ne $Body.PSObject.Properties["dataMode"] -and $Body.dataMode -ne "REAL") {
-        throw "WRONG_DATA_MODE: ระบบไม่ได้ทำงานในโหมด REAL (ได้รับ: $($Body.dataMode))"
+        throw "WRONG_DATA_MODE: System is running in '$($Body.dataMode)' mode (expected 'REAL')"
       }
 
       return [PSCustomObject]@{
@@ -292,7 +313,7 @@ function Test-SamAttHealthEndpoint {
 }
 
 # ==============================================================================
-# แสดงส่วนหัวของระบบ Deployment
+# Print Deployment Banner
 # ==============================================================================
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " SAM_ATT V2 STANDALONE DEPLOYMENT" -ForegroundColor Cyan
@@ -343,19 +364,19 @@ function Invoke-SafeRollback {
   try {
     Push-Location $AppDir
     try {
-      # 1. คืนค่า Git Commit เดิมเฉพาะกรณีที่ดึงโค้ดใหม่ลงมาแล้ว (ห้ามใช้ git reset --hard หรือ git clean -fd)
+      # 1. Revert Git commit if git pull had advanced the branch (never git reset --hard or git clean -fd)
       if ($State.GitPulled -and -not [string]::IsNullOrWhiteSpace($State.CommitBefore) -and ($State.CommitBefore -ne $State.CommitAfter)) {
         Write-DeployLog -Message "Reverting Git working branch '$Branch' back to previous commit $($State.CommitBefore)..."
         if ($null -eq $MockConfig) {
-          & git merge --abort 2>$null
-          & git reset --keep $State.CommitBefore
-          if ($LASTEXITCODE -ne 0) {
-            throw "ROLLBACK_GIT_REVERT_FAILED: ไม่สามารถย้อนกลับไปยัง Commit $($State.CommitBefore) ได้อย่างปลอดภัย"
+          Invoke-NativeCli -Executable "git" -Arguments @("merge", "--abort") | Out-Null
+          $RevertRes = Invoke-NativeCli -Executable "git" -Arguments @("reset", "--keep", $State.CommitBefore)
+          if ($RevertRes.ExitCode -ne 0) {
+            throw "ROLLBACK_GIT_REVERT_FAILED: Could not safely revert to commit $($State.CommitBefore)"
           }
         }
       }
 
-      # 2. คืนค่าไฟล์ Build (dist/) และไฟล์สำคัญจาก Backup
+      # 2. Restore dist/ build artifact from Backup
       if ($State.BackupCreated -and -not [string]::IsNullOrWhiteSpace($State.BackupDir) -and (Test-Path $State.BackupDir)) {
         $BackupDist = Join-Path $State.BackupDir "dist"
         $TargetDist = Join-Path $AppDir "dist"
@@ -371,14 +392,14 @@ function Invoke-SafeRollback {
       Pop-Location
     }
 
-    # 3. รีสตาร์ทเฉพาะโปรเซสของ Sam_Att เท่านั้น (ห้ามแตะต้อง Procurement หรือ IIS ทั้งเครื่อง)
+    # 3. Restart Sam_Att backend process only (never touch Procurement or IIS)
     Write-DeployLog -Message "Restarting Sam_Att backend process after rollback (Mode=$($State.BackendProcessMode))..."
     Restart-SamAttBackendOnly -IsRollback $true
 
-    # 4. ตรวจสอบ Health Check หลัง Rollback
+    # 4. Verify Health Check after Rollback
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["postRollbackHealthy"]) {
       if ($MockConfig.postRollbackHealthy -eq $false) {
-        throw "POST_ROLLBACK_HEALTH_FAILED: ระบบยังไม่ผ่าน Health Check หลังการ Rollback"
+        throw "POST_ROLLBACK_HEALTH_FAILED: System failed Health Check after Rollback"
       }
     } else {
       $PostRollbackHealth = Test-SamAttHealthEndpoint -TargetPort $Port -ExpectedDbEngine $State.ExpectedDbEngine -ExpectedDbName $State.ExpectedDbName -MaxRetries 5 -RetryDelaySec 2
@@ -399,16 +420,15 @@ function Invoke-SafeRollback {
 function Restart-SamAttBackendOnly {
   param([bool]$IsRollback = $false)
 
-  # กฎเหล็ก: ห้ามแตะต้อง Procurement, CentralApiGateway หรือ W3SVC เด็ดขาด
   foreach ($Forbidden in $ForbiddenServiceNames) {
     if ($State.BackendServiceName -ieq $Forbidden -or $State.BackendPm2Name -ieq $Forbidden) {
-      throw "SECURITY_ISOLATION_VIOLATION: ห้ามจัดการเซอร์วิสต้องห้าม '$Forbidden'"
+      throw "SECURITY_ISOLATION_VIOLATION: Refusing to touch forbidden service '$Forbidden'"
     }
   }
 
   if ($null -ne $MockConfig) {
     if ($null -ne $MockConfig.PSObject.Properties["simulateBackendStartFailure"] -and $MockConfig.simulateBackendStartFailure -eq $true -and (-not $IsRollback)) {
-      throw "BACKEND_START_FAILED: โปรเซส Sam_Att Backend ไม่สามารถเริ่มทำงานได้บนพอร์ต $Port"
+      throw "BACKEND_START_FAILED: Sam_Att Backend process failed to start on port $Port"
     }
     Write-DeployLog -Message "[MockMode] Restarted Sam_Att backend isolated process (Mode=$($State.BackendProcessMode), IsRollback=$IsRollback)"
     return
@@ -422,20 +442,19 @@ function Restart-SamAttBackendOnly {
       Start-Sleep -Seconds 3
       $SvcObj = Get-Service -Name $SvcName -ErrorAction Stop
       if ($SvcObj.Status -ne "Running") {
-        throw "BACKEND_SERVICE_NOT_RUNNING: Windows Service '$SvcName' ไม่อยู่ในสถานะ Running (สถานะปัจจุบัน: $($SvcObj.Status))"
+        throw "BACKEND_SERVICE_NOT_RUNNING: Windows Service '$SvcName' is not Running (Status: $($SvcObj.Status))"
       }
     }
     "PM2_PROCESS" {
       $Pm2App = $State.BackendPm2Name
       Write-DeployLog -Message "Reloading isolated PM2 process '$Pm2App'..."
-      & pm2 restart $Pm2App --update-env
-      if ($LASTEXITCODE -ne 0) {
-        throw "BACKEND_PM2_RESTART_FAILED: คำสั่ง pm2 restart '$Pm2App' ล้มเหลว (ExitCode=$LASTEXITCODE)"
+      $Pm2RestartRes = Invoke-NativeCli -Executable "pm2" -Arguments @("restart", $Pm2App, "--update-env")
+      if ($Pm2RestartRes.ExitCode -ne 0) {
+        throw "BACKEND_PM2_RESTART_FAILED: pm2 restart '$Pm2App' failed (ExitCode=$($Pm2RestartRes.ExitCode))"
       }
       Start-Sleep -Seconds 2
     }
     "STANDALONE_NODE_TSX" {
-      # หยุดเฉพาะ PID ที่ผ่านการตรวจสอบยืนยันแล้วว่าเป็น Sam_Att server.ts เท่านั้น (ห้ามฆ่าจากพอร์ตอย่างเดียว)
       if ($State.VerifiedSamAttPid -gt 0) {
         $ExistingProc = Get-Process -Id $State.VerifiedSamAttPid -ErrorAction SilentlyContinue
         if ($null -ne $ExistingProc) {
@@ -459,7 +478,7 @@ function Restart-SamAttBackendOnly {
         -PassThru
       Start-Sleep -Seconds 3
       if ($StartedProc.HasExited) {
-        throw "BACKEND_PROCESS_EXITED_IMMEDIATELY: โปรเซส Sam_Att จบการทำงานทันที (ExitCode=$($StartedProc.ExitCode)) กรุณาตรวจสอบ $StdErrLog"
+        throw "BACKEND_PROCESS_EXITED_IMMEDIATELY: Sam_Att process exited immediately (ExitCode=$($StartedProc.ExitCode)). Check $StdErrLog"
       }
       $State.VerifiedSamAttPid = $StartedProc.Id
       Write-DeployLog -Message "Started Sam_Att V2 Standalone process (New PID=$($State.VerifiedSamAttPid))."
@@ -467,57 +486,37 @@ function Restart-SamAttBackendOnly {
   }
 }
 
-function Invoke-NativeCli {
-  param(
-    [Parameter(Mandatory=$true)][string]$Executable,
-    [string[]]$Arguments = @()
-  )
-  $PrevEap = $ErrorActionPreference
-  try {
-    $ErrorActionPreference = "Continue"
-    $OutputLines = & $Executable @Arguments 2>&1
-    $ExitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
-    $CombinedText = ($OutputLines | ForEach-Object { "$_" }) -join "`r`n"
-    return [PSCustomObject]@{
-      ExitCode = $ExitCode
-      Output   = $CombinedText.Trim()
-    }
-  } finally {
-    $ErrorActionPreference = $PrevEap
-  }
-}
-
 try {
   # ============================================================================
-  # STEP 1 — Preflight Check
+  # STEP 1 - Preflight Check
   # ============================================================================
   $State.CurrentStep = 1
   $State.StepName = "Preflight Check"
 
-  # 1.1 ตรวจสอบโฟลเดอร์ Repository
+  # 1.1 Verify repository directory and core files
   if (-not (Test-Path $AppDir)) {
-    throw "PREFLIGHT_REPO_NOT_FOUND: ไม่พบโฟลเดอร์ติดตั้งที่ $AppDir"
+    throw "PREFLIGHT_REPO_NOT_FOUND: Installation directory not found at $AppDir"
   }
   foreach ($ReqFile in @(".git", "package.json", "package-lock.json", "server.ts")) {
     if (-not (Test-Path (Join-Path $AppDir $ReqFile))) {
-      throw "PREFLIGHT_MISSING_CORE_FILE: ไม่พบไฟล์หรือโฟลเดอร์สำคัญ '$ReqFile' ใน $AppDir"
+      throw "PREFLIGHT_MISSING_CORE_FILE: Required file or folder '$ReqFile' missing in $AppDir"
     }
   }
 
   Push-Location $AppDir
   try {
-    # 1.2 ตรวจสอบ Git Branch และ Working Tree (ห้ามมี Local Changes ค้าง)
+    # 1.2 Verify Git Branch and clean Working Tree
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["gitBranch"]) {
       $CurrentBranch = [string]$MockConfig.gitBranch
     } else {
       $BranchRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "--abbrev-ref", "HEAD")
       $CurrentBranch = $BranchRes.Output
       if ($BranchRes.ExitCode -ne 0) {
-        throw "PREFLIGHT_GIT_ERROR: ไม่สามารถตรวจสอบ Git Branch ได้ ($CurrentBranch)"
+        throw "PREFLIGHT_GIT_ERROR: Failed to determine Git branch ($CurrentBranch)"
       }
     }
     if ($CurrentBranch -ne $Branch) {
-      throw "PREFLIGHT_WRONG_BRANCH: ปัจจุบันอยู่ที่ Branch '$CurrentBranch' (ต้องเป็น '$Branch' เท่านั้น)"
+      throw "PREFLIGHT_WRONG_BRANCH: Current branch is '$CurrentBranch' (expected '$Branch')"
     }
 
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["gitDirtyFiles"]) {
@@ -527,27 +526,27 @@ try {
       $DirtyOutput = $DirtyRes.Output
     }
     if (-not [string]::IsNullOrWhiteSpace($DirtyOutput)) {
-      throw "PREFLIGHT_DIRTY_WORKING_TREE: พบไฟล์ที่ถูกแก้ไขค้างไว้ใน Git Working Tree กรุณาตรวจสอบก่อน Deploy (ห้ามใช้ git reset --hard อัตโนมัติ):`n$DirtyOutput"
+      throw "PREFLIGHT_DIRTY_WORKING_TREE: Local modifications detected in Git working tree. Inspect before deploying (automatic git reset --hard is forbidden):`n$DirtyOutput"
     }
 
-    # 1.3 ตรวจสอบ Node.js และ npm
+    # 1.3 Verify Node.js and npm
     $NodeRes = Invoke-NativeCli -Executable "node" -Arguments @("-v")
     $NodeVerRaw = $NodeRes.Output
     if ($NodeRes.ExitCode -ne 0 -or -not ($NodeVerRaw -match "^v(\d+)\.")) {
-      throw "PREFLIGHT_NODE_MISSING: ไม่พบ Node.js ในระบบ ($NodeVerRaw)"
+      throw "PREFLIGHT_NODE_MISSING: Node.js not found ($NodeVerRaw)"
     }
     $NodeMajor = [int]$Matches[1]
     if ($NodeMajor -lt 22) {
-      throw "PREFLIGHT_NODE_VERSION_UNSUPPORTED: พบ Node.js $NodeVerRaw (ต้องการ Node.js >= v22.0.0)"
+      throw "PREFLIGHT_NODE_VERSION_UNSUPPORTED: Detected Node.js $NodeVerRaw (requires >= v22.0.0)"
     }
     $NpmVerRes = Invoke-NativeCli -Executable "npm" -Arguments @("-v")
     $NpmVerRaw = $NpmVerRes.Output
     if ($NpmVerRes.ExitCode -ne 0) {
-      throw "PREFLIGHT_NPM_MISSING: ไม่พบคำสั่ง npm ในระบบ"
+      throw "PREFLIGHT_NPM_MISSING: npm command not found"
     }
     Write-DeployLog -Message "Runtime verified: Node.js=$NodeVerRaw, npm=$NpmVerRaw"
 
-    # 1.4 ตรวจสอบพื้นที่ว่างบนดิสก์ (อย่างน้อย 500 MB)
+    # 1.4 Verify available disk space (>= 500 MB)
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["freeDiskMb"]) {
       $FreeDiskMb = [double]$MockConfig.freeDiskMb
     } else {
@@ -556,45 +555,43 @@ try {
       $FreeDiskMb = [math]::Round($DriveInfo.AvailableFreeSpace / 1MB, 2)
     }
     if ($FreeDiskMb -lt 500) {
-      throw "PREFLIGHT_LOW_DISK_SPACE: พื้นที่ว่างบนดิสก์เหลือเพียง $FreeDiskMb MB (ต้องการอย่างน้อย 500 MB สำหรับการสำรองข้อมูลและ Build)"
+      throw "PREFLIGHT_LOW_DISK_SPACE: Available disk space is $FreeDiskMb MB (requires at least 500 MB)"
     }
 
-    # 1.5 ตรวจสอบไฟล์ .env และการตั้งค่า REAL Mode / MySQL (ห้ามแก้ไขหรือลบ .env เด็ดขาด)
+    # 1.5 Verify .env file and REAL Mode / MySQL settings (never overwrite or delete .env)
     $DotEnvPath = Join-Path $AppDir ".env"
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["customEnvFile"]) {
       $DotEnvPath = [string]$MockConfig.customEnvFile
     }
     if (-not (Test-Path $DotEnvPath)) {
-      throw "PREFLIGHT_ENV_MISSING: ไม่พบไฟล์ .env ที่ $DotEnvPath (ห้าม Deploy โดยไม่มีไฟล์ .env ของระบบ)"
+      throw "PREFLIGHT_ENV_MISSING: .env file not found at $DotEnvPath"
     }
 
     $EnvMap = Read-DotEnvFileSafe -EnvFilePath $DotEnvPath
 
-    # ตรวจสอบ SAM_ATT_DATA_MODE
     if (-not $EnvMap.ContainsKey("SAM_ATT_DATA_MODE") -or [string]::IsNullOrWhiteSpace($EnvMap["SAM_ATT_DATA_MODE"])) {
-      Write-Host "  [คำแนะนำ] ไฟล์ .env ยังไม่ได้ระบุ SAM_ATT_DATA_MODE อย่างชัดเจน (โค้ด backend/src/config/env.ts จะใช้ค่าเริ่มต้นเป็น REAL เมื่อใช้ฐานข้อมูล mysql แนะนำให้เพิ่ม SAM_ATT_DATA_MODE=REAL ในไฟล์ .env)" -ForegroundColor Yellow
-      Write-DeployLog -Message "ADVISORY: SAM_ATT_DATA_MODE not explicitly set in .env; backend/src/config/env.ts defaults to REAL when SAM_ATT_DB_ENGINE=mysql." -Level "WARN"
+      Write-Host "  [ADVISORY] SAM_ATT_DATA_MODE is not explicitly set in .env (backend/src/config/env.ts defaults to REAL when SAM_ATT_DB_ENGINE=mysql; consider adding SAM_ATT_DATA_MODE=REAL to .env)" -ForegroundColor Yellow
+      Write-DeployLog -Message "ADVISORY: SAM_ATT_DATA_MODE not explicitly set in .env; defaults to REAL when SAM_ATT_DB_ENGINE=mysql." -Level "WARN"
     } elseif ($EnvMap["SAM_ATT_DATA_MODE"].ToUpper() -ne "REAL") {
-      throw "PREFLIGHT_INVALID_DATA_MODE: ค่า SAM_ATT_DATA_MODE ใน .env คือ '$($EnvMap["SAM_ATT_DATA_MODE"])' (สำหรับการ Deploy ใช้งานจริงต้องเป็น REAL เท่านั้น ห้ามใช้ DEMO)"
+      throw "PREFLIGHT_INVALID_DATA_MODE: SAM_ATT_DATA_MODE in .env is '$($EnvMap["SAM_ATT_DATA_MODE"])' (must be REAL for production deployment; DEMO is forbidden)"
     }
 
-    # ตรวจสอบ SAM_ATT_DB_ENGINE=mysql (ห้ามเปลี่ยนเป็น SQLite อัตโนมัติ)
-    $DbEngineVal = if ($EnvMap.ContainsKey("SAM_ATT_DB_ENGINE")) { $EnvMap["SAM_ATT_DB_ENGINE"] } else { "" }
+    $DbEngineVal = if ($EnvMap.ContainsKey("SAM_ATT_DB_ENGINE")) { $EnvMap["SAM_ATT_DB_ENGINE"] } else { "mysql" }
     if ($DbEngineVal -ne "mysql") {
-      throw "PREFLIGHT_INVALID_DB_ENGINE: ค่า SAM_ATT_DB_ENGINE ใน .env ต้องเป็น 'mysql' เท่านั้น (พบค่า: '$DbEngineVal') ห้ามใช้ SQLite ใน Production"
+      throw "PREFLIGHT_INVALID_DB_ENGINE: SAM_ATT_DB_ENGINE in .env must be 'mysql' (found '$DbEngineVal'). Automatic fallback to SQLite is forbidden."
     }
 
     foreach ($ReqEnvKey in @("SAM_ATT_DB_HOST", "SAM_ATT_DB_PORT", "SAM_ATT_DB_NAME", "SAM_ATT_DB_USER", "SAM_ATT_DB_PASSWORD", "JWT_SECRET", "SCANNER_INGEST_SHARED_TOKEN")) {
       if (-not $EnvMap.ContainsKey($ReqEnvKey) -or [string]::IsNullOrWhiteSpace($EnvMap[$ReqEnvKey]) -or $EnvMap[$ReqEnvKey] -eq "CHANGE_ME" -or $EnvMap[$ReqEnvKey] -like "GENERATE_*") {
-        throw "PREFLIGHT_ENV_INCOMPLETE: ค่าตัวแปร '$ReqEnvKey' ในไฟล์ .env ไม่ครบถ้วนหรือยังเป็นค่าเริ่มต้นที่ไม่อนุญาต"
+        throw "PREFLIGHT_ENV_INCOMPLETE: Required variable '$ReqEnvKey' in .env is missing or still set to a placeholder value"
       }
     }
 
-    $State.ExpectedDbEngine = $EnvMap["SAM_ATT_DB_ENGINE"]
+    $State.ExpectedDbEngine = $DbEngineVal
     $State.ExpectedDbName = $EnvMap["SAM_ATT_DB_NAME"]
     $State.ExpectedDbHost = $EnvMap["SAM_ATT_DB_HOST"]
 
-    # ตรวจสอบ ScannerReader EXE ว่ามีอยู่จริงและบันทึกค่า SHA-256 เพื่อรับประกันว่าไม่ถูกแก้ไข
+    # Record ScannerReader EXE SHA-256 to guarantee it is never modified
     $ScannerRel = if ($EnvMap.ContainsKey("SCANNER_READER_EXE_PATH") -and -not [string]::IsNullOrWhiteSpace($EnvMap["SCANNER_READER_EXE_PATH"])) {
       $EnvMap["SCANNER_READER_EXE_PATH"]
     } else {
@@ -607,45 +604,42 @@ try {
       Write-DeployLog -Message "ScannerReader binary verified at $ResolvedScannerPath (SHA256=$($State.ScannerExeSha256))"
     }
 
-    # 1.6 ตรวจสอบสิทธิ์และโครงสร้าง IIS (ห้าม Restart IIS หรือแตะต้อง Procurement)
+    # 1.6 Inspect IIS Configuration (never run iisreset or touch Procurement)
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["iisPermissionDenied"] -and $MockConfig.iisPermissionDenied -eq $true) {
-      throw "PREFLIGHT_IIS_PERMISSION_DENIED: ไม่มีสิทธิ์เข้าถึงหรือตรวจสอบโครงสร้าง IIS ของ Sam_Att กรุณารันด้วยสิทธิ์ Administrator"
+      throw "PREFLIGHT_IIS_PERMISSION_DENIED: Insufficient permissions to inspect IIS configuration. Please Run as Administrator."
     }
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["iisRoutingMode"]) {
       $State.IisRoutingMode = [string]$MockConfig.iisRoutingMode
     } else {
-      # ตรวจสอบว่า Sam_Att ให้บริการผ่าน Single-Port HTTPS 4101 โดยตรง (หรือผ่าน IIS URL Rewrite Reverse Proxy ไปยัง 4101)
       $State.IisRoutingMode = "STANDALONE_DIRECT_4101"
       $AppCmdPath = Join-Path $env:SystemRoot "System32\inetsrv\appcmd.exe"
       if ($env:OS -like "*Windows*" -and (Test-Path $AppCmdPath)) {
         $AppCmdRes = Invoke-NativeCli -Executable $AppCmdPath -Arguments @("list", "app")
         if ($AppCmdRes.ExitCode -ne 0) {
-          throw "PREFLIGHT_IIS_PERMISSION_DENIED: ไม่สามารถอ่านค่า IIS Configuration ด้วย appcmd.exe ได้ กรุณาคลิกขวา Run as Administrator"
+          throw "PREFLIGHT_IIS_PERMISSION_DENIED: Cannot read IIS configuration via appcmd.exe. Please right-click and Run as Administrator."
         }
         if ($AppCmdRes.Output -match "Procurement") {
-          Write-DeployLog -Message "IIS Co-tenancy Guard: ตรวจพบระบบ Procurement บน IIS เครื่องเดียวกัน — ล็อกสถานะห้ามแก้ไขหรือรีสตาร์ท AppPool ของ Procurement เด็ดขาด"
+          Write-DeployLog -Message "IIS Co-tenancy Guard: Detected Procurement on same server - locked READ-ONLY (never restart/modify)."
         }
       }
     }
 
-    # 1.7 ตรวจสอบพอร์ต 4101 และความเป็นเจ้าของโปรเซส (Process Ownership Verification)
+    # 1.7 Verify Port 4101 and Backend Process Ownership
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["port4101Owner"]) {
       $OwnerType = [string]$MockConfig.port4101Owner
       if ($OwnerType -eq "FOREIGN_PROCESS") {
-        throw "PREFLIGHT_PORT_4101_FOREIGN_PROCESS: พอร์ต $Port ถูกใช้งานโดยโปรเซสอื่นที่ไม่ใช่ Sam_Att (ห้ามหยุดโปรเซสจากเลขพอร์ตโดยไม่ตรวจสอบความเป็นเจ้าของ)"
+        throw "PREFLIGHT_PORT_4101_FOREIGN_PROCESS: Port $Port is occupied by a foreign process not owned by Sam_Att (killing by port number alone is forbidden)"
       }
       if ($null -ne $MockConfig.PSObject.Properties["processManager"]) {
         $State.BackendProcessMode = [string]$MockConfig.processManager
       }
     } else {
-      # ตรวจสอบ Windows Service ของ Sam_Att ก่อน
       $WinSvc = Get-Service -Name "SamAttV2Standalone", "Sam_Att_V2_Standalone" -ErrorAction SilentlyContinue | Select-Object -First 1
       if ($null -ne $WinSvc) {
         $State.BackendProcessMode = "WINDOWS_SERVICE"
         $State.BackendServiceName = $WinSvc.Name
         Write-DeployLog -Message "Detected Sam_Att Windows Service: $($WinSvc.Name) (Status=$($WinSvc.Status))"
       } else {
-        # ตรวจสอบ PM2 เฉพาะกรณีมีโปรเซสชื่อ Sam_Att
         $Pm2Cmd = Get-Command pm2 -ErrorAction SilentlyContinue
         if ($null -ne $Pm2Cmd) {
           $Pm2Res = Invoke-NativeCli -Executable "pm2" -Arguments @("jlist")
@@ -664,7 +658,6 @@ try {
         }
       }
 
-      # ตรวจสอบผู้ถือครองพอร์ต 4101 จริง
       if ($env:OS -like "*Windows*") {
         $NetConn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($null -ne $NetConn -and $NetConn.OwningProcess -gt 0) {
@@ -673,7 +666,6 @@ try {
           $ProcName = if ($null -ne $ProcWmi) { [string]$ProcWmi.Name } else { "" }
           $CmdLine = if ($null -ne $ProcWmi) { [string]$ProcWmi.CommandLine } else { "" }
 
-          # ตรวจสอบว่า CommandLine เป็นของ Sam_Att หรือ Health API ยืนยันว่าเป็น Sam_Att V2 Standalone
           $IsConfirmedSamAtt = $false
           if ($CmdLine -match "Sam_Att" -or $CmdLine -match "server\.ts") {
             $IsConfirmedSamAtt = $true
@@ -689,7 +681,7 @@ try {
           }
 
           if (-not $IsConfirmedSamAtt) {
-            throw "PREFLIGHT_PORT_4101_FOREIGN_PROCESS: พอร์ต $Port ถูกใช้งานโดยโปรเซสอื่นที่ไม่ใช่ Sam_Att (PID=$ListenPid, Name=$ProcName) ระบบหยุดทำงานทันทีเพื่อความปลอดภัย"
+            throw "PREFLIGHT_PORT_4101_FOREIGN_PROCESS: Port $Port is in use by a foreign process (PID=$ListenPid, Name=$ProcName). Aborting to protect co-tenant services."
           }
           $State.VerifiedSamAttPid = $ListenPid
           Write-DeployLog -Message "Verified Port $Port is owned by Sam_Att V2 Standalone (PID=$ListenPid, Mode=$($State.BackendProcessMode))."
@@ -697,9 +689,9 @@ try {
       }
     }
 
-    # 1.8 ตรวจสอบสิทธิ์การเขียนโฟลเดอร์ Backup
+    # 1.8 Verify Backup directory is writable
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["simulateBackupDirUnwritable"] -and $MockConfig.simulateBackupDirUnwritable -eq $true) {
-      throw "PREFLIGHT_BACKUP_DIR_UNWRITABLE: ไม่สามารถสร้างหรือเขียนไฟล์ในโฟลเดอร์สำรองข้อมูล $BackupsRootDir ได้"
+      throw "PREFLIGHT_BACKUP_DIR_UNWRITABLE: Backup directory $BackupsRootDir is not writable"
     }
     if (-not (Test-Path $BackupsRootDir)) {
       New-Item -ItemType Directory -Path $BackupsRootDir -Force -ErrorAction Stop | Out-Null
@@ -711,7 +703,7 @@ try {
   Write-StepResult -StepNo 1 -TotalSteps 7 -Label "Preflight Check" -Status "PASS"
 
   # ============================================================================
-  # STEP 2 — GitHub Update
+  # STEP 2 - GitHub Update
   # ============================================================================
   $State.CurrentStep = 2
   $State.StepName = "GitHub Update"
@@ -719,7 +711,7 @@ try {
   Push-Location $AppDir
   try {
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["simulateGitFetchFailure"] -and $MockConfig.simulateGitFetchFailure -eq $true) {
-      throw "GIT_FETCH_FAILED: ไม่สามารถเชื่อมต่อ GitHub ($Remote/$Branch) ได้ กรุณาตรวจสอบการเชื่อมต่อเครือข่าย"
+      throw "GIT_FETCH_FAILED: Cannot connect to GitHub ($Remote/$Branch)"
     }
 
     $HeadRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "HEAD")
@@ -727,7 +719,7 @@ try {
     if ($null -eq $MockConfig) {
       $FetchRes = Invoke-NativeCli -Executable "git" -Arguments @("fetch", $Remote, $Branch)
       if ($FetchRes.ExitCode -ne 0) {
-        throw "GIT_FETCH_FAILED: คำสั่ง git fetch $Remote $Branch ล้มเหลว: $($FetchRes.Output)"
+        throw "GIT_FETCH_FAILED: git fetch $Remote $Branch failed: $($FetchRes.Output)"
       }
       $RemoteHeadRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "$Remote/$Branch")
       $State.RemoteCommit = $RemoteHeadRes.Output
@@ -738,7 +730,6 @@ try {
     Write-DeployLog -Message "Commit Before Update : $($State.CommitBefore)"
     Write-DeployLog -Message "Remote Target Commit : $($State.RemoteCommit)"
 
-    # ตรวจสอบว่ามีไฟล์ Database Migration เปลี่ยนแปลงหรือไม่ (ห้ามรัน Migration อัตโนมัติ!)
     $PendingMigrations = @()
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["pendingMigrations"]) {
       $PendingMigrations = @($MockConfig.pendingMigrations)
@@ -751,7 +742,7 @@ try {
 
     if ($PendingMigrations.Count -gt 0 -and (-not $ApproveMigrations)) {
       $MigList = ($PendingMigrations -join ", ")
-      throw "MIGRATION_APPROVAL_REQUIRED: ตรวจพบการเปลี่ยนแปลงไฟล์โครงสร้างฐานข้อมูล ($MigList) ตามกฎความปลอดภัยห้ามรัน Migration อัตโนมัติ กรุณาตรวจสอบไฟล์และรันพร้อมพารามิเตอร์ -ApproveMigrations เมื่อได้รับอนุมัติ"
+      throw "MIGRATION_APPROVAL_REQUIRED: Database migration changes detected ($MigList). Automatic migration is forbidden. Please review and run with -ApproveMigrations."
     }
 
     if ($CheckOnly) {
@@ -770,7 +761,7 @@ try {
     if ($null -eq $MockConfig) {
       $PullRes = Invoke-NativeCli -Executable "git" -Arguments @("pull", "--ff-only", $Remote, $Branch)
       if ($PullRes.ExitCode -ne 0) {
-        throw "GIT_PULL_FAILED: ไม่สามารถดึงโค้ดด้วย git pull --ff-only ได้ (ห้ามใช้ git reset --hard อัตโนมัติ): $($PullRes.Output)"
+        throw "GIT_PULL_FAILED: git pull --ff-only failed (automatic git reset --hard is forbidden): $($PullRes.Output)"
       }
       $AfterHeadRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "HEAD")
       $State.CommitAfter = $AfterHeadRes.Output
@@ -786,13 +777,13 @@ try {
   Write-StepResult -StepNo 2 -TotalSteps 7 -Label "GitHub Update" -Status "PASS"
 
   # ============================================================================
-  # STEP 3 — Backup
+  # STEP 3 - Backup
   # ============================================================================
   $State.CurrentStep = 3
   $State.StepName = "Backup"
 
   if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["simulateBackupFailure"] -and $MockConfig.simulateBackupFailure -eq $true) {
-    throw "BACKUP_FAILED: ไม่สามารถสร้างชุดสำรองข้อมูลก่อนการอัปเดตได้ ยกเลิกการ Deploy ทันที"
+    throw "BACKUP_FAILED: Failed to create pre-deployment backup. Aborting deployment."
   }
 
   $BackupDir = Join-Path $BackupsRootDir "deploy_backup_$Timestamp"
@@ -824,7 +815,7 @@ try {
   $ManifestPath = Join-Path $BackupDir "backup-manifest.json"
   ($BackupManifest | ConvertTo-Json -Depth 5) | Set-Content -Path $ManifestPath -Encoding UTF8 -ErrorAction Stop
   if (-not (Test-Path $ManifestPath)) {
-    throw "BACKUP_MANIFEST_MISSING: ไม่พบไฟล์ backup-manifest.json ในโฟลเดอร์สำรองข้อมูล"
+    throw "BACKUP_MANIFEST_MISSING: backup-manifest.json missing in backup folder"
   }
   $ManifestHash = (Get-FileHash -Path $ManifestPath -Algorithm SHA256).Hash.ToLower()
   Set-Content -Path "$ManifestPath.sha256" -Value $ManifestHash -Encoding ASCII -ErrorAction Stop
@@ -834,7 +825,7 @@ try {
   Write-StepResult -StepNo 3 -TotalSteps 7 -Label "Backup" -Status "PASS"
 
   # ============================================================================
-  # STEP 4 — Install Dependencies
+  # STEP 4 - Install Dependencies
   # ============================================================================
   $State.CurrentStep = 4
   $State.StepName = "Install Dependencies"
@@ -843,16 +834,16 @@ try {
   try {
     if ($null -ne $MockConfig) {
       if ($null -ne $MockConfig.PSObject.Properties["simulateNpmInstallFailure"] -and $MockConfig.simulateNpmInstallFailure -eq $true) {
-        throw "NPM_INSTALL_FAILED: การติดตั้ง Dependencies จาก package-lock.json ล้มเหลว"
+        throw "NPM_INSTALL_FAILED: Dependency installation from package-lock.json failed"
       }
     } else {
       Write-DeployLog -Message "Installing npm dependencies from package-lock.json..."
       $NpmCiRes = Invoke-NativeCli -Executable "npm" -Arguments @("ci", "--no-audit", "--no-fund")
       if ($NpmCiRes.ExitCode -ne 0) {
-        Write-DeployLog -Message "npm ci returned code $($NpmCiRes.ExitCode) (checking if Windows file lock on running native module; retrying with npm install --no-audit --no-fund)..." -Level "WARN"
+        Write-DeployLog -Message "npm ci returned code $($NpmCiRes.ExitCode) (retrying with npm install --no-audit --no-fund due to Windows native module file lock)..." -Level "WARN"
         $NpmInstRes = Invoke-NativeCli -Executable "npm" -Arguments @("install", "--no-audit", "--no-fund")
         if ($NpmInstRes.ExitCode -ne 0) {
-          throw "NPM_INSTALL_FAILED: การติดตั้ง Dependencies ล้มเหลว: $($NpmInstRes.Output)"
+          throw "NPM_INSTALL_FAILED: npm dependency installation failed: $($NpmInstRes.Output)"
         }
       }
     }
@@ -863,7 +854,7 @@ try {
   Write-StepResult -StepNo 4 -TotalSteps 7 -Label "Install Dependencies" -Status "PASS"
 
   # ============================================================================
-  # STEP 5 — Typecheck / Test / Build
+  # STEP 5 - Typecheck / Test / Build
   # ============================================================================
   $State.CurrentStep = 5
   $State.StepName = "Typecheck/Test/Build"
@@ -873,21 +864,21 @@ try {
     # 5.1 TypeScript Typecheck
     if ($null -ne $MockConfig) {
       if ($null -ne $MockConfig.PSObject.Properties["simulateTypecheckFailure"] -and $MockConfig.simulateTypecheckFailure -eq $true) {
-        throw "TYPECHECK_FAILED: ตรวจพบข้อผิดพลาดในการตรวจสอบชนิดข้อมูล TypeScript (npm run typecheck)"
+        throw "TYPECHECK_FAILED: TypeScript typecheck (npm run typecheck) failed"
       }
     } else {
       Write-DeployLog -Message "Running TypeScript typecheck (npm run typecheck)..."
       $TcRes = Invoke-NativeCli -Executable "npm" -Arguments @("run", "typecheck")
       if ($TcRes.ExitCode -ne 0) {
-        throw "TYPECHECK_FAILED: ตรวจสอบ TypeScript ไม่ผ่าน:`n$($TcRes.Output)"
+        throw "TYPECHECK_FAILED: TypeScript typecheck failed:`n$($TcRes.Output)"
       }
     }
 
-    # 5.2 Automated Unit & Integration Tests (รันใน Sandbox แยกอิสระ ไม่แตะต้อง MySQL จริง)
+    # 5.2 Automated Unit & Integration Tests (isolated SQLite sandbox; never touches production MySQL)
     if (-not $SkipTests) {
       if ($null -ne $MockConfig) {
         if ($null -ne $MockConfig.PSObject.Properties["simulateTestFailure"] -and $MockConfig.simulateTestFailure -eq $true) {
-          throw "UNIT_TESTS_FAILED: ชุดทดสอบอัตโนมัติ (npm test) ไม่ผ่านการตรวจสอบ"
+          throw "UNIT_TESTS_FAILED: Automated test suite (npm test) failed"
         }
       } else {
         Write-DeployLog -Message "Running automated verification test suite (npm test) in isolated SQLite sandbox..."
@@ -900,7 +891,7 @@ try {
           $env:NODE_ENV = "test"
           $TestRes = Invoke-NativeCli -Executable "npm" -Arguments @("test")
           if ($TestRes.ExitCode -ne 0) {
-            throw "UNIT_TESTS_FAILED: ชุดทดสอบอัตโนมัติไม่ผ่าน:`n$($TestRes.Output)"
+            throw "UNIT_TESTS_FAILED: Automated tests failed:`n$($TestRes.Output)"
           }
         } finally {
           $env:SAM_ATT_DB_ENGINE = $PrevEngine
@@ -913,33 +904,31 @@ try {
     # 5.3 Production Frontend Build (vite build -> dist/index.html)
     if ($null -ne $MockConfig) {
       if ($null -ne $MockConfig.PSObject.Properties["simulateBuildFailure"] -and $MockConfig.simulateBuildFailure -eq $true) {
-        throw "BUILD_FAILED: การคอมไพล์ Frontend (npm run build) ล้มเหลว หรือไม่พบไฟล์ dist/index.html"
+        throw "BUILD_FAILED: Frontend production build (npm run build) failed"
       }
     } else {
       Write-DeployLog -Message "Running Frontend production build (npm run build)..."
-      # ลบไฟล์ bun.lock หากมีเพื่อไม่ให้ขัดแย้งกับนโยบาย Single Lockfile
       if (Test-Path (Join-Path $AppDir "bun.lock")) {
         Remove-Item -Path (Join-Path $AppDir "bun.lock") -Force -ErrorAction SilentlyContinue
       }
       $BuildRes = Invoke-NativeCli -Executable "npm" -Arguments @("run", "build")
       if ($BuildRes.ExitCode -ne 0) {
-        throw "BUILD_FAILED: คำสั่ง npm run build ล้มเหลว:`n$($BuildRes.Output)"
+        throw "BUILD_FAILED: npm run build failed:`n$($BuildRes.Output)"
       }
     }
 
     $BuiltIndexHtml = Join-Path $AppDir "dist\index.html"
     if (-not (Test-Path $BuiltIndexHtml)) {
-      throw "BUILD_ARTIFACT_MISSING: ไม่พบไฟล์ dist\index.html หลังการ Build"
+      throw "BUILD_ARTIFACT_MISSING: dist\index.html not found after build"
     }
     if ((Get-Item $BuiltIndexHtml).Length -le 32) {
-      throw "BUILD_ARTIFACT_EMPTY: ไฟล์ dist\index.html มีขนาดไม่ถูกต้อง"
+      throw "BUILD_ARTIFACT_EMPTY: dist\index.html is empty or invalid"
     }
 
-    # ยืนยันว่าไฟล์ ScannerReader EXE ไม่ถูกเปลี่ยนแปลง
     if (-not [string]::IsNullOrWhiteSpace($State.ScannerExePath) -and (Test-Path $State.ScannerExePath)) {
       $CurrentScannerSha = (Get-FileHash -Path $State.ScannerExePath -Algorithm SHA256).Hash.ToLower()
       if ($CurrentScannerSha -ne $State.ScannerExeSha256) {
-        throw "SCANNER_EXE_MODIFIED_VIOLATION: ตรวจพบการเปลี่ยนแปลงไฟล์ ScannerReader EXE โดยไม่ได้รับอนุญาต"
+        throw "SCANNER_EXE_MODIFIED_VIOLATION: ScannerReader EXE checksum changed unexpectedly"
       }
     }
   } finally {
@@ -949,12 +938,11 @@ try {
   Write-StepResult -StepNo 5 -TotalSteps 7 -Label "Typecheck/Test/Build" -Status "PASS"
 
   # ============================================================================
-  # STEP 6 — IIS / Backend Update
+  # STEP 6 - IIS / Backend Update
   # ============================================================================
   $State.CurrentStep = 6
   $State.StepName = "IIS / Backend Update"
 
-  # 6.1 อัปเดต Frontend ตามสถาปัตยกรรม IIS ที่ตรวจพบ (ห้ามใช้ iisreset และห้ามแตะ Procurement)
   if ($State.IisRoutingMode -eq "IIS_STATIC_VIRTUAL_DIR" -and -not [string]::IsNullOrWhiteSpace($State.IisStaticTargetDir)) {
     Write-DeployLog -Message "Updating static IIS folder for Sam_Att only at $($State.IisStaticTargetDir)..."
     Copy-Item -Path (Join-Path $AppDir "dist\*") -Destination $State.IisStaticTargetDir -Recurse -Force -ErrorAction Stop
@@ -962,13 +950,12 @@ try {
     Write-DeployLog -Message "IIS Routing Mode is $($State.IisRoutingMode): Frontend (/Sam_Att/) and API (/api/Sam_Att/) are served from $AppDir\dist via HTTPS Port $Port without restarting IIS or Procurement."
   }
 
-  # 6.2 รีสตาร์ทเฉพาะโปรเซสของ Sam_Att V2 Standalone
   Restart-SamAttBackendOnly -IsRollback $false
 
   Write-StepResult -StepNo 6 -TotalSteps 7 -Label "IIS / Backend Update" -Status "PASS"
 
   # ============================================================================
-  # STEP 7 — Health Check
+  # STEP 7 - Health Check
   # ============================================================================
   $State.CurrentStep = 7
   $State.StepName = "Health Check"
@@ -1011,16 +998,15 @@ try {
   Write-Host "ERROR [$($State.StepName)]: $ErrMessage" -ForegroundColor Red
   Write-DeployLog -Message "FAILED at Step $($State.CurrentStep) ($($State.StepName)): $ErrMessage" -Level "ERROR"
 
-  # หากผ่านขั้นตอน Preflight และเริ่มเปลี่ยนแปลงโค้ดหรือโปรเซสแล้ว ให้ดำเนินการ Rollback อัตโนมัติ
   if ($State.CurrentStep -ge 4 -or $State.GitPulled) {
     $RolledBack = Invoke-SafeRollback -FailureReason $ErrMessage
     if ($RolledBack) {
       Write-Host ""
-      Write-Host "DEPLOYMENT FAILED — ROLLED BACK SAFELY TO PREVIOUS VERSION" -ForegroundColor Yellow
+      Write-Host "DEPLOYMENT FAILED - ROLLED BACK SAFELY TO PREVIOUS VERSION" -ForegroundColor Yellow
       exit 1
     } else {
       Write-Host ""
-      Write-Host "DEPLOYMENT CRITICAL — ROLLBACK FAILED (MANUAL INTERVENTION REQUIRED)" -ForegroundColor Red
+      Write-Host "DEPLOYMENT CRITICAL - ROLLBACK FAILED (MANUAL INTERVENTION REQUIRED)" -ForegroundColor Red
       exit 2
     }
   }
