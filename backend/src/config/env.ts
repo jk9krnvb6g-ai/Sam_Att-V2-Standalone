@@ -17,7 +17,21 @@ import path from 'path';
 import dotenv from 'dotenv';
 import { generateCryptographicSecret } from '../utils/crypto.ts';
 
-dotenv.config();
+export function isAutomatedTestRuntime(): boolean {
+  return (
+    process.env.NODE_ENV === 'test' ||
+    process.env.SAM_ATT_TEST_ISOLATION === 'true' ||
+    process.execArgv.includes('--test') ||
+    process.argv.some((arg) => arg.endsWith('.test.ts'))
+  );
+}
+
+// ห้ามโหลดไฟล์ .env ของ Production เข้าสู่โปรเซส Automated Test เด็ดขาด เพื่อป้องกันการเชื่อมต่อฐานข้อมูลจริง (10.1.0.201 / HOSOffice)
+if (!isAutomatedTestRuntime()) {
+  dotenv.config();
+} else if (!process.env.NODE_ENV) {
+  process.env.NODE_ENV = 'test';
+}
 
 export type DbEngineMode = 'mysql' | 'sqlite_sandbox';
 export type DataMode = 'REAL' | 'DEMO';
@@ -82,6 +96,43 @@ export class ProductionConfigError extends Error {
     super(`Production Configuration Validation Failed (Fail-Closed): ${violations.join(' | ')}`);
     this.name = 'ProductionConfigError';
     this.violations = violations;
+  }
+}
+
+export class TestIsolationViolationError extends Error {
+  public readonly code = 'TEST_ISOLATION_VIOLATION';
+  public readonly violations: string[];
+  constructor(violations: string[]) {
+    super(`Test Isolation Fail-Closed Guard Triggered: ${violations.join(' | ')}`);
+    this.name = 'TestIsolationViolationError';
+    this.violations = violations;
+  }
+}
+
+/**
+ * ตรวจสอบยืนยันว่า Automated Tests แยกขาดจากฐานข้อมูล Production (10.1.0.201 / samchuk_attendance_v2) อย่างสมบูรณ์
+ * หากไม่สามารถยืนยันการแยกฐานข้อมูลได้ จะหยุดทำงานแบบ Fail-Closed ทันทีก่อนมีการเขียนข้อมูล
+ */
+export function assertTestEnvironmentIsolated(cfg: AppConfig = loadConfig()): void {
+  const violations: string[] = [];
+  if (cfg.nodeEnv !== 'test') {
+    violations.push(`EXPECTED_NODE_ENV_TEST: found NODE_ENV='${cfg.nodeEnv}'`);
+  }
+  if (cfg.dbEngine !== 'sqlite_sandbox') {
+    violations.push(`FORBIDDEN_TEST_DB_ENGINE: Automated tests must use 'sqlite_sandbox', found '${cfg.dbEngine}'`);
+  }
+  if (cfg.samAttDb.host === '10.1.0.201') {
+    violations.push('FORBIDDEN_PRODUCTION_DB_HOST: Automated tests must never target production MySQL host 10.1.0.201');
+  }
+  const normalizedTmp = path.resolve(os.tmpdir());
+  const normalizedSqlite = path.resolve(cfg.samAttDb.sqlitePath);
+  if (!normalizedSqlite.startsWith(normalizedTmp)) {
+    violations.push(
+      `UNSAFE_TEST_SQLITE_PATH: Test SQLite path (${normalizedSqlite}) must reside inside os.tmpdir() (${normalizedTmp})`
+    );
+  }
+  if (violations.length > 0) {
+    throw new TestIsolationViolationError(violations);
   }
 }
 

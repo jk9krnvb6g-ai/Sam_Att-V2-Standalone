@@ -363,9 +363,10 @@ function Invoke-SafeRollback {
     return $false
   }
 
-  $RollbackSuccess = $true
+  $RollbackSuccess = $false
 
   try {
+    $VerifiedCommitAfterRollback = $State.CommitBefore
     Push-Location $AppDir
     try {
       # 1. Revert Git commit if git pull had advanced the branch (never git reset --hard or git clean -fd)
@@ -380,8 +381,22 @@ function Invoke-SafeRollback {
         }
       }
 
-      # 2. Restore dist/ build artifact from Backup
+      if ($null -eq $MockConfig -and -not [string]::IsNullOrWhiteSpace($State.CommitBefore)) {
+        $VerifyHeadRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "HEAD")
+        $VerifiedCommitAfterRollback = $VerifyHeadRes.Output
+        if ($VerifyHeadRes.ExitCode -ne 0 -or $VerifiedCommitAfterRollback -ne $State.CommitBefore) {
+          throw "ROLLBACK_COMMIT_MISMATCH: Expected HEAD $($State.CommitBefore) after rollback, but found '$VerifiedCommitAfterRollback'"
+        }
+      }
+
+      # 2. Restore dist/ build artifact and manifest files from Backup
       if ($State.BackupCreated -and -not [string]::IsNullOrWhiteSpace($State.BackupDir) -and (Test-Path $State.BackupDir)) {
+        foreach ($CfgFile in @("package.json", "package-lock.json", "tsconfig.json")) {
+          $BkpCfg = Join-Path $State.BackupDir $CfgFile
+          if (Test-Path $BkpCfg) {
+            Copy-Item -Path $BkpCfg -Destination (Join-Path $AppDir $CfgFile) -Force -ErrorAction Stop
+          }
+        }
         $BackupDist = Join-Path $State.BackupDir "dist"
         $TargetDist = Join-Path $AppDir "dist"
         if (Test-Path (Join-Path $BackupDist "index.html")) {
@@ -390,17 +405,29 @@ function Invoke-SafeRollback {
             Remove-Item -Path $TargetDist -Recurse -Force -ErrorAction Stop
           }
           Copy-Item -Path $BackupDist -Destination $TargetDist -Recurse -Force -ErrorAction Stop
+          if (-not (Test-Path (Join-Path $TargetDist "index.html"))) {
+            throw "ROLLBACK_DIST_RESTORE_FAILED: dist/index.html missing after restoring from backup"
+          }
         }
       }
     } finally {
       Pop-Location
     }
 
-    # 3. Verify or Restart Sam_Att backend process only (never touch Procurement or IIS)
+    # 3. Verify Health API or Restart Sam_Att backend process only if needed (never touch Procurement or IIS)
+    $VerifiedHealth = $null
     if ($null -ne $MockConfig) {
-      Restart-SamAttBackendOnly -IsRollback $true
+      if ($State.BackendRestarted) {
+        Restart-SamAttBackendOnly -IsRollback $true
+      }
       if ($null -ne $MockConfig.PSObject.Properties["postRollbackHealthy"] -and $MockConfig.postRollbackHealthy -eq $false) {
         throw "POST_ROLLBACK_HEALTH_FAILED: System failed Health Check after Rollback"
+      }
+      $VerifiedHealth = [PSCustomObject]@{
+        Healthy      = $true
+        ApiStatus    = "200 OK"
+        MysqlStatus  = "CONNECTED"
+        DatabaseName = $State.ExpectedDbName
       }
     } else {
       $QuickHealth = Test-SamAttHealthEndpoint -TargetPort $Port -ExpectedDbEngine $State.ExpectedDbEngine -ExpectedDbName $State.ExpectedDbName -MaxRetries 2 -RetryDelaySec 1
@@ -411,12 +438,26 @@ function Invoke-SafeRollback {
         if (-not $PostRollbackHealth.Healthy) {
           throw "POST_ROLLBACK_HEALTH_FAILED: $($PostRollbackHealth.Error)"
         }
+        $VerifiedHealth = $PostRollbackHealth
       } else {
-        Write-DeployLog -Message "Existing Sam_Att backend process was untouched and remains healthy on port $Port."
+        Write-DeployLog -Message "Existing Sam_Att backend process was untouched and verified healthy on port $Port."
+        $VerifiedHealth = $QuickHealth
       }
     }
 
-    Write-DeployLog -Message "Rollback completed and verified healthy on port $Port." -Level "INFO"
+    if ($null -eq $VerifiedHealth -or (-not $VerifiedHealth.Healthy)) {
+      throw "POST_ROLLBACK_UNVERIFIED: Rollback health verification did not complete"
+    }
+
+    $ShortRollbackCommit = if (-not [string]::IsNullOrWhiteSpace($VerifiedCommitAfterRollback)) {
+      $VerifiedCommitAfterRollback.Substring(0, [Math]::Min(8, $VerifiedCommitAfterRollback.Length))
+    } else {
+      "VERIFIED"
+    }
+    Write-Host "  Rollback Commit : $ShortRollbackCommit (VERIFIED)" -ForegroundColor Cyan
+    Write-Host "  Health API      : $($VerifiedHealth.ApiStatus) (MySQL $($VerifiedHealth.MysqlStatus))" -ForegroundColor Cyan
+    Write-DeployLog -Message "Rollback verified: Commit=$VerifiedCommitAfterRollback, Health=$($VerifiedHealth.ApiStatus), MySQL=$($VerifiedHealth.MysqlStatus)" -Level "INFO"
+    $RollbackSuccess = $true
   } catch {
     Write-Host "  [ROLLBACK DETAIL] $($_.Exception.Message)" -ForegroundColor Red
     Write-DeployLog -Message "CRITICAL ROLLBACK ERROR: $($_.Exception.Message)" -Level "ERROR"
@@ -916,18 +957,30 @@ try {
         $PrevEngine = $env:SAM_ATT_DB_ENGINE
         $PrevMode = $env:SAM_ATT_DATA_MODE
         $PrevNodeEnv = $env:NODE_ENV
+        $PrevTestIso = $env:SAM_ATT_TEST_ISOLATION
+        $PrevHosHost = $env:HOSOFFICE_DB_HOST
+        $PrevHosPass = $env:HOSOFFICE_DB_PASSWORD
+        $PrevHosPush = $env:HOSOFFICE_LIVE_PUSH_ENABLED
         try {
+          $env:SAM_ATT_TEST_ISOLATION = "true"
           $env:SAM_ATT_DB_ENGINE = "sqlite_sandbox"
           $env:SAM_ATT_DATA_MODE = "DEMO"
           $env:NODE_ENV = "test"
+          $env:HOSOFFICE_DB_HOST = "CHANGE_ME"
+          $env:HOSOFFICE_DB_PASSWORD = "CHANGE_ME"
+          $env:HOSOFFICE_LIVE_PUSH_ENABLED = "false"
           $TestRes = Invoke-NativeCli -Executable "npm" -Arguments @("test")
           if ($TestRes.ExitCode -ne 0) {
             throw "UNIT_TESTS_FAILED: Automated tests failed:`n$($TestRes.Output)"
           }
         } finally {
+          $env:SAM_ATT_TEST_ISOLATION = $PrevTestIso
           $env:SAM_ATT_DB_ENGINE = $PrevEngine
           $env:SAM_ATT_DATA_MODE = $PrevMode
           $env:NODE_ENV = $PrevNodeEnv
+          $env:HOSOFFICE_DB_HOST = $PrevHosHost
+          $env:HOSOFFICE_DB_PASSWORD = $PrevHosPass
+          $env:HOSOFFICE_LIVE_PUSH_ENABLED = $PrevHosPush
         }
       }
     }

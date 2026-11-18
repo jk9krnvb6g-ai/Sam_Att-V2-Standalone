@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import mysql from 'mysql2/promise';
-import { loadConfig } from '../../config/env.ts';
+import { loadConfig, isAutomatedTestRuntime } from '../../config/env.ts';
 import { dbQuery, dbExecute } from '../../database/adapter.ts';
 import { requireAuth, requireRoles } from '../../middleware/auth.ts';
 import { writeAuditLog } from '../audit/service.ts';
+import { repairThaiMojibakeIfCorrupted } from '../../utils/crypto.ts';
 
 export interface HosOfficeHrPersonRow {
   PERSON_ID: string;
@@ -20,18 +21,98 @@ export interface HosOfficeHrPersonRow {
   IS_ACTIVE: number;
 }
 
-// Test Double hook strictly for automated integration tests (never enabled automatically in production)
+// Test Double hooks strictly for automated integration tests (never enabled automatically in production)
 let testDoubleHosOfficeRows: HosOfficeHrPersonRow[] | null = null;
 let testDoubleForceOffline = false;
+let testDoubleSchemaColumns: string[] | null = null;
 
 export function setHosOfficeTestDouble(rows: HosOfficeHrPersonRow[] | null, forceOffline = false): void {
   testDoubleHosOfficeRows = rows;
   testDoubleForceOffline = forceOffline;
 }
 
+export function setHosOfficeSchemaColumnsForTests(columns: string[] | null): void {
+  testDoubleSchemaColumns = columns;
+}
+
+const REQUIRED_HR_PERSON_COLUMN_GROUPS: Array<{ groupName: string; candidates: string[] }> = [
+  { groupName: 'PERSON_ID', candidates: ['PERSON_ID', 'ID', 'HR_PERSON_ID', 'PERSON_CODE', 'HR_CID'] },
+  { groupName: 'FINGLE_ID', candidates: ['FINGLE_ID', 'FINGER_ID', 'SCAN_ID', 'ENROLL_NUMBER', 'BADGE_NUMBER'] },
+  { groupName: 'FIRST_NAME', candidates: ['FIRST_NAME', 'HR_FNAME', 'FNAME'] },
+  { groupName: 'LAST_NAME', candidates: ['LAST_NAME', 'HR_LNAME', 'LNAME'] },
+];
+
+export function validateHosOfficeHrPersonColumnsContract(availableColumns: string[]): {
+  valid: boolean;
+  missingGroups: string[];
+} {
+  const upperSet = new Set(availableColumns.map((c) => c.trim().toUpperCase()));
+  const missingGroups: string[] = [];
+  for (const grp of REQUIRED_HR_PERSON_COLUMN_GROUPS) {
+    const found = grp.candidates.some((cand) => upperSet.has(cand.toUpperCase()));
+    if (!found) {
+      missingGroups.push(`${grp.groupName} (ต้องมีคอลัมน์ใดคอลัมน์หนึ่ง: ${grp.candidates.join(', ')})`);
+    }
+  }
+  return {
+    valid: missingGroups.length === 0,
+    missingGroups,
+  };
+}
+
+function pickField(raw: Record<string, unknown>, candidates: string[], fallback = ''): string {
+  for (const key of candidates) {
+    const val = raw[key] ?? raw[key.toLowerCase()] ?? raw[key.toUpperCase()];
+    if (val !== undefined && val !== null && String(val).trim() !== '') {
+      return repairThaiMojibakeIfCorrupted(String(val).trim(), fallback).text;
+    }
+  }
+  return fallback;
+}
+
+function normalizeHosOfficeRow(raw: Record<string, unknown>): HosOfficeHrPersonRow {
+  const personId = pickField(raw, ['PERSON_ID', 'ID', 'HR_PERSON_ID', 'PERSON_CODE', 'HR_CID']);
+  const fingleRaw = pickField(raw, ['FINGLE_ID', 'FINGER_ID', 'SCAN_ID', 'ENROLL_NUMBER', 'BADGE_NUMBER']);
+  const titleName = pickField(raw, ['TITLE_NAME', 'HR_PREFIX_NAME', 'PREFIX_NAME', 'PNAME', 'HR_PREFIX_ID']);
+  const firstName = pickField(raw, ['FIRST_NAME', 'HR_FNAME', 'FNAME']);
+  const lastName = pickField(raw, ['LAST_NAME', 'HR_LNAME', 'LNAME']);
+  const positionName = pickField(raw, ['POSITION_NAME', 'POSITION_IN_WORK', 'HR_POSITION_NAME', 'HR_POSITION_ID'], 'ไม่ระบุตำแหน่ง');
+  const deptCode = pickField(raw, ['DEPARTMENT_CODE', 'HR_DEPARTMENT_ID', 'DEPT_CODE'], 'DEP-GEN');
+  const deptName = pickField(raw, ['DEPARTMENT_NAME', 'HR_DEPARTMENT_NAME', 'DEPT_NAME', 'HR_DEPARTMENT_ID'], 'ไม่ระบุกลุ่มงาน');
+  const workGroupName = pickField(
+    raw,
+    ['WORK_GROUP_NAME', 'HR_DEPARTMENT_SUB_NAME', 'HR_DEPARTMENT_SUB_SUB_NAME', 'HR_DEPARTMENT_SUB_ID'],
+    deptName
+  );
+  const rawTypeCode = pickField(raw, ['PERSONNEL_TYPE_CODE', 'HR_PERSON_TYPE_ID', 'PERSON_TYPE_CODE'], 'CIVIL_SERVANT');
+  const rawTypeName = pickField(raw, ['PERSONNEL_TYPE_NAME', 'HR_PERSON_TYPE_NAME', 'PERSON_TYPE_NAME'], rawTypeCode);
+
+  const rawStatus = raw['IS_ACTIVE'] ?? raw['is_active'] ?? raw['HR_STATUS_ID'] ?? raw['hr_status_id'] ?? 1;
+  const statusStr = String(rawStatus).trim();
+  const isActive = statusStr === '1' || statusStr === '01' || statusStr.toUpperCase() === 'ACTIVE' || statusStr.toUpperCase() === 'TRUE' ? 1 : 0;
+
+  return {
+    PERSON_ID: personId,
+    FINGLE_ID: fingleRaw ? fingleRaw : null,
+    TITLE_NAME: titleName ? titleName : null,
+    FIRST_NAME: firstName,
+    LAST_NAME: lastName,
+    POSITION_NAME: positionName,
+    DEPARTMENT_CODE: deptCode,
+    DEPARTMENT_NAME: deptName,
+    WORK_GROUP_NAME: workGroupName,
+    PERSONNEL_TYPE_CODE: rawTypeCode,
+    PERSONNEL_TYPE_NAME: rawTypeName,
+    IS_ACTIVE: isActive,
+  };
+}
+
 /**
  * Fetches hr_person rows from HOSOffice Read-Only MySQL database.
- * Fails closed if HOSOFFICE_DB_HOST is unconfigured ('CHANGE_ME') or unreachable.
+ * Fails closed with BLOCKED_BY_EXTERNAL_CONTRACT if:
+ * 1. HOSOFFICE_DB_HOST / credentials are unconfigured ('CHANGE_ME')
+ * 2. Running in automated test runtime without an explicit test double (prevents accidental connection to production HOSOffice DB)
+ * 3. External table schema in HOSOffice does not satisfy required column contract (verified BEFORE touching internal tables)
  */
 async function fetchFromHosOfficeReadOnly(): Promise<HosOfficeHrPersonRow[]> {
   if (testDoubleForceOffline) {
@@ -40,12 +121,32 @@ async function fetchFromHosOfficeReadOnly(): Promise<HosOfficeHrPersonRow[]> {
     throw err;
   }
 
+  if (testDoubleSchemaColumns !== null) {
+    const contractCheck = validateHosOfficeHrPersonColumnsContract(testDoubleSchemaColumns);
+    if (!contractCheck.valid) {
+      const err = new Error(
+        `BLOCKED_BY_EXTERNAL_CONTRACT: โครงสร้างตาราง hr_person ของ HOSOffice ไม่ตรงตามสัญญาเชื่อมต่อ (ไม่พบคอลัมน์: ${contractCheck.missingGroups.join('; ')})`
+      );
+      (err as Error & { code?: string }).code = 'BLOCKED_BY_EXTERNAL_CONTRACT';
+      throw err;
+    }
+  }
+
   if (testDoubleHosOfficeRows !== null) {
     return testDoubleHosOfficeRows;
   }
 
   const cfg = loadConfig();
-  if (!cfg.hosofficeDb.host || cfg.hosofficeDb.host === 'CHANGE_ME') {
+  if (
+    isAutomatedTestRuntime() ||
+    cfg.nodeEnv === 'test' ||
+    !cfg.hosofficeDb.host ||
+    cfg.hosofficeDb.host === 'CHANGE_ME' ||
+    !cfg.hosofficeDb.user ||
+    !cfg.hosofficeDb.password ||
+    cfg.hosofficeDb.password === 'CHANGE_ME' ||
+    !cfg.hosofficeDb.hrPersonTable
+  ) {
     const err = new Error(
       'BLOCKED_BY_EXTERNAL_CONTRACT: ยังไม่ได้ตั้งค่า HOSOFFICE_DB_HOST และสิทธิ์ Read-only สำหรับตาราง hr_person (ห้ามจำลองผลสำเร็จ)'
     );
@@ -66,13 +167,50 @@ async function fetchFromHosOfficeReadOnly(): Promise<HosOfficeHrPersonRow[]> {
   try {
     await conn.query('SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci');
     const table = cfg.hosofficeDb.hrPersonTable.replace(/[^a-zA-Z0-9_]/g, '');
-    const [rows] = await conn.query(
-      `SELECT PERSON_ID, FINGLE_ID, TITLE_NAME, FIRST_NAME, LAST_NAME,
-              POSITION_NAME, DEPARTMENT_CODE, DEPARTMENT_NAME, WORK_GROUP_NAME,
-              PERSONNEL_TYPE_CODE, PERSONNEL_TYPE_NAME, IS_ACTIVE
-       FROM ${table}`
+
+    // ตรวจสอบ External Contract ของตาราง hr_person จาก INFORMATION_SCHEMA.COLUMNS ก่อนเข้าถึงข้อมูลหรือแก้ไขตารางภายใน
+    const [colRows] = await conn.execute(
+      `SELECT COLUMN_NAME AS column_name
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`,
+      [cfg.hosofficeDb.database, table]
     );
-    return rows as HosOfficeHrPersonRow[];
+    const colList = Array.isArray(colRows)
+      ? (colRows as Array<{ column_name?: string; COLUMN_NAME?: string }>).map(
+          (c) => String(c.column_name ?? c.COLUMN_NAME ?? '')
+        )
+      : [];
+
+    if (colList.length === 0) {
+      const err = new Error(
+        `BLOCKED_BY_EXTERNAL_CONTRACT: ไม่พบตาราง ${table} หรือไม่มีสิทธิ์อ่านโครงสร้างตารางในฐานข้อมูล HOSOffice (${cfg.hosofficeDb.database})`
+      );
+      (err as Error & { code?: string }).code = 'BLOCKED_BY_EXTERNAL_CONTRACT';
+      throw err;
+    }
+
+    const contractCheck = validateHosOfficeHrPersonColumnsContract(colList);
+    if (!contractCheck.valid) {
+      const err = new Error(
+        `BLOCKED_BY_EXTERNAL_CONTRACT: โครงสร้างตาราง ${table} ของ HOSOffice ไม่ครบตามสัญญาเชื่อมต่อ (ไม่พบคอลัมน์: ${contractCheck.missingGroups.join('; ')})`
+      );
+      (err as Error & { code?: string }).code = 'BLOCKED_BY_EXTERNAL_CONTRACT';
+      throw err;
+    }
+
+    const [rows] = await conn.query(`SELECT * FROM ${table}`);
+    const rawList = Array.isArray(rows) ? (rows as Record<string, unknown>[]) : [];
+    return rawList.map(normalizeHosOfficeRow).filter((r) => Boolean(r.PERSON_ID));
+  } catch (err: unknown) {
+    const rawCode = (err as { code?: string })?.code || '';
+    if (rawCode === 'ER_BAD_FIELD_ERROR' || rawCode === 'ER_NO_SUCH_TABLE' || rawCode === 'ER_TABLEACCESS_DENIED_ERROR') {
+      const contractErr = new Error(
+        `BLOCKED_BY_EXTERNAL_CONTRACT: ตาราง ${cfg.hosofficeDb.hrPersonTable} ในฐานข้อมูล HOSOffice มีโครงสร้างคอลัมน์หรือสิทธิ์ไม่ตรงตามสัญญาเชื่อมต่อ (${rawCode})`
+      );
+      (contractErr as Error & { code?: string }).code = 'BLOCKED_BY_EXTERNAL_CONTRACT';
+      throw contractErr;
+    }
+    throw err;
   } finally {
     await conn.end();
   }

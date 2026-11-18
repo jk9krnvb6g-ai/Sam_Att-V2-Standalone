@@ -16,9 +16,19 @@ import {
   dbExecute,
   ImmutableTableViolationError,
 } from '../src/database/adapter.ts';
-import { loadConfig, validateProductionConfig, ProductionConfigError } from '../src/config/env.ts';
+import {
+  loadConfig,
+  validateProductionConfig,
+  ProductionConfigError,
+  assertTestEnvironmentIsolated,
+  TestIsolationViolationError,
+} from '../src/config/env.ts';
 import { reprocessAttendanceRange } from '../src/modules/attendance/processor.ts';
-import { setHosOfficeTestDouble } from '../src/modules/personnel/routes.ts';
+import {
+  setHosOfficeTestDouble,
+  setHosOfficeSchemaColumnsForTests,
+  validateHosOfficeHrPersonColumnsContract,
+} from '../src/modules/personnel/routes.ts';
 import {
   setScannerExeTestDouble,
   setScannerSyncLockForTests,
@@ -165,8 +175,17 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     process.env.SAM_ATT_DATA_MODE = 'DEMO';
     process.env.PUBLIC_BASE_PATH = '/Sam_Att/';
     process.env.API_BASE_PATH = '/api/Sam_Att';
+    process.env.SESSION_TTL_MINUTES = '480';
     process.env.AUTH_RATE_LIMIT_MAX_ATTEMPTS = '5';
     process.env.AUTH_RATE_LIMIT_WINDOW_MINUTES = '15';
+    process.env.HOSOFFICE_DB_HOST = 'CHANGE_ME';
+    process.env.HOSOFFICE_DB_PORT = '3306';
+    process.env.HOSOFFICE_DB_NAME = 'hosoffice';
+    process.env.HOSOFFICE_DB_USER = 'hosoffice_readonly';
+    process.env.HOSOFFICE_DB_PASSWORD = 'CHANGE_ME';
+    process.env.HOSOFFICE_HR_PERSON_TABLE = 'hr_person';
+    process.env.HOSOFFICE_PUSH_WRITE_USER = 'hosoffice_attendance_writer';
+    process.env.HOSOFFICE_PUSH_WRITE_PASSWORD = 'CHANGE_ME';
     process.env.HOSOFFICE_LIVE_PUSH_ENABLED = 'false';
     process.env.HOSOFFICE_PUSH_TARGET_TABLE = '';
     process.env.SCANNER_SYNC_ENABLED = 'false';
@@ -448,6 +467,67 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     });
     assert.equal(unconfiguredSync.status, 503);
     assert.equal(unconfiguredSync.data.error, 'BLOCKED_BY_EXTERNAL_CONTRACT');
+
+    // Regression A: Even if production HOSOFFICE_DB_HOST is injected into process.env during automated test run,
+    // /personnel/sync must still fail closed with BLOCKED_BY_EXTERNAL_CONTRACT and never connect to external MySQL
+    const prevHosHost = process.env.HOSOFFICE_DB_HOST;
+    const prevHosPass = process.env.HOSOFFICE_DB_PASSWORD;
+    try {
+      process.env.HOSOFFICE_DB_HOST = '10.1.0.201';
+      process.env.HOSOFFICE_DB_PASSWORD = 'SimulatedProductionPassword';
+      const leakedEnvSync = await apiCall('/api/Sam_Att/personnel/sync', {
+        method: 'POST',
+        token: staffToken,
+        body: { effectiveDate: '2026-11-13' },
+      });
+      assert.equal(leakedEnvSync.status, 503);
+      assert.equal(leakedEnvSync.data.error, 'BLOCKED_BY_EXTERNAL_CONTRACT');
+    } finally {
+      process.env.HOSOFFICE_DB_HOST = prevHosHost;
+      process.env.HOSOFFICE_DB_PASSWORD = prevHosPass;
+    }
+
+    // Regression B: External schema contract verification must block incompatible hr_person tables BEFORE touching internal personnel table
+    const countBeforeBadSchema = await dbQuery<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM personnel');
+    setHosOfficeSchemaColumnsForTests(['UNKNOWN_COL_A', 'UNKNOWN_COL_B']);
+    try {
+      const badSchemaSync = await apiCall('/api/Sam_Att/personnel/sync', {
+        method: 'POST',
+        token: staffToken,
+        body: { effectiveDate: '2026-11-13' },
+      });
+      assert.equal(badSchemaSync.status, 503);
+      assert.equal(badSchemaSync.data.error, 'BLOCKED_BY_EXTERNAL_CONTRACT');
+      const countAfterBadSchema = await dbQuery<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM personnel');
+      assert.equal(Number(countAfterBadSchema[0].cnt), Number(countBeforeBadSchema[0].cnt), 'Internal personnel table must remain untouched when external contract fails');
+    } finally {
+      setHosOfficeSchemaColumnsForTests(null);
+    }
+
+    assert.equal(
+      validateHosOfficeHrPersonColumnsContract(['PERSON_ID', 'FINGLE_ID', 'FIRST_NAME', 'LAST_NAME']).valid,
+      true
+    );
+    assert.equal(
+      validateHosOfficeHrPersonColumnsContract(['ID', 'FINGLE_ID', 'HR_FNAME', 'HR_LNAME', 'HR_DEPARTMENT_ID']).valid,
+      true
+    );
+
+    // Regression C: Test Database Isolation Fail-Closed Guard (blocks 10.1.0.201 / mysql engine in test mode)
+    assert.doesNotThrow(() => assertTestEnvironmentIsolated(loadConfig()));
+    assert.throws(
+      () =>
+        assertTestEnvironmentIsolated({
+          ...loadConfig(),
+          dbEngine: 'mysql',
+          samAttDb: {
+            ...loadConfig().samAttDb,
+            host: '10.1.0.201',
+            database: 'samchuk_attendance_v2',
+          },
+        }),
+      (err: unknown) => err instanceof TestIsolationViolationError && err.code === 'TEST_ISOLATION_VIOLATION'
+    );
 
     setHosOfficeTestDouble([
       {

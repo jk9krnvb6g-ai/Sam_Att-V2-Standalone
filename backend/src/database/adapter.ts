@@ -19,7 +19,12 @@ import fs from 'fs';
 import path from 'path';
 import mysql from 'mysql2/promise';
 import { DatabaseSync } from 'node:sqlite';
-import { loadConfig } from '../config/env.ts';
+import {
+  loadConfig,
+  isAutomatedTestRuntime,
+  TestIsolationViolationError,
+  assertTestEnvironmentIsolated,
+} from '../config/env.ts';
 import {
   hashPassword,
   computeRawScanDedupKey,
@@ -83,6 +88,14 @@ function assertRawScansImmutable(sql: string): void {
 
 function getSqliteInstance(): DatabaseSync {
   const cfg = loadConfig();
+  if (cfg.nodeEnv === 'production' || cfg.dbEngine === 'mysql') {
+    throw new DatabaseUnavailableError(
+      'REAL_MODE_SQLITE_FALLBACK_FORBIDDEN: ห้ามใช้ SQLite เป็น Fallback ในโหมด Production หรือเมื่อตั้งค่า SAM_ATT_DB_ENGINE=mysql'
+    );
+  }
+  if (isAutomatedTestRuntime()) {
+    assertTestEnvironmentIsolated(cfg);
+  }
   if (!sqliteDb) {
     const dir = path.dirname(cfg.samAttDb.sqlitePath);
     if (!fs.existsSync(dir)) {
@@ -111,6 +124,11 @@ export function resetSqliteInstanceForTests(customSqlitePath?: string): void {
 
 async function getMysqlPool(): Promise<mysql.Pool> {
   const cfg = loadConfig();
+  if (isAutomatedTestRuntime() || cfg.nodeEnv === 'test') {
+    throw new TestIsolationViolationError([
+      `FORBIDDEN_MYSQL_ACCESS_IN_TEST: Automated tests are strictly prohibited from connecting to MySQL (${cfg.samAttDb.host}:${cfg.samAttDb.port}/${cfg.samAttDb.database})`,
+    ]);
+  }
   if (!mysqlPool) {
     mysqlPool = mysql.createPool({
       host: cfg.samAttDb.host,
