@@ -26,6 +26,7 @@
   <env name="SAM_ATT_HTTPS_PORT" value="4101" />
   <env name="PUBLIC_BASE_PATH" value="/Sam_Att/" />
   <env name="API_BASE_PATH" value="/api/Sam_Att" />
+  <env name="SAM_ATT_DATA_MODE" value="REAL" />
   <env name="SAM_ATT_DB_ENGINE" value="mysql" />
   <env name="TLS_CERT_PATH" value="C:\inetpub\wwwroot\Sam_Att\certs\server.crt" />
   <env name="TLS_KEY_PATH" value="C:\inetpub\wwwroot\Sam_Att\certs\server.key" />

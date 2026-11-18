@@ -49,6 +49,7 @@ import {
   repairThaiMojibakeIfCorrupted,
   getCurrentBangkokDateParts,
 } from '../src/utils/crypto.ts';
+import { runOneClickDeployment } from '../../deployment/deploy-runner.ts';
 
 // ใช้โฟลเดอร์ชั่วคราวใน os.tmpdir() สำหรับฐานข้อมูลและใบรับรองการทดสอบ เพื่อไม่ให้มีไฟล์ .sqlite หรือ .key ตกค้างใน Git Repository (แก้ไข P0 ข้อ 01–02)
 const TEST_RUN_ID = `${process.pid}_${Date.now()}`;
@@ -1330,5 +1331,237 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       }
     }
   });
+
+  test('23. One-Click Deployment Scripts (Deploy_Sam_Att.bat & Deploy_Sam_Att.ps1) & 15 Failure/Safety Scenarios Verification', async () => {
+    // A. Verify physical deployment scripts exist and enforce strict safety invariants
+    const rootBatPath = path.resolve(process.cwd(), 'Deploy_Sam_Att.bat');
+    const deployBatPath = path.resolve(process.cwd(), 'deployment', 'Deploy_Sam_Att.bat');
+    const deployPs1Path = path.resolve(process.cwd(), 'deployment', 'Deploy_Sam_Att.ps1');
+
+    assert.ok(fs.existsSync(rootBatPath), 'Root Deploy_Sam_Att.bat must exist');
+    assert.ok(fs.existsSync(deployBatPath), 'deployment/Deploy_Sam_Att.bat must exist');
+    assert.ok(fs.existsSync(deployPs1Path), 'deployment/Deploy_Sam_Att.ps1 must exist');
+
+    const ps1Content = fs.readFileSync(deployPs1Path, 'utf8');
+    // Must support -CheckOnly and -ApproveMigrations
+    assert.ok(ps1Content.includes('[switch]$CheckOnly'), 'Deploy_Sam_Att.ps1 must support -CheckOnly');
+    assert.ok(ps1Content.includes('[switch]$ApproveMigrations'), 'Deploy_Sam_Att.ps1 must support -ApproveMigrations');
+    // Must forbid destructive git reset --hard / git clean -fd and iisreset execution
+    assert.ok(!/^\s*git\s+reset\s+--hard/m.test(ps1Content), 'Deploy_Sam_Att.ps1 must never run git reset --hard');
+    assert.ok(!/^\s*git\s+clean\s+-fd/m.test(ps1Content), 'Deploy_Sam_Att.ps1 must never run git clean -fd');
+    assert.ok(!/^\s*iisreset/im.test(ps1Content), 'Deploy_Sam_Att.ps1 must never run iisreset');
+    // Must explicitly protect Procurement and CentralApiGateway
+    assert.ok(ps1Content.includes('Procurement'), 'Deploy_Sam_Att.ps1 must explicitly guard Procurement');
+    assert.ok(ps1Content.includes('CentralApiGateway'), 'Deploy_Sam_Att.ps1 must explicitly guard CentralApiGateway');
+
+    // B. Create an isolated mock deployment workspace for the 15 scenarios
+    const mockAppDir = path.join(os.tmpdir(), `sam_att_oneclick_test_${TEST_RUN_ID}`);
+    fs.mkdirSync(path.join(mockAppDir, 'dist'), { recursive: true });
+    fs.mkdirSync(path.join(mockAppDir, 'ScannerReader'), { recursive: true });
+    fs.writeFileSync(path.join(mockAppDir, 'package.json'), '{"name":"sam-att-v2-standalone","version":"2.0.0"}', 'utf8');
+    fs.writeFileSync(path.join(mockAppDir, 'package-lock.json'), '{"name":"sam-att-v2-standalone","lockfileVersion":3}', 'utf8');
+    fs.writeFileSync(path.join(mockAppDir, 'server.ts'), '// server entry', 'utf8');
+    fs.writeFileSync(
+      path.join(mockAppDir, 'dist', 'index.html'),
+      '<!doctype html><html><body data-commit="OLD_COMMIT">v2.0.0</body></html>',
+      'utf8'
+    );
+    fs.writeFileSync(path.join(mockAppDir, 'ScannerReader', 'ScannerSyncCli.exe'), 'ORIGINAL_SCANNER_BINARY_V2', 'utf8');
+
+    const validProdEnv = [
+      'NODE_ENV=production',
+      'SAM_ATT_DATA_MODE=REAL',
+      'SAM_ATT_DB_ENGINE=mysql',
+      'SAM_ATT_DB_HOST=10.1.0.201',
+      'SAM_ATT_DB_PORT=3306',
+      'SAM_ATT_DB_NAME=samchuk_attendance_v2',
+      'SAM_ATT_DB_USER=sam_att_app',
+      'SAM_ATT_DB_PASSWORD=SuperSecretMysqlPass#2026!',
+      'JWT_SECRET=9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9f8e7d6c5b4a3f2e1d0c9b8a',
+      'SCANNER_INGEST_SHARED_TOKEN=a1b2c3d4e5f60718293a4b5c6d7e8f9012345678',
+    ].join('\n');
+    fs.writeFileSync(path.join(mockAppDir, '.env'), validProdEnv, 'utf8');
+
+    try {
+      // Scenario 1: GitHub ไม่สามารถเชื่อมต่อได้ (Git Fetch fails -> Abort, no changes)
+      const s1 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: { simulateGitFetchFailure: true },
+      });
+      assert.equal(s1.exitCode, 1);
+      assert.equal(s1.finalBanner, 'DEPLOYMENT ABORTED');
+      assert.ok(s1.consoleOutput.includes('GIT_FETCH_FAILED'));
+      assert.ok(!s1.consoleOutput.includes('DEPLOYMENT SUCCESS'));
+
+      // Scenario 2: Git Working Tree มีไฟล์แก้ไข (Dirty working tree -> Stop in Preflight, no git reset --hard)
+      const s2 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: { gitDirtyFiles: ['M backend/src/server.ts'] },
+      });
+      assert.equal(s2.exitCode, 1);
+      assert.equal(s2.finalBanner, 'DEPLOYMENT ABORTED');
+      assert.ok(s2.consoleOutput.includes('PREFLIGHT_DIRTY_WORKING_TREE'));
+
+      // Scenario 3: npm install ล้มเหลว (Fails at Step 4 -> Automatic Safe Rollback)
+      const s3 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: { simulateNpmInstallFailure: true },
+      });
+      assert.equal(s3.exitCode, 1);
+      assert.equal(s3.finalBanner, 'DEPLOYMENT ROLLED_BACK');
+      assert.equal(s3.rolledBack, true);
+      assert.equal(s3.rollbackSucceeded, true);
+      assert.equal(s3.commitAfter, s3.commitBefore, 'Must revert commit back to commitBefore');
+
+      // Scenario 4: Typecheck ไม่ผ่าน (Fails at Step 5 -> Automatic Safe Rollback)
+      const s4 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: { simulateTypecheckFailure: true },
+      });
+      assert.equal(s4.exitCode, 1);
+      assert.equal(s4.finalBanner, 'DEPLOYMENT ROLLED_BACK');
+      assert.ok(s4.consoleOutput.includes('TYPECHECK_FAILED'));
+
+      // Scenario 5: Unit Tests ไม่ผ่าน (Fails at Step 5 -> Automatic Safe Rollback)
+      const s5 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: { simulateUnitTestFailure: true },
+      });
+      assert.equal(s5.exitCode, 1);
+      assert.equal(s5.finalBanner, 'DEPLOYMENT ROLLED_BACK');
+      assert.ok(s5.consoleOutput.includes('UNIT_TESTS_FAILED'));
+
+      // Scenario 6: Build ไม่สำเร็จ (Fails at Step 5 -> Automatic Safe Rollback)
+      const s6 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: { simulateBuildFailure: true },
+      });
+      assert.equal(s6.exitCode, 1);
+      assert.equal(s6.finalBanner, 'DEPLOYMENT ROLLED_BACK');
+      assert.ok(s6.consoleOutput.includes('BUILD_FAILED'));
+
+      // Scenario 7: Port 4101 ถูกใช้งานโดย Process อื่น (Foreign process owns 4101 -> Abort in Preflight, never kill by port)
+      const s7 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: { port4101Owner: 'FOREIGN_PROCESS', foreignProcessName: 'ProcurementService.exe' },
+      });
+      assert.equal(s7.exitCode, 1);
+      assert.equal(s7.finalBanner, 'DEPLOYMENT ABORTED');
+      assert.equal(s7.foreignProcessKilled, false);
+      assert.ok(s7.consoleOutput.includes('PREFLIGHT_PORT_4101_FOREIGN_PROCESS'));
+
+      // Scenario 8: Backend เริ่มไม่สำเร็จ (Fails at Step 6 -> Automatic Safe Rollback)
+      const s8 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: { simulateBackendStartFailure: true },
+      });
+      assert.equal(s8.exitCode, 1);
+      assert.equal(s8.finalBanner, 'DEPLOYMENT ROLLED_BACK');
+      assert.ok(s8.consoleOutput.includes('BACKEND_START_FAILED'));
+
+      // Scenario 9: Health API ไม่ตอบ (Fails at Step 7 -> Automatic Safe Rollback)
+      const s9 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: { simulateHealthApiUnreachable: true },
+      });
+      assert.equal(s9.exitCode, 1);
+      assert.equal(s9.finalBanner, 'DEPLOYMENT ROLLED_BACK');
+      assert.ok(s9.consoleOutput.includes('HEALTH_API_UNREACHABLE'));
+      assert.ok(!s9.consoleOutput.includes('DEPLOYMENT SUCCESS'));
+
+      // Scenario 10: MySQL เชื่อมต่อไม่ได้ (Fails at Step 7 -> Automatic Safe Rollback, no SQLite fallback)
+      const s10 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: { simulateMysqlDisconnected: true },
+      });
+      assert.equal(s10.exitCode, 1);
+      assert.equal(s10.finalBanner, 'DEPLOYMENT ROLLED_BACK');
+      assert.ok(s10.consoleOutput.includes('MYSQL_DISCONNECTED'));
+
+      // Scenario 11: Backup ไม่สำเร็จ (Fails at Step 3 -> Aborts before modifying dependencies/build/service)
+      const s11 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: { simulateBackupFailure: true },
+      });
+      assert.equal(s11.exitCode, 1);
+      assert.ok(s11.consoleOutput.includes('BACKUP_FAILED'));
+      assert.equal(s11.steps.some((st) => st.stepNumber === 4), false, 'Must not proceed to Step 4 when Backup fails');
+
+      // Scenario 12: Rollback ไม่สำเร็จ (Reports CRITICAL status with Exit Code 2, never SUCCESS)
+      const s12 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: {
+          simulateHealthApiUnreachable: true,
+          simulateRollbackFailure: true,
+        },
+      });
+      assert.equal(s12.exitCode, 2);
+      assert.equal(s12.finalBanner, 'DEPLOYMENT CRITICAL');
+      assert.equal(s12.rollbackSucceeded, false);
+      assert.ok(s12.consoleOutput.includes('DEPLOYMENT CRITICAL — ROLLBACK FAILED'));
+      assert.ok(!s12.consoleOutput.includes('DEPLOYMENT SUCCESS'));
+
+      // Scenario 13: .env ไม่ครบ หรือตั้งค่า DEMO /CHANGE_ME (Fails in Step 1 Preflight)
+      const s13 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: {
+          envContent: 'SAM_ATT_DATA_MODE=REAL\nSAM_ATT_DB_ENGINE=mysql\nSAM_ATT_DB_HOST=10.1.0.201\nSAM_ATT_DB_PASSWORD=CHANGE_ME',
+        },
+      });
+      assert.equal(s13.exitCode, 1);
+      assert.equal(s13.finalBanner, 'DEPLOYMENT ABORTED');
+      assert.ok(s13.consoleOutput.includes('PREFLIGHT_ENV_INCOMPLETE'));
+
+      // Scenario 14: ไม่มีสิทธิ์จัดการ IIS (Fails in Step 1 Preflight)
+      const s14 = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: { iisPermissionDenied: true },
+      });
+      assert.equal(s14.exitCode, 1);
+      assert.equal(s14.finalBanner, 'DEPLOYMENT ABORTED');
+      assert.ok(s14.consoleOutput.includes('PREFLIGHT_IIS_PERMISSION_DENIED'));
+
+      // Scenario 15: ต้องไม่กระทบ Procurement + ห้ามรัน Migration อัตโนมัติ + ปิดบังรหัสผ่านใน Log + Full Happy Path
+      const sMig = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: { pendingMigrations: ['database/migrations/002_new_table.sql'] },
+      });
+      assert.equal(sMig.exitCode, 1);
+      assert.ok(sMig.consoleOutput.includes('MIGRATION_APPROVAL_REQUIRED'));
+
+      const sCheckOnly = await runOneClickDeployment({
+        appDir: mockAppDir,
+        checkOnly: true,
+      });
+      assert.equal(sCheckOnly.exitCode, 0);
+      assert.equal(sCheckOnly.steps.length, 2, 'CheckOnly mode stops cleanly after Step 2 inspection');
+
+      const sHappy = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: {
+          coTenantServices: ['Procurement', 'CentralApiGateway'],
+        },
+      });
+      assert.equal(sHappy.exitCode, 0);
+      assert.equal(sHappy.finalBanner, 'DEPLOYMENT SUCCESS');
+      assert.equal(sHappy.procurementTouched, false, 'Procurement must never be touched');
+      assert.equal(sHappy.iisResetExecuted, false, 'iisreset must never be executed');
+      assert.equal(sHappy.scannerExeModified, false, 'ScannerReader EXE must never be modified');
+      assert.equal(sHappy.steps.length, 7);
+      assert.ok(sHappy.steps.every((st) => st.status === 'PASS'));
+      assert.ok(sHappy.consoleOutput.includes('Frontend HTTPS : 200 OK'));
+      assert.ok(sHappy.consoleOutput.includes('Backend API    : 200 OK'));
+      assert.ok(sHappy.consoleOutput.includes('MySQL          : CONNECTED'));
+      assert.ok(sHappy.consoleOutput.includes('Database       : samchuk_attendance_v2'));
+      assert.ok(sHappy.consoleOutput.includes('Port           : 4101'));
+      assert.ok(sHappy.consoleOutput.includes('DEPLOYMENT SUCCESS'));
+      // Verify secret password is redacted from logs and console output
+      assert.ok(!sHappy.logContent.includes('SuperSecretMysqlPass#2026!'), 'MySQL password must never appear in logs');
+      assert.ok(!sHappy.consoleOutput.includes('SuperSecretMysqlPass#2026!'), 'MySQL password must never appear in console');
+    } finally {
+      fs.rmSync(mockAppDir, { recursive: true, force: true });
+    }
+  });
 });
+
 

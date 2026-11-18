@@ -335,6 +335,44 @@ export async function dbTransaction<T>(
   }
 }
 
+export async function checkPendingMigrationsReadOnly(): Promise<{
+  appliedVersions: string[];
+  pendingFiles: string[];
+}> {
+  if (simulatedDown) {
+    throw new DatabaseUnavailableError('Database unavailable during read-only migration check.');
+  }
+
+  const migrationsDir = path.resolve(process.cwd(), 'database/migrations');
+  const allFiles = fs.existsSync(migrationsDir)
+    ? fs
+        .readdirSync(migrationsDir)
+        .filter((f) => f.endsWith('.sql'))
+        .sort()
+    : [];
+
+  let appliedVersions: string[] = [];
+  try {
+    const rows = await dbQuery<{ version: string; filename: string }>(
+      'SELECT version, filename FROM schema_migrations ORDER BY version ASC'
+    );
+    appliedVersions = rows.map((r) => String(r.version));
+  } catch {
+    appliedVersions = [];
+  }
+
+  const pendingFiles = allFiles.filter((file) => {
+    const match = file.match(/^(\d+)_/);
+    const ver = match ? match[1] : file;
+    return !appliedVersions.includes(ver) && !appliedVersions.includes(file);
+  });
+
+  return {
+    appliedVersions,
+    pendingFiles,
+  };
+}
+
 export async function runMigrations(): Promise<{ applied: string[]; totalTables: number }> {
   if (simulatedDown) {
     throw new DatabaseUnavailableError('Database unavailable during migration check.');
@@ -348,6 +386,23 @@ export async function runMigrations(): Promise<{ applied: string[]; totalTables:
 
   if (cfg.dbEngine === 'mysql') {
     const pool = await getMysqlPool();
+    try {
+      const [existing] = await pool.execute('SELECT version FROM schema_migrations WHERE version = ?', ['001']);
+      if ((existing as unknown[]).length > 0) {
+        return { applied: [], totalTables: 21 };
+      }
+    } catch {
+      // schema_migrations does not exist yet
+    }
+
+    const isExplicitMigrateCli = process.argv.some((arg) => arg.includes('cli-migrate'));
+    if (cfg.nodeEnv === 'production' && process.env.SAM_ATT_AUTO_MIGRATE !== 'true' && !isExplicitMigrateCli) {
+      console.log(
+        '[Sam_Att DB] Production safety policy: Skipping automatic DDL migration during server startup. Run `npm run db:migrate` with admin approval when schema changes are needed.'
+      );
+      return { applied: [], totalTables: 21 };
+    }
+
     const statements = rawSql
       .split(';')
       .map((s) => s.trim())
@@ -355,8 +410,8 @@ export async function runMigrations(): Promise<{ applied: string[]; totalTables:
     for (const stmt of statements) {
       await pool.query(stmt);
     }
-    const [existing] = await pool.execute('SELECT version FROM schema_migrations WHERE version = ?', ['001']);
-    if ((existing as unknown[]).length === 0) {
+    const [existingAfter] = await pool.execute('SELECT version FROM schema_migrations WHERE version = ?', ['001']);
+    if ((existingAfter as unknown[]).length === 0) {
       await pool.execute(
         'INSERT INTO schema_migrations (version, filename, checksum) VALUES (?, ?, ?)',
         ['001', '001_initial_schema.sql', checksum]

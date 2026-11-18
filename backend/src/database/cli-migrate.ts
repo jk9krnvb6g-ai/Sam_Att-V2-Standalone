@@ -1,8 +1,20 @@
 import { loadConfig } from '../config/env.ts';
-import { runMigrations, ensureBaselineSystemCatalog, seedDemoSyntheticData } from './adapter.ts';
+import {
+  checkPendingMigrationsReadOnly,
+  runMigrations,
+  ensureBaselineSystemCatalog,
+  seedDemoSyntheticData,
+} from './adapter.ts';
 import { reprocessAttendanceRange } from '../modules/attendance/processor.ts';
 
 async function main() {
+  const isCheckOnly = process.argv.includes('--check-only');
+  if (isCheckOnly) {
+    const status = await checkPendingMigrationsReadOnly();
+    console.log(JSON.stringify(status));
+    process.exit(0);
+  }
+
   const cfg = loadConfig();
   const result = await runMigrations();
   console.log('[db:migrate] Migrations completed:', JSON.stringify(result));
