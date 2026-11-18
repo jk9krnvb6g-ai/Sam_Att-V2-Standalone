@@ -60,32 +60,133 @@ export function validateHosOfficeHrPersonColumnsContract(availableColumns: strin
   };
 }
 
+interface HosOfficeLookupDictionaries {
+  prefixes: Map<string, string>;
+  departments: Map<string, string>;
+  departmentSubs: Map<string, string>;
+  personTypes: Map<string, string>;
+  positions: Map<string, string>;
+}
+
+const DEFAULT_MOPH_PREFIX_MAP: Record<string, string> = {
+  '1': 'นาย',
+  '01': 'นาย',
+  '001': 'นาย',
+  '2': 'นาง',
+  '02': 'นาง',
+  '002': 'นาง',
+  '3': 'นางสาว',
+  '03': 'นางสาว',
+  '003': 'นางสาว',
+  '4': 'ว่าที่ ร.ต.',
+  '04': 'ว่าที่ ร.ต.',
+  '5': 'ดร.',
+  '05': 'ดร.',
+  '6': 'นพ.',
+  '06': 'นพ.',
+  '7': 'พญ.',
+  '07': 'พญ.',
+  '8': 'ทพ.',
+  '08': 'ทพ.',
+  '9': 'ทพญ.',
+  '09': 'ทพญ.',
+  '10': 'ภก.',
+  '11': 'ภญ.',
+};
+
+const DEFAULT_MOPH_PERSON_TYPE_MAP: Record<string, { code: string; name: string }> = {
+  '1': { code: 'CIVIL_SERVANT', name: 'ข้าราชการ' },
+  '01': { code: 'CIVIL_SERVANT', name: 'ข้าราชการ' },
+  '2': { code: 'PERMANENT_EMP', name: 'ลูกจ้างประจำ' },
+  '02': { code: 'PERMANENT_EMP', name: 'ลูกจ้างประจำ' },
+  '3': { code: 'GOV_EMPLOYEE', name: 'พนักงานราชการ' },
+  '03': { code: 'GOV_EMPLOYEE', name: 'พนักงานราชการ' },
+  '4': { code: 'PUBLIC_HEALTH_EMP', name: 'พนักงานกระทรวงสาธารณสุข (พกส.)' },
+  '04': { code: 'PUBLIC_HEALTH_EMP', name: 'พนักงานกระทรวงสาธารณสุข (พกส.)' },
+  '5': { code: 'TEMP_EMP', name: 'ลูกจ้างชั่วคราว' },
+  '05': { code: 'TEMP_EMP', name: 'ลูกจ้างชั่วคราว' },
+  '6': { code: 'DAILY_EMP', name: 'ลูกจ้างรายวัน' },
+  '06': { code: 'DAILY_EMP', name: 'ลูกจ้างรายวัน' },
+};
+
 function pickField(raw: Record<string, unknown>, candidates: string[], fallback = ''): string {
   for (const key of candidates) {
     const val = raw[key] ?? raw[key.toLowerCase()] ?? raw[key.toUpperCase()];
-    if (val !== undefined && val !== null && String(val).trim() !== '') {
+    if (val !== undefined && val !== null && String(val).trim() !== '' && String(val).trim() !== '-') {
       return repairThaiMojibakeIfCorrupted(String(val).trim(), fallback).text;
     }
   }
   return fallback;
 }
 
-function normalizeHosOfficeRow(raw: Record<string, unknown>): HosOfficeHrPersonRow {
+function lookupByCode(map: Map<string, string> | undefined, code: string): string {
+  if (!map || !code) return '';
+  const trimmed = code.trim();
+  const stripped = trimmed.replace(/^0+/, '') || '0';
+  return map.get(trimmed) || map.get(stripped) || map.get(stripped.padStart(2, '0')) || '';
+}
+
+export function normalizeHosOfficeRow(
+  raw: Record<string, unknown>,
+  lookups?: HosOfficeLookupDictionaries
+): HosOfficeHrPersonRow {
   const personId = pickField(raw, ['PERSON_ID', 'ID', 'HR_PERSON_ID', 'PERSON_CODE', 'HR_CID']);
   const fingleRaw = pickField(raw, ['FINGLE_ID', 'FINGER_ID', 'SCAN_ID', 'ENROLL_NUMBER', 'BADGE_NUMBER']);
-  const titleName = pickField(raw, ['TITLE_NAME', 'HR_PREFIX_NAME', 'PREFIX_NAME', 'PNAME', 'HR_PREFIX_ID']);
+
+  // 1. คำนำหน้าชื่อ (Title / Prefix): แปลงรหัสตัวเลข (เช่น 01, 02, 03) เป็นคำนำหน้าภาษาไทย และห้ามนำตัวเลขดิบไปต่อหน้าชื่อ
+  const explicitTitle = pickField(raw, ['TITLE_NAME', 'HR_PREFIX_NAME', 'PREFIX_NAME', 'PNAME']);
+  const rawPrefixId = pickField(raw, ['HR_PREFIX_ID', 'PREFIX_ID', 'TITLE_NAME']);
+  let titleName = explicitTitle;
+  if (!titleName || /^\d+$/.test(titleName)) {
+    const fromDbLookup = lookupByCode(lookups?.prefixes, rawPrefixId);
+    const fromDefaultMap = DEFAULT_MOPH_PREFIX_MAP[rawPrefixId] || DEFAULT_MOPH_PREFIX_MAP[rawPrefixId.replace(/^0+/, '')];
+    titleName = fromDbLookup || fromDefaultMap || '';
+  }
+  if (/^\d+$/.test(titleName)) {
+    titleName = '';
+  }
+
   const firstName = pickField(raw, ['FIRST_NAME', 'HR_FNAME', 'FNAME']);
   const lastName = pickField(raw, ['LAST_NAME', 'HR_LNAME', 'LNAME']);
-  const positionName = pickField(raw, ['POSITION_NAME', 'POSITION_IN_WORK', 'HR_POSITION_NAME', 'HR_POSITION_ID'], 'ไม่ระบุตำแหน่ง');
+
+  // 2. ตำแหน่ง (Position)
+  const rawPosText = pickField(raw, ['POSITION_NAME', 'POSITION_IN_WORK', 'HR_POSITION_NAME']);
+  const rawPosId = pickField(raw, ['HR_POSITION_ID', 'POSITION_ID']);
+  let positionName = rawPosText;
+  if (!positionName || /^\d+$/.test(positionName)) {
+    positionName = lookupByCode(lookups?.positions, rawPosId || rawPosText) || (rawPosText && !/^\d+$/.test(rawPosText) ? rawPosText : 'ไม่ระบุตำแหน่ง');
+  }
+
+  // 3. กลุ่มงานหลัก (Department)
   const deptCode = pickField(raw, ['DEPARTMENT_CODE', 'HR_DEPARTMENT_ID', 'DEPT_CODE'], 'DEP-GEN');
-  const deptName = pickField(raw, ['DEPARTMENT_NAME', 'HR_DEPARTMENT_NAME', 'DEPT_NAME', 'HR_DEPARTMENT_ID'], 'ไม่ระบุกลุ่มงาน');
-  const workGroupName = pickField(
-    raw,
-    ['WORK_GROUP_NAME', 'HR_DEPARTMENT_SUB_NAME', 'HR_DEPARTMENT_SUB_SUB_NAME', 'HR_DEPARTMENT_SUB_ID'],
-    deptName
-  );
-  const rawTypeCode = pickField(raw, ['PERSONNEL_TYPE_CODE', 'HR_PERSON_TYPE_ID', 'PERSON_TYPE_CODE'], 'CIVIL_SERVANT');
-  const rawTypeName = pickField(raw, ['PERSONNEL_TYPE_NAME', 'HR_PERSON_TYPE_NAME', 'PERSON_TYPE_NAME'], rawTypeCode);
+  const explicitDeptName = pickField(raw, ['DEPARTMENT_NAME', 'HR_DEPARTMENT_NAME', 'DEPT_NAME']);
+  let deptName = explicitDeptName || lookupByCode(lookups?.departments, deptCode);
+  if (!deptName || /^\d+$/.test(deptName)) {
+    deptName = deptCode && deptCode !== 'DEP-GEN' ? `กลุ่มงาน (${deptCode})` : 'ไม่ระบุกลุ่มงาน';
+  }
+
+  // 4. หน่วยงานย่อย (Work Group / Department Sub)
+  const rawSubId = pickField(raw, ['HR_DEPARTMENT_SUB_ID', 'HR_DEPARTMENT_SUB_SUB_ID']);
+  const explicitWorkGroup = pickField(raw, ['WORK_GROUP_NAME', 'HR_DEPARTMENT_SUB_NAME', 'HR_DEPARTMENT_SUB_SUB_NAME']);
+  let workGroupName = explicitWorkGroup || lookupByCode(lookups?.departmentSubs, rawSubId);
+  if (!workGroupName || /^\d+$/.test(workGroupName)) {
+    workGroupName = rawSubId ? `หน่วยงาน (${rawSubId})` : deptName;
+  }
+
+  // 5. ประเภทบุคลากร (Personnel Type)
+  const rawTypeId = pickField(raw, ['PERSONNEL_TYPE_CODE', 'HR_PERSON_TYPE_ID', 'PERSON_TYPE_CODE'], 'CIVIL_SERVANT');
+  const explicitTypeName = pickField(raw, ['PERSONNEL_TYPE_NAME', 'HR_PERSON_TYPE_NAME', 'PERSON_TYPE_NAME']);
+  const dbTypeName = lookupByCode(lookups?.personTypes, rawTypeId);
+  const mappedType = DEFAULT_MOPH_PERSON_TYPE_MAP[rawTypeId] || DEFAULT_MOPH_PERSON_TYPE_MAP[rawTypeId.replace(/^0+/, '')];
+
+  const personnelTypeCode = mappedType ? mappedType.code : rawTypeId;
+  let personnelTypeName = explicitTypeName && !/^\d+$/.test(explicitTypeName)
+    ? explicitTypeName
+    : dbTypeName || (mappedType ? mappedType.name : rawTypeId);
+
+  if (/^\d+$/.test(personnelTypeName)) {
+    personnelTypeName = `ประเภทบุคลากร (${personnelTypeName})`;
+  }
 
   const rawStatus = raw['IS_ACTIVE'] ?? raw['is_active'] ?? raw['HR_STATUS_ID'] ?? raw['hr_status_id'] ?? 1;
   const statusStr = String(rawStatus).trim();
@@ -101,10 +202,36 @@ function normalizeHosOfficeRow(raw: Record<string, unknown>): HosOfficeHrPersonR
     DEPARTMENT_CODE: deptCode,
     DEPARTMENT_NAME: deptName,
     WORK_GROUP_NAME: workGroupName,
-    PERSONNEL_TYPE_CODE: rawTypeCode,
-    PERSONNEL_TYPE_NAME: rawTypeName,
+    PERSONNEL_TYPE_CODE: personnelTypeCode,
+    PERSONNEL_TYPE_NAME: personnelTypeName,
     IS_ACTIVE: isActive,
   };
+}
+
+async function loadOptionalLookupTable(
+  conn: mysql.Connection,
+  tableName: string,
+  idCandidates: string[],
+  nameCandidates: string[]
+): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  try {
+    const [rows] = await conn.query(`SELECT * FROM ${tableName}`);
+    if (Array.isArray(rows)) {
+      for (const r of rows as Record<string, unknown>[]) {
+        const idVal = pickField(r, idCandidates);
+        const nameVal = pickField(r, nameCandidates);
+        if (idVal && nameVal) {
+          map.set(idVal, nameVal);
+          map.set(idVal.replace(/^0+/, '') || '0', nameVal);
+          map.set(idVal.padStart(2, '0'), nameVal);
+        }
+      }
+    }
+  } catch {
+    // Ignore if optional lookup table does not exist or user only has SELECT on hr_person
+  }
+  return map;
 }
 
 /**
@@ -198,9 +325,26 @@ async function fetchFromHosOfficeReadOnly(): Promise<HosOfficeHrPersonRow[]> {
       throw err;
     }
 
+    // โหลดตารางอ้างอิง (Lookup Tables) ของ HOSOffice หากมีสิทธิ์อ่าน เพื่อแปลงรหัสตัวเลขเป็นชื่อภาษาไทยจริง
+    const [prefixes, departments, departmentSubs, personTypes, positions] = await Promise.all([
+      loadOptionalLookupTable(conn, 'hr_prefix', ['HR_PREFIX_ID', 'PREFIX_ID', 'ID'], ['HR_PREFIX_NAME', 'PREFIX_NAME', 'NAME']),
+      loadOptionalLookupTable(conn, 'hr_department', ['HR_DEPARTMENT_ID', 'DEPARTMENT_ID', 'ID'], ['HR_DEPARTMENT_NAME', 'DEPARTMENT_NAME', 'NAME']),
+      loadOptionalLookupTable(conn, 'hr_department_sub', ['HR_DEPARTMENT_SUB_ID', 'DEPARTMENT_SUB_ID', 'ID'], ['HR_DEPARTMENT_SUB_NAME', 'DEPARTMENT_SUB_NAME', 'NAME']),
+      loadOptionalLookupTable(conn, 'hr_person_type', ['HR_PERSON_TYPE_ID', 'PERSON_TYPE_ID', 'ID'], ['HR_PERSON_TYPE_NAME', 'PERSON_TYPE_NAME', 'NAME']),
+      loadOptionalLookupTable(conn, 'hr_position', ['HR_POSITION_ID', 'POSITION_ID', 'ID'], ['HR_POSITION_NAME', 'POSITION_NAME', 'NAME']),
+    ]);
+
+    const lookups: HosOfficeLookupDictionaries = {
+      prefixes,
+      departments,
+      departmentSubs,
+      personTypes,
+      positions,
+    };
+
     const [rows] = await conn.query(`SELECT * FROM ${table}`);
     const rawList = Array.isArray(rows) ? (rows as Record<string, unknown>[]) : [];
-    return rawList.map(normalizeHosOfficeRow).filter((r) => Boolean(r.PERSON_ID));
+    return rawList.map((r) => normalizeHosOfficeRow(r, lookups)).filter((r) => Boolean(r.PERSON_ID));
   } catch (err: unknown) {
     const rawCode = (err as { code?: string })?.code || '';
     if (rawCode === 'ER_BAD_FIELD_ERROR' || rawCode === 'ER_NO_SUCH_TABLE' || rawCode === 'ER_TABLEACCESS_DENIED_ERROR') {
