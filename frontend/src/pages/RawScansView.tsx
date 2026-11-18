@@ -98,9 +98,13 @@ export function RawScansView({
     )
   );
 
-  const loadData = useCallback(async () => {
+  const [syncingHardware, setSyncingHardware] = useState(false);
+
+  const loadData = useCallback(async (clearError = true) => {
     setLoading(true);
-    setError(null);
+    if (clearError) {
+      setError(null);
+    }
     try {
       const qs = new URLSearchParams({
         ...(search ? { search } : {}),
@@ -173,20 +177,25 @@ export function RawScansView({
   async function handleTriggerHardwareSync() {
     setError(null);
     setNotice(null);
+    setSyncingHardware(true);
     try {
       const res = await apiRequest('/scanners/sync', {
         method: 'POST',
         body: JSON.stringify({}),
       });
       setNotice(
-        `ดึงข้อมูลจากโปรแกรม ScannerReader.exe สำเร็จ: อ่าน ${res.totalRead} รายการ · เพิ่มใหม่ ${res.newInserted} · ข้ามรายการซ้ำ ${res.duplicatesSkipped}`
+        `ดึงข้อมูลจากโปรแกรม ScannerSyncCli.exe สำเร็จ: อ่าน ${res.totalRead} รายการ · เพิ่มใหม่ ${res.newInserted} · ข้ามรายการซ้ำ ${res.duplicatesSkipped}`
       );
-      await loadData();
+      await loadData(false);
     } catch (err) {
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
+      } else if (err instanceof Error) {
+        setError({ message: err.message });
       }
-      await loadData();
+      await loadData(false);
+    } finally {
+      setSyncingHardware(false);
     }
   }
 
@@ -203,7 +212,7 @@ export function RawScansView({
       setNotice(
         `นำเข้าข้อมูล JSON 6 ฟิลด์สำเร็จ: อ่าน ${res.totalRead} รายการ · เพิ่มใหม่ ${res.newInserted} · ข้ามรายการซ้ำ ${res.duplicatesSkipped} รายการ`
       );
-      await loadData();
+      await loadData(false);
     } catch (err) {
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
@@ -231,7 +240,7 @@ export function RawScansView({
       setDeviceName('');
       setLocationName('');
       setNotice(`ลงทะเบียนเครื่องสแกนหมายเลข #${machineNo} เรียบร้อยแล้ว`);
-      await loadData();
+      await loadData(false);
     } catch (err) {
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
@@ -246,7 +255,7 @@ export function RawScansView({
         method: 'PATCH',
         body: JSON.stringify({ isEnabled: currentEnabled !== 1 }),
       });
-      await loadData();
+      await loadData(false);
     } catch (err) {
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
@@ -265,7 +274,7 @@ export function RawScansView({
       });
       setScheduleLabel('');
       setNotice(`เพิ่มตารางเวลาดึงข้อมูลอัตโนมัติ (${cronTime} น.) เรียบร้อยแล้ว`);
-      await loadData();
+      await loadData(false);
     } catch (err) {
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
@@ -280,7 +289,7 @@ export function RawScansView({
         method: 'PATCH',
         body: JSON.stringify({ isEnabled: currentEnabled !== 1 }),
       });
-      await loadData();
+      await loadData(false);
     } catch (err) {
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
@@ -301,11 +310,12 @@ export function RawScansView({
         actions={
           <button
             type="button"
+            disabled={syncingHardware}
             onClick={handleTriggerHardwareSync}
-            className="ent-btn-primary"
+            className="ent-btn-primary disabled:opacity-60"
           >
-            <RefreshCw className="w-4 h-4" />
-            <span>สั่งดึงข้อมูลจากเครื่องสแกนทันที</span>
+            <RefreshCw className={`w-4 h-4 ${syncingHardware ? 'animate-spin' : ''}`} />
+            <span>{syncingHardware ? 'กำลังดึงข้อมูลจากเครื่องสแกน...' : 'สั่งดึงข้อมูลจากเครื่องสแกนทันที'}</span>
           </button>
         }
       />

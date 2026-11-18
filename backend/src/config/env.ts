@@ -262,48 +262,55 @@ export function loadConfig(): AppConfig {
       rateLimitWindowMinutes: Number(process.env.AUTH_RATE_LIMIT_WINDOW_MINUTES || 15),
       rateLimitMaxAttempts: Number(process.env.AUTH_RATE_LIMIT_MAX_ATTEMPTS || 5),
     },
-    scanner: {
-      syncEnabled: process.env.SCANNER_SYNC_ENABLED === 'true',
-      autoSchedulerEnabled: process.env.SCANNER_AUTO_SCHEDULER_ENABLED !== 'false',
-      readerExePath: (() => {
+    scanner: (() => {
+      const resolvedReaderExePath = (() => {
         const rawExePath = process.env.SCANNER_READER_EXE_PATH?.trim();
+        const candidatePaths: string[] = [];
         if (rawExePath) {
           if (/^[a-zA-Z]:[\\/]/.test(rawExePath) || path.isAbsolute(rawExePath)) {
-            return rawExePath;
+            candidatePaths.push(rawExePath);
+          } else {
+            candidatePaths.push(path.resolve(process.cwd(), rawExePath));
           }
-          return path.resolve(process.cwd(), rawExePath);
         }
-        const localSyncCliExe = path.resolve(process.cwd(), 'ScannerReader', 'ScannerSyncCli.exe');
-        if (fs.existsSync(localSyncCliExe)) {
-          return localSyncCliExe;
+        candidatePaths.push(
+          path.resolve(process.cwd(), 'ScannerReader', 'ScannerSyncCli.exe'),
+          path.resolve(process.cwd(), 'ScannerReader', 'ScannerReader.exe'),
+          'C:\\inetpub\\wwwroot\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe',
+          'C:\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe',
+          'C:\\Sam_Att\\bin\\ScannerReader.exe'
+        );
+        for (const candidate of candidatePaths) {
+          if (fs.existsSync(candidate)) {
+            return candidate;
+          }
         }
-        const localReaderExe = path.resolve(process.cwd(), 'ScannerReader', 'ScannerReader.exe');
-        if (fs.existsSync(localReaderExe)) {
-          return localReaderExe;
-        }
-        if (fs.existsSync('C:\\inetpub\\wwwroot\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe')) {
-          return 'C:\\inetpub\\wwwroot\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe';
-        }
-        if (fs.existsSync('C:\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe')) {
-          return 'C:\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe';
-        }
-        if (fs.existsSync('C:\\Sam_Att\\bin\\ScannerReader.exe')) {
-          return 'C:\\Sam_Att\\bin\\ScannerReader.exe';
-        }
-        return localSyncCliExe;
-      })(),
-      timeoutMs: Number(process.env.SCANNER_READER_TIMEOUT_MS || 30000),
-      syncDays: Number(process.env.SCANNER_SYNC_DAYS || 3),
-      previewMode: process.env.SCANNER_CLI_PREVIEW_MODE !== 'false',
-      mysqlConnectionString:
-        process.env.SCANNER_MYSQL_CONNECTION_STRING?.trim() || fallbackScannerMysqlConn,
-      ingestSharedToken: scannerTokenExplicit
-        ? rawScannerToken!
-        : nodeEnv === 'production'
-          ? ''
-          : EPHEMERAL_DEV_SCANNER_TOKEN,
-      ingestTokenExplicitlyConfigured: scannerTokenExplicit,
-    },
+        return candidatePaths[0];
+      })();
+
+      const exeExistsOnDisk = !isAutomatedTestRuntime() && fs.existsSync(resolvedReaderExePath);
+      const syncEnabled = isAutomatedTestRuntime()
+        ? process.env.SCANNER_SYNC_ENABLED === 'true'
+        : process.env.SCANNER_SYNC_ENABLED === 'true' ||
+          (dataMode === 'REAL' && exeExistsOnDisk && process.env.SCANNER_FORCE_DISABLE !== 'true');
+
+      return {
+        syncEnabled,
+        autoSchedulerEnabled: process.env.SCANNER_AUTO_SCHEDULER_ENABLED !== 'false',
+        readerExePath: resolvedReaderExePath,
+        timeoutMs: Number(process.env.SCANNER_READER_TIMEOUT_MS || 30000),
+        syncDays: Number(process.env.SCANNER_SYNC_DAYS || 3),
+        previewMode: process.env.SCANNER_CLI_PREVIEW_MODE !== 'false',
+        mysqlConnectionString:
+          process.env.SCANNER_MYSQL_CONNECTION_STRING?.trim() || fallbackScannerMysqlConn,
+        ingestSharedToken: scannerTokenExplicit
+          ? rawScannerToken!
+          : nodeEnv === 'production'
+            ? ''
+            : EPHEMERAL_DEV_SCANNER_TOKEN,
+        ingestTokenExplicitlyConfigured: scannerTokenExplicit,
+      };
+    })(),
     hosofficePush: {
       livePushEnabled: process.env.HOSOFFICE_LIVE_PUSH_ENABLED === 'true',
       targetTable: (process.env.HOSOFFICE_PUSH_TARGET_TABLE || '').trim(),
