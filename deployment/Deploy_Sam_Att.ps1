@@ -548,6 +548,7 @@ try {
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["gitDirtyFiles"]) {
       $DirtyOutput = [string]$MockConfig.gitDirtyFiles
     } else {
+      Invoke-NativeCli -Executable "git" -Arguments @("checkout", "--", "package-lock.json") | Out-Null
       $DirtyRes = Invoke-NativeCli -Executable "git" -Arguments @("status", "--porcelain", "--untracked-files=no")
       $DirtyOutput = $DirtyRes.Output
     }
@@ -869,11 +870,12 @@ try {
       Write-DeployLog -Message "Installing npm dependencies from package-lock.json..."
       $NpmCiRes = Invoke-NativeCli -Executable "npm" -Arguments @("ci", "--no-audit", "--no-fund")
       if ($NpmCiRes.ExitCode -ne 0) {
-        Write-DeployLog -Message "npm ci returned code $($NpmCiRes.ExitCode) (retrying with npm install --no-audit --no-fund due to Windows native module file lock)..." -Level "WARN"
-        $NpmInstRes = Invoke-NativeCli -Executable "npm" -Arguments @("install", "--no-audit", "--no-fund")
+        Write-DeployLog -Message "npm ci returned code $($NpmCiRes.ExitCode) (retrying with npm install --no-package-lock --no-audit --no-fund due to Windows native module file lock)..." -Level "WARN"
+        $NpmInstRes = Invoke-NativeCli -Executable "npm" -Arguments @("install", "--no-package-lock", "--no-audit", "--no-fund")
         if ($NpmInstRes.ExitCode -ne 0) {
           throw "NPM_INSTALL_FAILED: npm dependency installation failed: $($NpmInstRes.Output)"
         }
+        Invoke-NativeCli -Executable "git" -Arguments @("checkout", "--", "package-lock.json") | Out-Null
       }
     }
   } finally {
