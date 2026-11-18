@@ -149,10 +149,9 @@ export function loadConfig(): AppConfig {
   const hosUser = process.env.HOSOFFICE_DB_USER || 'hosoffice_readonly';
   const hosPassword = process.env.HOSOFFICE_DB_PASSWORD || 'CHANGE_ME';
 
-  const fallbackScannerMysqlConn =
-    hosHost && hosHost !== 'CHANGE_ME'
-      ? `Server=${hosHost};Port=${hosPort};Database=${hosDatabase};User ID=${hosUser};Password=${hosPassword};CharSet=utf8mb4;`
-      : `Server=${samAttHost};Port=${samAttPort};Database=${samAttDatabase};User ID=${samAttUser};Password=${samAttPassword};CharSet=utf8mb4;`;
+  // ให้ ScannerSyncCli.exe เชื่อมต่อกับฐานข้อมูลหลักของ Sam_Att (samchuk_attendance_v2) เป็นค่าเริ่มต้น
+  // เพื่อไม่ให้ไปเขียนทับฐานข้อมูล HOSOffice โดยตรง (เว้นแต่ตั้งค่า SCANNER_MYSQL_CONNECTION_STRING เอง)
+  const fallbackScannerMysqlConn = `Server=${samAttHost};Port=${samAttPort};Database=${samAttDatabase};User ID=${samAttUser};Password=${samAttPassword};CharSet=utf8mb4;`;
 
   return {
     nodeEnv,
