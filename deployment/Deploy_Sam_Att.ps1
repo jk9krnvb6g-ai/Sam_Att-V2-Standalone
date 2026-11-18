@@ -467,6 +467,26 @@ function Restart-SamAttBackendOnly {
   }
 }
 
+function Invoke-NativeCli {
+  param(
+    [Parameter(Mandatory=$true)][string]$Executable,
+    [string[]]$Arguments = @()
+  )
+  $PrevEap = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = "Continue"
+    $OutputLines = & $Executable @Arguments 2>&1
+    $ExitCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+    $CombinedText = ($OutputLines | ForEach-Object { "$_" }) -join "`r`n"
+    return [PSCustomObject]@{
+      ExitCode = $ExitCode
+      Output   = $CombinedText.Trim()
+    }
+  } finally {
+    $ErrorActionPreference = $PrevEap
+  }
+}
+
 try {
   # ============================================================================
   # STEP 1 — Preflight Check
@@ -490,8 +510,9 @@ try {
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["gitBranch"]) {
       $CurrentBranch = [string]$MockConfig.gitBranch
     } else {
-      $CurrentBranch = (& git rev-parse --abbrev-ref HEAD 2>&1 | Out-String).Trim()
-      if ($LASTEXITCODE -ne 0) {
+      $BranchRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "--abbrev-ref", "HEAD")
+      $CurrentBranch = $BranchRes.Output
+      if ($BranchRes.ExitCode -ne 0) {
         throw "PREFLIGHT_GIT_ERROR: ไม่สามารถตรวจสอบ Git Branch ได้ ($CurrentBranch)"
       }
     }
@@ -502,23 +523,26 @@ try {
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["gitDirtyFiles"]) {
       $DirtyOutput = [string]$MockConfig.gitDirtyFiles
     } else {
-      $DirtyOutput = (& git status --porcelain --untracked-files=no 2>&1 | Out-String).Trim()
+      $DirtyRes = Invoke-NativeCli -Executable "git" -Arguments @("status", "--porcelain", "--untracked-files=no")
+      $DirtyOutput = $DirtyRes.Output
     }
     if (-not [string]::IsNullOrWhiteSpace($DirtyOutput)) {
       throw "PREFLIGHT_DIRTY_WORKING_TREE: พบไฟล์ที่ถูกแก้ไขค้างไว้ใน Git Working Tree กรุณาตรวจสอบก่อน Deploy (ห้ามใช้ git reset --hard อัตโนมัติ):`n$DirtyOutput"
     }
 
     # 1.3 ตรวจสอบ Node.js และ npm
-    $NodeVerRaw = (& node -v 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0 -or -not ($NodeVerRaw -match "^v(\d+)\.")) {
+    $NodeRes = Invoke-NativeCli -Executable "node" -Arguments @("-v")
+    $NodeVerRaw = $NodeRes.Output
+    if ($NodeRes.ExitCode -ne 0 -or -not ($NodeVerRaw -match "^v(\d+)\.")) {
       throw "PREFLIGHT_NODE_MISSING: ไม่พบ Node.js ในระบบ ($NodeVerRaw)"
     }
     $NodeMajor = [int]$Matches[1]
     if ($NodeMajor -lt 22) {
       throw "PREFLIGHT_NODE_VERSION_UNSUPPORTED: พบ Node.js $NodeVerRaw (ต้องการ Node.js >= v22.0.0)"
     }
-    $NpmVerRaw = (& npm -v 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0) {
+    $NpmVerRes = Invoke-NativeCli -Executable "npm" -Arguments @("-v")
+    $NpmVerRaw = $NpmVerRes.Output
+    if ($NpmVerRes.ExitCode -ne 0) {
       throw "PREFLIGHT_NPM_MISSING: ไม่พบคำสั่ง npm ในระบบ"
     }
     Write-DeployLog -Message "Runtime verified: Node.js=$NodeVerRaw, npm=$NpmVerRaw"
@@ -594,11 +618,11 @@ try {
       $State.IisRoutingMode = "STANDALONE_DIRECT_4101"
       $AppCmdPath = Join-Path $env:SystemRoot "System32\inetsrv\appcmd.exe"
       if ($env:OS -like "*Windows*" -and (Test-Path $AppCmdPath)) {
-        $IisApps = (& $AppCmdPath list app 2>$null | Out-String)
-        if ($LASTEXITCODE -ne 0) {
+        $AppCmdRes = Invoke-NativeCli -Executable $AppCmdPath -Arguments @("list", "app")
+        if ($AppCmdRes.ExitCode -ne 0) {
           throw "PREFLIGHT_IIS_PERMISSION_DENIED: ไม่สามารถอ่านค่า IIS Configuration ด้วย appcmd.exe ได้ กรุณาคลิกขวา Run as Administrator"
         }
-        if ($IisApps -match "Procurement") {
+        if ($AppCmdRes.Output -match "Procurement") {
           Write-DeployLog -Message "IIS Co-tenancy Guard: ตรวจพบระบบ Procurement บน IIS เครื่องเดียวกัน — ล็อกสถานะห้ามแก้ไขหรือรีสตาร์ท AppPool ของ Procurement เด็ดขาด"
         }
       }
@@ -624,7 +648,8 @@ try {
         # ตรวจสอบ PM2 เฉพาะกรณีมีโปรเซสชื่อ Sam_Att
         $Pm2Cmd = Get-Command pm2 -ErrorAction SilentlyContinue
         if ($null -ne $Pm2Cmd) {
-          $Pm2ListJson = (& pm2 jlist 2>$null | Out-String).Trim()
+          $Pm2Res = Invoke-NativeCli -Executable "pm2" -Arguments @("jlist")
+          $Pm2ListJson = $Pm2Res.Output
           if ($Pm2ListJson.StartsWith("[")) {
             $Pm2Apps = $Pm2ListJson | ConvertFrom-Json
             foreach ($App in $Pm2Apps) {
@@ -697,13 +722,15 @@ try {
       throw "GIT_FETCH_FAILED: ไม่สามารถเชื่อมต่อ GitHub ($Remote/$Branch) ได้ กรุณาตรวจสอบการเชื่อมต่อเครือข่าย"
     }
 
-    $State.CommitBefore = (& git rev-parse HEAD 2>&1 | Out-String).Trim()
+    $HeadRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "HEAD")
+    $State.CommitBefore = $HeadRes.Output
     if ($null -eq $MockConfig) {
-      $FetchOut = (& git fetch $Remote $Branch 2>&1 | Out-String).Trim()
-      if ($LASTEXITCODE -ne 0) {
-        throw "GIT_FETCH_FAILED: คำสั่ง git fetch $Remote $Branch ล้มเหลว: $FetchOut"
+      $FetchRes = Invoke-NativeCli -Executable "git" -Arguments @("fetch", $Remote, $Branch)
+      if ($FetchRes.ExitCode -ne 0) {
+        throw "GIT_FETCH_FAILED: คำสั่ง git fetch $Remote $Branch ล้มเหลว: $($FetchRes.Output)"
       }
-      $State.RemoteCommit = (& git rev-parse "$Remote/$Branch" 2>&1 | Out-String).Trim()
+      $RemoteHeadRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "$Remote/$Branch")
+      $State.RemoteCommit = $RemoteHeadRes.Output
     } else {
       $State.RemoteCommit = if ($null -ne $MockConfig.PSObject.Properties["remoteCommit"]) { [string]$MockConfig.remoteCommit } else { $State.CommitBefore }
     }
@@ -716,9 +743,9 @@ try {
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["pendingMigrations"]) {
       $PendingMigrations = @($MockConfig.pendingMigrations)
     } elseif ($State.CommitBefore -ne $State.RemoteCommit) {
-      $DiffMigrations = (& git diff --name-only "$($State.CommitBefore)..$($State.RemoteCommit)" -- database/migrations/ 2>$null | Out-String).Trim()
-      if (-not [string]::IsNullOrWhiteSpace($DiffMigrations)) {
-        $PendingMigrations = $DiffMigrations -split "`r?`n"
+      $DiffRes = Invoke-NativeCli -Executable "git" -Arguments @("diff", "--name-only", "$($State.CommitBefore)..$($State.RemoteCommit)", "--", "database/migrations/")
+      if (-not [string]::IsNullOrWhiteSpace($DiffRes.Output)) {
+        $PendingMigrations = $DiffRes.Output -split "`r?`n"
       }
     }
 
@@ -741,11 +768,12 @@ try {
     }
 
     if ($null -eq $MockConfig) {
-      $PullOut = (& git pull --ff-only $Remote $Branch 2>&1 | Out-String).Trim()
-      if ($LASTEXITCODE -ne 0) {
-        throw "GIT_PULL_FAILED: ไม่สามารถดึงโค้ดด้วย git pull --ff-only ได้ (ห้ามใช้ git reset --hard อัตโนมัติ): $PullOut"
+      $PullRes = Invoke-NativeCli -Executable "git" -Arguments @("pull", "--ff-only", $Remote, $Branch)
+      if ($PullRes.ExitCode -ne 0) {
+        throw "GIT_PULL_FAILED: ไม่สามารถดึงโค้ดด้วย git pull --ff-only ได้ (ห้ามใช้ git reset --hard อัตโนมัติ): $($PullRes.Output)"
       }
-      $State.CommitAfter = (& git rev-parse HEAD 2>&1 | Out-String).Trim()
+      $AfterHeadRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "HEAD")
+      $State.CommitAfter = $AfterHeadRes.Output
     } else {
       $State.CommitAfter = $State.RemoteCommit
     }
@@ -819,12 +847,12 @@ try {
       }
     } else {
       Write-DeployLog -Message "Installing npm dependencies from package-lock.json..."
-      $NpmOut = (& npm ci --no-audit --no-fund 2>&1 | Out-String)
-      if ($LASTEXITCODE -ne 0) {
-        Write-DeployLog -Message "npm ci returned code $LASTEXITCODE (checking if Windows file lock on running native module; retrying with npm install --no-audit --no-fund)..." -Level "WARN"
-        $NpmOut = (& npm install --no-audit --no-fund 2>&1 | Out-String)
-        if ($LASTEXITCODE -ne 0) {
-          throw "NPM_INSTALL_FAILED: การติดตั้ง Dependencies ล้มเหลว: $NpmOut"
+      $NpmCiRes = Invoke-NativeCli -Executable "npm" -Arguments @("ci", "--no-audit", "--no-fund")
+      if ($NpmCiRes.ExitCode -ne 0) {
+        Write-DeployLog -Message "npm ci returned code $($NpmCiRes.ExitCode) (checking if Windows file lock on running native module; retrying with npm install --no-audit --no-fund)..." -Level "WARN"
+        $NpmInstRes = Invoke-NativeCli -Executable "npm" -Arguments @("install", "--no-audit", "--no-fund")
+        if ($NpmInstRes.ExitCode -ne 0) {
+          throw "NPM_INSTALL_FAILED: การติดตั้ง Dependencies ล้มเหลว: $($NpmInstRes.Output)"
         }
       }
     }
@@ -849,9 +877,9 @@ try {
       }
     } else {
       Write-DeployLog -Message "Running TypeScript typecheck (npm run typecheck)..."
-      $TcOut = (& npm run typecheck 2>&1 | Out-String)
-      if ($LASTEXITCODE -ne 0) {
-        throw "TYPECHECK_FAILED: ตรวจสอบ TypeScript ไม่ผ่าน:`n$TcOut"
+      $TcRes = Invoke-NativeCli -Executable "npm" -Arguments @("run", "typecheck")
+      if ($TcRes.ExitCode -ne 0) {
+        throw "TYPECHECK_FAILED: ตรวจสอบ TypeScript ไม่ผ่าน:`n$($TcRes.Output)"
       }
     }
 
@@ -870,9 +898,9 @@ try {
           $env:SAM_ATT_DB_ENGINE = "sqlite_sandbox"
           $env:SAM_ATT_DATA_MODE = "DEMO"
           $env:NODE_ENV = "test"
-          $TestOut = (& npm test 2>&1 | Out-String)
-          if ($LASTEXITCODE -ne 0) {
-            throw "UNIT_TESTS_FAILED: ชุดทดสอบอัตโนมัติไม่ผ่าน:`n$TestOut"
+          $TestRes = Invoke-NativeCli -Executable "npm" -Arguments @("test")
+          if ($TestRes.ExitCode -ne 0) {
+            throw "UNIT_TESTS_FAILED: ชุดทดสอบอัตโนมัติไม่ผ่าน:`n$($TestRes.Output)"
           }
         } finally {
           $env:SAM_ATT_DB_ENGINE = $PrevEngine
@@ -893,9 +921,9 @@ try {
       if (Test-Path (Join-Path $AppDir "bun.lock")) {
         Remove-Item -Path (Join-Path $AppDir "bun.lock") -Force -ErrorAction SilentlyContinue
       }
-      $BuildOut = (& npm run build 2>&1 | Out-String)
-      if ($LASTEXITCODE -ne 0) {
-        throw "BUILD_FAILED: คำสั่ง npm run build ล้มเหลว:`n$BuildOut"
+      $BuildRes = Invoke-NativeCli -Executable "npm" -Arguments @("run", "build")
+      if ($BuildRes.ExitCode -ne 0) {
+        throw "BUILD_FAILED: คำสั่ง npm run build ล้มเหลว:`n$($BuildRes.Output)"
       }
     }
 
