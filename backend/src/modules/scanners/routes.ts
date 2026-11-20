@@ -20,12 +20,20 @@ import { dbQuery, dbExecute } from '../../database/adapter.ts';
 import {
   computeRawScanDedupKey,
   verifyScannerIngestToken,
+  getCurrentBangkokDateParts,
   type SixFieldScannerEvent,
 } from '../../utils/crypto.ts';
 import { requireAuth, requireRoles, enforceOwnPersonMapping } from '../../middleware/auth.ts';
 import { resolveRawScanPersonnelMappings, reprocessAttendanceRange } from '../attendance/processor.ts';
 import { writeAuditLog } from '../audit/service.ts';
 import { evaluateDueSyncSchedules, getScannerSchedulerStatus } from './scheduler.ts';
+import {
+  startCentralJob,
+  updateCentralJobStep,
+  completeCentralJob,
+  failCentralJob,
+  getLatestJobByType,
+} from '../jobs/tracker.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -674,10 +682,96 @@ scannersRouter.get(
   '/sync-runs',
   requireAuth,
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
-  async (_req, res, next) => {
+  async (req, res, next) => {
     try {
-      const items = await dbQuery('SELECT * FROM sync_runs ORDER BY id DESC LIMIT 50');
-      res.json({ items });
+      const period = String(req.query.period || 'ALL').trim().toUpperCase();
+      let dateFrom = String(req.query.dateFrom || '').trim();
+      let dateTo = String(req.query.dateTo || '').trim();
+      const machineNo = String(req.query.machineNo || '').trim();
+      const status = String(req.query.status || '').trim();
+      const page = Math.max(1, Number(req.query.page || 1));
+      const pageSize = Math.min(200, Math.max(5, Number(req.query.pageSize || 50)));
+
+      if (!dateFrom && !dateTo && (period === 'TODAY' || period === '7D' || period === '30D')) {
+        const bkk = getCurrentBangkokDateParts();
+        dateTo = bkk.todayYmd;
+        const [y, m, d] = bkk.todayYmd.split('-').map(Number);
+        const offsetDays = period === 'TODAY' ? 0 : period === '7D' ? -6 : -29;
+        const startDt = new Date(Date.UTC(y, m - 1, d + offsetDays));
+        dateFrom = startDt.toISOString().slice(0, 10);
+      }
+
+      const conditions = ['1=1'];
+      const params: unknown[] = [];
+
+      if (dateFrom && /^\d{4}-\d{2}-\d{2}$/.test(dateFrom)) {
+        conditions.push('started_at >= ?');
+        params.push(`${dateFrom} 00:00:00`);
+      }
+      if (dateTo && /^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+        conditions.push('started_at <= ?');
+        params.push(`${dateTo} 23:59:59`);
+      }
+      if (machineNo && machineNo !== 'ALL') {
+        conditions.push('machine_no = ?');
+        params.push(Number(machineNo));
+      }
+      if (status && status !== 'ALL') {
+        conditions.push('status = ?');
+        params.push(status);
+      }
+
+      const whereSql = conditions.join(' AND ');
+      const countRows = await dbQuery<{ cnt: number }>(
+        `SELECT COUNT(*) AS cnt FROM sync_runs WHERE ${whereSql}`,
+        params
+      );
+      const totalCount = Number(countRows[0]?.cnt ?? 0);
+      const offset = (page - 1) * pageSize;
+
+      const items = await dbQuery(
+        `SELECT * FROM sync_runs WHERE ${whereSql} ORDER BY id DESC LIMIT ${pageSize} OFFSET ${offset}`,
+        params
+      );
+
+      const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+      res.json({
+        items,
+        total: totalCount,
+        totalCount,
+        page,
+        pageSize,
+        pagination: {
+          page,
+          pageSize,
+          totalCount,
+          totalPages,
+        },
+        latestJob: getLatestJobByType('SCANNER_MANUAL_SYNC'),
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+scannersRouter.get(
+  '/sync-runs/:id',
+  requireAuth,
+  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
+  async (req, res, next) => {
+    try {
+      const runId = Number(req.params.id);
+      const rows = await dbQuery('SELECT * FROM sync_runs WHERE id = ? LIMIT 1', [runId]);
+      if (rows.length === 0) {
+        res.status(404).json({
+          error: 'SYNC_RUN_NOT_FOUND',
+          message: 'ไม่พบข้อมูลรอบการดึงข้อมูลที่เลือก',
+          requestId: req.requestId,
+        });
+        return;
+      }
+      res.json({ item: rows[0] });
     } catch (err) {
       next(err);
     }
@@ -773,6 +867,20 @@ scannersRouter.post(
     const actor = req.user!.username;
     const machineNo = req.body?.machineNo ? Number(req.body.machineNo) : null;
 
+    let trackedJobId: string | null = null;
+    try {
+      const job = startCentralJob({
+        jobType: 'SCANNER_MANUAL_SYNC',
+        actorUsername: actor,
+        initialStep: machineNo
+          ? `กำลังเชื่อมต่อเครื่องสแกนหมายเลข #${machineNo} และอ่านข้อมูลสแกนนิ้ว...`
+          : 'กำลังเชื่อมต่อเครื่องสแกนทุกเครื่องที่เปิดใช้งานและอ่านข้อมูลสแกนนิ้ว...',
+      });
+      trackedJobId = job.jobId;
+    } catch {
+      // Concurrency handled inside executeScannerReaderSync
+    }
+
     try {
       const result = await executeScannerReaderSync({
         triggerMode: 'MANUAL_EXE_SYNC',
@@ -783,8 +891,23 @@ scannersRouter.post(
         ipAddress: req.ip || '127.0.0.1',
       });
 
+      if (trackedJobId) {
+        updateCentralJobStep(trackedJobId, {
+          currentStep: 'กำลังจับคู่รหัสสแกนนิ้วและคำนวณเวลาปฏิบัติงาน...',
+          processedCount: Number(result.totalRead ?? 0),
+          totalCount: Number(result.totalRead ?? 0),
+        });
+        completeCentralJob(trackedJobId, {
+          currentStep: 'ดึงข้อมูลจากเครื่องสแกนและคำนวณเวลาเสร็จสมบูรณ์',
+          processedCount: Number(result.totalRead ?? 0),
+          totalCount: Number(result.totalRead ?? 0),
+          resultSummary: result as unknown as Record<string, unknown>,
+        });
+      }
+
       res.json({
         status: 'SUCCESS',
+        jobId: trackedJobId,
         ...result,
       });
     } catch (err: unknown) {
@@ -792,10 +915,19 @@ scannersRouter.post(
       const statusCode = (err as { statusCode?: number })?.statusCode;
       const message = err instanceof Error ? err.message : String(err);
 
+      if (trackedJobId) {
+        failCentralJob(trackedJobId, {
+          currentStep: 'การดึงข้อมูลจากเครื่องสแกนไม่สำเร็จ',
+          errorCode: code,
+          errorMessage: message,
+        });
+      }
+
       const httpStatus = statusCode || (code.startsWith('INVALID_') ? 422 : 503);
       res.status(httpStatus).json({
         error: code,
         message,
+        jobId: trackedJobId,
         failClosed: true,
         requestId: req.requestId,
       });

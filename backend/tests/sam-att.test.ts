@@ -30,6 +30,10 @@ import {
   validateHosOfficeHrPersonColumnsContract,
 } from '../src/modules/personnel/routes.ts';
 import {
+  evaluateBulkShiftAssignments,
+  normalizeWorkDateString,
+} from '../src/modules/shifts/routes.ts';
+import {
   setScannerExeTestDouble,
   setScannerSyncLockForTests,
 } from '../src/modules/scanners/routes.ts';
@@ -59,6 +63,8 @@ import {
   repairThaiMojibakeIfCorrupted,
   getCurrentBangkokDateParts,
 } from '../src/utils/crypto.ts';
+import { buildXlsxBufferFromRows } from '../src/utils/xlsx.ts';
+import { setDeployBatRunnerForTests } from '../src/modules/settings/routes.ts';
 import { runOneClickDeployment } from '../../deployment/deploy-runner.ts';
 
 // ใช้โฟลเดอร์ชั่วคราวใน os.tmpdir() สำหรับฐานข้อมูลและใบรับรองการทดสอบ เพื่อไม่ให้มีไฟล์ .sqlite หรือ .key ตกค้างใน Git Repository (แก้ไข P0 ข้อ 01–02)
@@ -1308,6 +1314,75 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     );
     assert.equal(cancelLog.length, 1);
     assert.equal(cancelLog[0].cancel_reason, 'ทดสอบยกเลิกตารางเวรแบบบันทึกประวัติ (Soft Cancel)');
+
+    // 8. Regression: MySQL Date object returned for work_date must never throw TypeError: dateStr.split is not a function
+    assert.equal(normalizeWorkDateString(new Date('2026-11-18T00:00:00.000+07:00')), '2026-11-18');
+    assert.equal(normalizeWorkDateString('2026-11-18 00:00:00'), '2026-11-18');
+
+    const mysqlDateSimEval = await evaluateBulkShiftAssignments(
+      async <T = Record<string, unknown>>(sql: string): Promise<T[]> => {
+        if (sql.includes('FROM personnel')) {
+          return [
+            {
+              person_id: 10,
+              full_name: 'นางสาวกัลยกร พูลทวี',
+              department_name: 'กลุ่มงานการพยาบาล',
+              personnel_type_name: 'พกส.',
+            },
+          ] as unknown as T[];
+        }
+        if (sql.includes('FROM shift_assignments')) {
+          return [
+            {
+              id: 501,
+              person_id: 10,
+              shift_id: 1,
+              work_date: new Date('2026-11-18T00:00:00.000+07:00') as unknown as string,
+              snapshot_shift_code: 'OFF-0816',
+              snapshot_shift_name: 'เวรราชการปกติ',
+              snapshot_start_time: '08:00',
+              snapshot_end_time: '16:00',
+              snapshot_is_cross_midnight: 0,
+              status: 'ACTIVE',
+            },
+          ] as unknown as T[];
+        }
+        return [];
+      },
+      {
+        personIds: ['10'],
+        shift: {
+          id: 2,
+          shift_code: 'MOR-0816',
+          shift_name: 'เวรเช้า',
+          shift_category: 'MORNING',
+          start_time: '08:00',
+          end_time: '16:00',
+          grace_minutes: 15,
+          cutoff_time: '10:30',
+          is_cross_midnight: 0,
+          is_active: 1,
+        },
+        workDates: ['2026-11-18', '2026-11-19'],
+      }
+    );
+    assert.equal(mysqlDateSimEval.summary.totalRequested, 2);
+    assert.equal(mysqlDateSimEval.summary.overlapCount, 1, 'Must detect overlap even when MySQL driver returns work_date as Date object');
+    assert.equal(mysqlDateSimEval.summary.readyCount, 1);
+
+    // 9. Regression: bulk-preview with non-existent personId must return 404 PERSONNEL_NOT_FOUND with requestId (never 500)
+    const missingPersonPreview = await apiCall('/api/Sam_Att/shift-assignments/bulk-preview', {
+      method: 'POST',
+      token: staffToken,
+      body: {
+        personIds: ['NON-EXISTENT-PERSON-999'],
+        shiftId: 1,
+        workDates: ['2026-11-20'],
+      },
+    });
+    assert.equal(missingPersonPreview.status, 404);
+    assert.equal(missingPersonPreview.data.error, 'PERSONNEL_NOT_FOUND');
+    assert.ok(missingPersonPreview.data.requestId, 'Error response must include requestId');
   });
 
   test('22. REAL vs DEMO Data Mode Isolation, Thai Mojibake Repair (TIS-620/Latin-1 -> UTF-8), Read-Only Data Integrity Audit & Dynamic Bangkok Dates', async () => {
@@ -1402,8 +1477,8 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       assert.equal(realUsers[0].username, 'admin');
       assert.equal(realUsers[0].approved_person_id, null, 'REAL mode admin must not be bound to fake SAM-P001');
       assert.equal(realUsers[0].display_name, 'ผู้ดูแลระบบหลัก (System Admin)');
-      assert.equal(Number(realShifts[0].cnt), 5, 'REAL mode must have 5 standard shift templates');
-      assert.equal(Number(realRules[0].cnt), 3, 'REAL mode must have 3 personnel type rules');
+      assert.equal(Number(realShifts[0].cnt), 9, 'REAL mode must have 9 standard shift templates');
+      assert.equal(Number(realRules[0].cnt), 5, 'REAL mode must have 5 personnel type rules');
       assert.deepEqual(
         realScanners.map((s) => Number(s.machine_no)),
         [1, 2, 3],
@@ -1666,6 +1741,375 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       assert.ok(!sHappy.consoleOutput.includes('SuperSecretMysqlPass#2026!'), 'MySQL password must never appear in console');
     } finally {
       fs.rmSync(mockAppDir, { recursive: true, force: true });
+    }
+  });
+
+  test('24. Master Prompt Business Logic: Default Morning Shift by Personnel Type, Daily Cell Overrides, Day-Off Suppression (No Revert), Excel .xlsx Import, Sync Runs Filter & One-Button Deploy', async () => {
+    const login = await apiCall('/api/Sam_Att/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'Admin@SamAtt2026' },
+    });
+    assert.equal(login.status, 200);
+    const token = login.data.token as string;
+    const staffLogin = await apiCall('/api/Sam_Att/auth/login', {
+      method: 'POST',
+      body: { username: 'hrstaff', password: 'Staff@SamAtt2026' },
+    });
+    assert.equal(staffLogin.status, 200);
+    const staffToken = staffLogin.data.token as string;
+
+    // -------------------------------------------------------------------------
+    // Scenario A & B: Default Morning Shift by Personnel Type & Late Grace Calculation
+    // ข้าราชการ / พนักงานราชการ / พนักงานกระทรวง: 08:00–16:00, grace 15 นาที (08:15 = PRESENT, 08:16 = LATE)
+    // ลูกจ้างประจำ (PERMANENT_EMP / 02): 07:30–16:00, grace 0 นาที (07:30 = PRESENT, 07:31 = LATE 1 นาที)
+    // -------------------------------------------------------------------------
+    const rulesRes = await apiCall('/api/Sam_Att/personnel-type-rules', { token });
+    assert.equal(rulesRes.status, 200);
+    const rules = rulesRes.data.items as any[];
+    const permRule = rules.find((r) => r.personnel_type_code === 'PERMANENT_EMP');
+    const civilRule = rules.find((r) => r.personnel_type_code === 'CIVIL_SERVANT');
+    const govRule = rules.find((r) => r.personnel_type_code === 'GOV_EMPLOYEE');
+    const phRule = rules.find((r) => r.personnel_type_code === 'PUBLIC_HEALTH_EMP');
+
+    assert.ok(permRule, 'PERMANENT_EMP rule must exist');
+    assert.equal(permRule.default_start_time, '07:30');
+    assert.equal(permRule.default_end_time, '16:00');
+    assert.equal(Number(permRule.default_grace_minutes), 0);
+
+    assert.ok(civilRule && govRule && phRule, 'CIVIL_SERVANT, GOV_EMPLOYEE, PUBLIC_HEALTH_EMP rules must exist');
+    assert.equal(civilRule.default_start_time, '08:00');
+    assert.equal(Number(civilRule.default_grace_minutes), 15);
+    assert.equal(govRule.default_start_time, '08:00');
+    assert.equal(Number(govRule.default_grace_minutes), 15);
+    assert.equal(phRule.default_start_time, '08:00');
+    assert.equal(Number(phRule.default_grace_minutes), 15);
+
+    // Seed a ลูกจ้างประจำ (PERMANENT_EMP) person and a ข้าราชการ (CIVIL_SERVANT) person with NO custom shift assignment on 2026-06-15
+    await dbExecute(
+      `INSERT INTO personnel (
+        person_id, fingle_id, title_name, first_name, last_name, full_name,
+        position_name, department_code, department_name, work_group_name,
+        personnel_type_code, personnel_type_name, is_active
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+      ON CONFLICT(person_id) DO UPDATE SET
+        fingle_id = excluded.fingle_id,
+        personnel_type_code = excluded.personnel_type_code,
+        personnel_type_name = excluded.personnel_type_name`,
+      [
+        'SAM-PERM-01',
+        '9901',
+        'นาย',
+        'สมศักดิ์',
+        'ลูกจ้างประจำ',
+        'นายสมศักดิ์ ลูกจ้างประจำ',
+        'พนักงานบริการ',
+        'GEN',
+        'กลุ่มงานบริหารทั่วไป',
+        'บริหารทั่วไป',
+        '02',
+        'ลูกจ้างประจำ',
+      ]
+    );
+
+    await dbExecute(
+      `INSERT INTO personnel (
+        person_id, fingle_id, title_name, first_name, last_name, full_name,
+        position_name, department_code, department_name, work_group_name,
+        personnel_type_code, personnel_type_name, is_active
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+      ON CONFLICT(person_id) DO UPDATE SET
+        fingle_id = excluded.fingle_id,
+        personnel_type_code = excluded.personnel_type_code,
+        personnel_type_name = excluded.personnel_type_name`,
+      [
+        'SAM-CIVIL-01',
+        '9902',
+        'นางสาว',
+        'กมลวรรณ',
+        'ข้าราชการ',
+        'นางสาวกมลวรรณ ข้าราชการ',
+        'พยาบาลวิชาชีพ',
+        'OPD',
+        'กลุ่มงานผู้ป่วยนอก',
+        'การพยาบาล',
+        '01',
+        'ข้าราชการ',
+      ]
+    );
+
+    await dbExecute(
+      `INSERT INTO fingerprint_mappings (person_id, fingle_id, effective_from, effective_to, conflict_state, created_by)
+       VALUES (?, ?, '2020-01-01', NULL, 'NONE', 'test_suite')`,
+      ['SAM-PERM-01', '9901']
+    );
+    await dbExecute(
+      `INSERT INTO fingerprint_mappings (person_id, fingle_id, effective_from, effective_to, conflict_state, created_by)
+       VALUES (?, ?, '2020-01-01', NULL, 'NONE', 'test_suite')`,
+      ['SAM-CIVIL-01', '9902']
+    );
+
+    // Insert raw scans on 2026-06-15:
+    // - ลูกจ้างประจำ scans at 07:31:00 -> must be LATE (1 minute late since start=07:30, grace=0)
+    // - ข้าราชการ scans at 08:14:00 -> must be NORMAL (within 08:00 + 15m grace)
+    const ingestScans = await apiCall('/api/Sam_Att/scanners/ingest', {
+      method: 'POST',
+      token,
+      body: {
+        events: [
+          {
+            machineNo: 101,
+            enrollNumber: '9901',
+            scanDateTime: '2026-06-15 07:31:00',
+            verifyMode: 1,
+            inOutMode: 0,
+            workCode: 0,
+          },
+          {
+            machineNo: 101,
+            enrollNumber: '9901',
+            scanDateTime: '2026-06-15 16:05:00',
+            verifyMode: 1,
+            inOutMode: 1,
+            workCode: 0,
+          },
+          {
+            machineNo: 101,
+            enrollNumber: '9902',
+            scanDateTime: '2026-06-15 08:14:00',
+            verifyMode: 1,
+            inOutMode: 0,
+            workCode: 0,
+          },
+          {
+            machineNo: 101,
+            enrollNumber: '9902',
+            scanDateTime: '2026-06-15 16:10:00',
+            verifyMode: 1,
+            inOutMode: 1,
+            workCode: 0,
+          },
+        ],
+      },
+    });
+    assert.equal(ingestScans.status, 201);
+
+    const permAttRows = await dbQuery<{
+      status: string;
+      late_minutes: number;
+      scheduled_start: string;
+    }>(
+      `SELECT status, late_minutes, scheduled_start
+       FROM attendance
+       WHERE person_id = 'SAM-PERM-01' AND work_date = '2026-06-15'`
+    );
+    assert.equal(permAttRows.length, 1);
+    assert.ok(permAttRows[0].scheduled_start.includes('07:30'));
+    assert.equal(permAttRows[0].status, 'LATE', 'Permanent employee scanning at 07:31 must be LATE');
+    assert.equal(Number(permAttRows[0].late_minutes), 1);
+
+    const civilAttRows = await dbQuery<{
+      status: string;
+      late_minutes: number;
+      scheduled_start: string;
+    }>(
+      `SELECT status, late_minutes, scheduled_start
+       FROM attendance
+       WHERE person_id = 'SAM-CIVIL-01' AND work_date = '2026-06-15'`
+    );
+    assert.equal(civilAttRows.length, 1);
+    assert.ok(civilAttRows[0].scheduled_start.includes('08:00'));
+    assert.equal(civilAttRows[0].status, 'NORMAL', 'Civil servant scanning at 08:14 must be NORMAL');
+    assert.equal(Number(civilAttRows[0].late_minutes), 0);
+
+    // -------------------------------------------------------------------------
+    // Scenario C, D, E: Single-Person Cell Click Actions + Clear All Shifts (Day-Off Suppression)
+    // Must NEVER revert to default shift after refresh, HOSOffice sync, Scanner sync, or Attendance reprocess!
+    // -------------------------------------------------------------------------
+    const clearRes = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-06-16',
+        action: 'CLEAR_ALL_SHIFTS',
+        reason: 'หยุดพักผ่อนประจำวัน',
+      },
+    });
+    assert.equal(clearRes.status, 200);
+    assert.equal(clearRes.data.effectiveSchedule.mode, 'CLEARED_ALL_SHIFTS');
+    assert.equal(clearRes.data.effectiveSchedule.shifts.length, 0);
+
+    // Verify GET /shift-assignments returns override_state = CLEARED_ALL_SHIFTS on refresh
+    const checkAfterRefresh = await apiCall(
+      '/api/Sam_Att/shift-assignments?personId=SAM-CIVIL-01&dateFrom=2026-06-01&dateTo=2026-06-30',
+      { token }
+    );
+    assert.equal(checkAfterRefresh.status, 200);
+    const ovRow = (checkAfterRefresh.data.dailyOverrides as any[]).find(
+      (o) => o.person_id === 'SAM-CIVIL-01' && o.work_date === '2026-06-16'
+    );
+    assert.ok(ovRow, 'Daily override row must persist after refresh');
+    assert.equal(ovRow.override_state, 'CLEARED_ALL_SHIFTS');
+
+    // Reprocess attendance across 2026-06-16 -> must NOT create a default shift or mark ABSENT on a cleared day-off!
+    await reprocessAttendanceRange({
+      dateFrom: '2026-06-16',
+      dateTo: '2026-06-16',
+      referenceNowBkk: '2026-06-16 18:00:00',
+      actorUsername: 'admin',
+    });
+    const clearedDayAtt = await dbQuery<{ id: number }>(
+      `SELECT id FROM attendance WHERE person_id = 'SAM-CIVIL-01' AND work_date = '2026-06-16'`
+    );
+    assert.equal(
+      clearedDayAtt.length,
+      0,
+      'Cleared shift day (ไม่มีเวร) must NEVER revert to default shift or generate ABSENT record on reprocess'
+    );
+
+    // Restore default shift explicitly -> must return to DEFAULT_FROM_TYPE (08:00–16:00)
+    const restoreRes = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-06-16',
+        action: 'RESTORE_DEFAULT',
+      },
+    });
+    assert.equal(restoreRes.status, 200);
+    assert.equal(restoreRes.data.effectiveSchedule.mode, 'DEFAULT_FROM_TYPE');
+    assert.equal(restoreRes.data.effectiveSchedule.shifts.length, 1);
+    assert.equal(restoreRes.data.effectiveSchedule.shifts[0].startTime, '08:00');
+
+    // Add Afternoon shift alongside Morning shift, then remove Morning shift -> only Afternoon shift remains
+    const allShiftsRes = await apiCall('/api/Sam_Att/shifts', { token });
+    const shiftList = allShiftsRes.data.items as any[];
+    const morShift = shiftList.find((s) => s.shift_code === 'MOR-0816' || s.shift_code === 'OFF-0816');
+    const aftShift = shiftList.find((s) => s.shift_code === 'AFT-1600');
+    assert.ok(morShift && aftShift);
+
+    await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-06-17',
+        action: 'REPLACE_SHIFTS',
+        shiftIds: [morShift.id, aftShift.id],
+      },
+    });
+
+    const removeMorningRes = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-06-17',
+        action: 'REMOVE_MORNING',
+      },
+    });
+    assert.equal(removeMorningRes.status, 200);
+    assert.equal(removeMorningRes.data.effectiveSchedule.mode, 'CUSTOM_ASSIGNED');
+    assert.equal(removeMorningRes.data.effectiveSchedule.shifts.length, 1);
+    assert.equal(removeMorningRes.data.effectiveSchedule.shifts[0].shiftCode, 'AFT-1600');
+
+    // -------------------------------------------------------------------------
+    // Scenario F: Excel (.xlsx) Template Download, Preview & Confirm Import
+    // -------------------------------------------------------------------------
+    const tplRes = await apiCall('/api/Sam_Att/shift-assignments/import-template.xlsx', { token });
+    assert.equal(tplRes.status, 200);
+    assert.ok(
+      tplRes.headers.get('content-type')?.includes('spreadsheetml.sheet'),
+      'Template download must return .xlsx MIME type'
+    );
+
+    const xlsxBuf = buildXlsxBufferFromRows('ScheduleImport', [
+      ['person_id', 'full_name', 'work_date', 'shift_code', 'note'],
+      ['SAM-CIVIL-01', 'นางสาวกมลวรรณ ข้าราชการ', '2026-06-20', 'AFT', 'เวรบ่าย'],
+      ['SAM-PERM-01', 'นายสมศักดิ์ ลูกจ้างประจำ', '2026-06-20', 'OFF', 'วันหยุดไม่มีเวร'],
+      ['UNKNOWN-999', 'ไม่พบบุคลากร', '2026-06-20', 'MOR', 'ต้องแจ้งเตือน'],
+    ]);
+
+    const excelPreviewRes = await apiCall('/api/Sam_Att/shift-assignments/import-excel/preview', {
+      method: 'POST',
+      token,
+      body: {
+        fileName: 'test_roster.xlsx',
+        fileBase64: xlsxBuf.toString('base64'),
+      },
+    });
+    assert.equal(excelPreviewRes.status, 200);
+    assert.equal(excelPreviewRes.data.summary.totalRows, 3);
+    assert.equal(excelPreviewRes.data.summary.validCount, 2);
+    assert.equal(excelPreviewRes.data.summary.invalidCount, 1);
+
+    const excelConfirmRes = await apiCall('/api/Sam_Att/shift-assignments/import-excel/confirm', {
+      method: 'POST',
+      token,
+      body: {
+        fileName: 'test_roster.xlsx',
+        fileBase64: xlsxBuf.toString('base64'),
+        mode: 'REPLACE_DATE',
+      },
+    });
+    assert.equal(excelConfirmRes.status, 200);
+    assert.equal(excelConfirmRes.data.insertedCount, 2);
+    assert.equal(excelConfirmRes.data.skippedCount, 1);
+
+    // Verify SAM-PERM-01 on 2026-06-20 was set to CLEARED_ALL_SHIFTS via 'OFF' in Excel import
+    const permClearedCheck = await dbQuery<{ override_state: string }>(
+      `SELECT override_state FROM shift_daily_overrides WHERE person_id = 'SAM-PERM-01' AND work_date = '2026-06-20'`
+    );
+    assert.equal(permClearedCheck.length, 1);
+    assert.equal(permClearedCheck[0].override_state, 'CLEARED_ALL_SHIFTS');
+
+    // -------------------------------------------------------------------------
+    // Scenario G: Scanner Sync History Filtering & Central Job Progress Tracker
+    // -------------------------------------------------------------------------
+    const syncRunsFiltered = await apiCall(
+      '/api/Sam_Att/sync-runs?period=30D&status=ALL&page=1&pageSize=10',
+      { token }
+    );
+    assert.equal(syncRunsFiltered.status, 200);
+    assert.ok(Array.isArray(syncRunsFiltered.data.items));
+    assert.equal(syncRunsFiltered.data.pagination.page, 1);
+
+    const activeJobsRes = await apiCall('/api/Sam_Att/jobs/active', { token });
+    assert.equal(activeJobsRes.status, 200);
+    assert.ok(Array.isArray(activeJobsRes.data.items));
+
+    // -------------------------------------------------------------------------
+    // Scenario H: One-Button Update System ("อัปเดตระบบ Sam_Att" -> POST /deployment/run-bat)
+    // -------------------------------------------------------------------------
+    // 1. Non-ADMIN must be blocked (403 FORBIDDEN)
+    const nonAdminDeploy = await apiCall('/api/Sam_Att/deployment/run-bat', {
+      method: 'POST',
+      token: staffToken,
+      body: { confirmRun: true },
+    });
+    assert.equal(nonAdminDeploy.status, 403);
+
+    // 2. ADMIN with test runner double executes cleanly and records deployment_history + audit_logs
+    setDeployBatRunnerForTests(async (scriptPath) => ({
+      exitCode: 0,
+      stdout: `Executed ${path.basename(scriptPath)}\nCommit : fb866e50 -> fb866e50\nDEPLOYMENT SUCCESS\n`,
+      stderr: '',
+      scriptPath,
+      durationMs: 125,
+    }));
+    try {
+      const adminDeploy = await apiCall('/api/Sam_Att/deployment/run-bat', {
+        method: 'POST',
+        token,
+        body: { confirmRun: true },
+      });
+      assert.equal(adminDeploy.status, 200);
+      assert.equal(adminDeploy.data.status, 'SUCCESS');
+      assert.equal(adminDeploy.data.exitCode, 0);
+      assert.ok(adminDeploy.data.output.includes('DEPLOYMENT SUCCESS'));
+    } finally {
+      setDeployBatRunnerForTests(null);
     }
   });
 });

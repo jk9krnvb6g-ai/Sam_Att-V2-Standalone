@@ -5,6 +5,12 @@ import { dbQuery, dbExecute } from '../../database/adapter.ts';
 import { requireAuth, requireRoles } from '../../middleware/auth.ts';
 import { writeAuditLog } from '../audit/service.ts';
 import { repairThaiMojibakeIfCorrupted } from '../../utils/crypto.ts';
+import {
+  startCentralJob,
+  updateCentralJobStep,
+  completeCentralJob,
+  failCentralJob,
+} from '../jobs/tracker.ts';
 
 export interface HosOfficeHrPersonRow {
   PERSON_ID: string;
@@ -449,12 +455,39 @@ personnelRouter.post(
   '/personnel/sync',
   requireAuth,
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
-  async (req, res, next) => {
+  async (req, res, _next) => {
     const actor = req.user!.username;
     const effectiveDate = String(req.body?.effectiveDate || new Date().toISOString().slice(0, 10));
 
+    let trackedJobId: string | null = null;
+    try {
+      const job = startCentralJob({
+        jobType: 'HOSOFFICE_PERSONNEL_SYNC',
+        actorUsername: actor,
+        initialStep: 'กำลังเชื่อมต่อฐานข้อมูล HOSOffice และตรวจสอบโครงสร้างตาราง hr_person...',
+      });
+      trackedJobId = job.jobId;
+    } catch (lockErr: unknown) {
+      const activeJob = (lockErr as { activeJob?: unknown })?.activeJob;
+      res.status(409).json({
+        error: 'SYNC_ALREADY_RUNNING',
+        message: 'กำลังซิงก์ข้อมูลบุคลากรจาก HOSOffice อยู่แล้ว กรุณารอให้เสร็จสิ้นก่อน',
+        activeJob,
+        requestId: req.requestId,
+      });
+      return;
+    }
+
     try {
       const externalRows = await fetchFromHosOfficeReadOnly();
+
+      if (trackedJobId) {
+        updateCentralJobStep(trackedJobId, {
+          currentStep: `ดึงรายชื่อจาก HOSOffice สำเร็จ (${externalRows.length} รายการ) กำลังอัปเดตทะเบียนบุคลากร...`,
+          processedCount: 0,
+          totalCount: externalRows.length,
+        });
+      }
 
       // Detect duplicate FINGLE_ID across active personnel in the incoming batch
       const activeFingleCounts = new Map<string, string[]>();
@@ -580,6 +613,13 @@ personnelRouter.post(
             );
           }
         }
+        if (trackedJobId && (upsertedCount % 25 === 0 || upsertedCount === externalRows.length)) {
+          updateCentralJobStep(trackedJobId, {
+            currentStep: `กำลังอัปเดตทะเบียนบุคลากร (${upsertedCount}/${externalRows.length} คน) โดยคงตารางเวรเดิมไว้ครบถ้วน...`,
+            processedCount: upsertedCount,
+            totalCount: externalRows.length,
+          });
+        }
       }
 
       await dbExecute(
@@ -588,6 +628,20 @@ personnelRouter.post(
         ) VALUES (CURRENT_TIMESTAMP, 'SUCCESS', ?, ?, ?, ?)`,
         [externalRows.length, upsertedCount, conflictsFound, actor]
       );
+
+      if (trackedJobId) {
+        completeCentralJob(trackedJobId, {
+          currentStep: 'ซิงก์ข้อมูลบุคลากรจาก HOSOffice เสร็จสมบูรณ์',
+          processedCount: upsertedCount,
+          totalCount: externalRows.length,
+          resultSummary: {
+            recordsFetched: externalRows.length,
+            recordsUpserted: upsertedCount,
+            mappingConflictsFound: conflictsFound,
+            effectiveDate,
+          },
+        });
+      }
 
       await writeAuditLog({
         requestId: req.requestId,
@@ -607,6 +661,7 @@ personnelRouter.post(
 
       res.json({
         status: 'SUCCESS',
+        jobId: trackedJobId,
         recordsFetched: externalRows.length,
         recordsUpserted: upsertedCount,
         mappingConflictsFound: conflictsFound,
@@ -615,6 +670,14 @@ personnelRouter.post(
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || 'HOSOFFICE_SYNC_FAILED';
       const message = err instanceof Error ? err.message : String(err);
+
+      if (trackedJobId) {
+        failCentralJob(trackedJobId, {
+          currentStep: 'การซิงก์ข้อมูลบุคลากรจาก HOSOffice ล้มเหลว',
+          errorCode: code,
+          errorMessage: message,
+        });
+      }
 
       await dbExecute(
         `INSERT INTO hosoffice_sync_logs (
@@ -639,6 +702,7 @@ personnelRouter.post(
       res.status(503).json({
         error: code,
         message,
+        jobId: trackedJobId,
         failClosed: true,
         requestId: req.requestId,
       });

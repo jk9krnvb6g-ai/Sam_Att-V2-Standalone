@@ -353,6 +353,10 @@ export function getCurrentBangkokDateParts(referenceDate: Date = new Date()): {
   };
 }
 
+export function nowBkkString(): string {
+  return getCurrentBangkokDateParts().nowDateTimeBkk;
+}
+
 /**
  * ตรวจสอบว่าข้อความมีลักษณะเป็นภาษาไทยเพี้ยน (Mojibake) จากการอ่าน UTF-8 เป็น TIS-620/Windows-874 หรือ Latin-1 หรือไม่
  * เช่น "เธเธนเน..." (เกิดจากไบต์ 0xE0 0xB8 / 0xE0 0xB9 ของ UTF-8 ถูกตีความเป็นอักษร 'เ'+'ธ' หรือ 'เ'+'น' ใน TIS-620)

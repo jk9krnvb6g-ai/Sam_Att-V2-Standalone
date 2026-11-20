@@ -80,7 +80,12 @@ CREATE TABLE IF NOT EXISTS personnel_type_rules (
   id INT AUTO_INCREMENT PRIMARY KEY,
   personnel_type_code VARCHAR(64) NOT NULL UNIQUE,
   personnel_type_name VARCHAR(150) NOT NULL,
+  default_start_time VARCHAR(5) NOT NULL DEFAULT '08:00',
+  default_end_time VARCHAR(5) NOT NULL DEFAULT '16:00',
   default_grace_minutes INT NOT NULL DEFAULT 15,
+  default_cutoff_time VARCHAR(5) NOT NULL DEFAULT '11:00',
+  effective_from DATE NOT NULL DEFAULT '2026-01-01',
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
   CheckinWindowBeforeMinutes INT NOT NULL DEFAULT 120,
   CheckoutWindowAfterMinutes INT NOT NULL DEFAULT 240,
   require_checkout TINYINT(1) NOT NULL DEFAULT 1,
@@ -396,4 +401,51 @@ CREATE TABLE IF NOT EXISTS fingle_scan (
   CREATE_BY VARCHAR(64) NULL DEFAULT 'SCAN_SYNC',
   INDEX idx_fingle_scan_lookup (FINGLE_ID, SCAN_DATE_TIME)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 22. personnel_type_rule_history: ประวัติการแก้ไขกฎกะเช้าเริ่มต้นตามประเภทบุคลากร
+CREATE TABLE IF NOT EXISTS personnel_type_rule_history (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  rule_id INT NOT NULL,
+  personnel_type_code VARCHAR(64) NOT NULL,
+  personnel_type_name VARCHAR(150) NOT NULL,
+  default_start_time VARCHAR(5) NOT NULL,
+  default_end_time VARCHAR(5) NOT NULL,
+  default_grace_minutes INT NOT NULL,
+  default_cutoff_time VARCHAR(5) NOT NULL,
+  effective_from DATE NOT NULL,
+  is_active TINYINT(1) NOT NULL DEFAULT 1,
+  action_type VARCHAR(32) NOT NULL,
+  changed_by VARCHAR(64) NOT NULL,
+  changed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_ptrh_code_eff (personnel_type_code, effective_from)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 23. shift_daily_overrides: สถานะตารางเวรรายวันต่อคน (CUSTOM_ASSIGNED | CLEARED_ALL_SHIFTS | RESTORED_DEFAULT)
+CREATE TABLE IF NOT EXISTS shift_daily_overrides (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  person_id VARCHAR(64) NOT NULL,
+  work_date DATE NOT NULL,
+  override_state VARCHAR(32) NOT NULL,
+  reason TEXT NULL,
+  updated_by VARCHAR(64) NOT NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_sdo_person_date (person_id, work_date),
+  INDEX idx_sdo_date (work_date),
+  CONSTRAINT fk_sdo_person FOREIGN KEY (person_id) REFERENCES personnel(person_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 24. shift_import_logs: ประวัติการนำเข้าตารางเวรจากไฟล์ Excel (.xlsx)
+CREATE TABLE IF NOT EXISTS shift_import_logs (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  filename VARCHAR(255) NOT NULL,
+  total_rows INT NOT NULL DEFAULT 0,
+  valid_rows INT NOT NULL DEFAULT 0,
+  invalid_rows INT NOT NULL DEFAULT 0,
+  imported_count INT NOT NULL DEFAULT 0,
+  skipped_count INT NOT NULL DEFAULT 0,
+  imported_by VARCHAR(64) NOT NULL,
+  summary_json LONGTEXT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 

@@ -213,21 +213,53 @@ export async function resolveRawScanPersonnelMappings(dateFrom: string, dateTo: 
   return { newlyMatched, unmatchedCount, conflictCount };
 }
 
+import {
+  normalizeWorkDateString,
+  resolveEffectiveDailyScheduleForPersonDate,
+  computeAbsoluteIntervalMinutes,
+  type DailyOverrideRow,
+  type ExistingAssignmentRow,
+  type PersonnelTypeRuleRow,
+} from '../shifts/routes.ts';
+
+function buildDateRangeList(dateFrom: string, dateTo: string): string[] {
+  const start = normalizeWorkDateString(dateFrom);
+  const end = normalizeWorkDateString(dateTo);
+  const out: string[] = [];
+  let cur = start;
+  let guard = 0;
+  while (cur <= end && guard < 400) {
+    out.push(cur);
+    cur = addDays(cur, 1);
+    guard++;
+  }
+  return out;
+}
+
 /**
  * Pure deterministic calculation of attendance rows for a date range.
+ * Enforces the 5-step Shift Priority Order (Section 5.4):
+ * 1. Check daily override & shift assignments for (person, date)
+ * 2. If custom shifts assigned -> evaluate assigned shifts
+ * 3. If CLEARED_ALL_SHIFTS -> 0 shifts (never reverts to default shift)
+ * 4. If DEFAULT_FROM_TYPE or RESTORED_DEFAULT -> evaluate default morning shift from personnel_type_rules
+ * 5. Prevent time overlap with cross-midnight shifts from previous day
  */
-export async function computeAttendanceOutcomes(options: ReprocessOptions): Promise<CalculatedShiftAttendance[]> {
+export async function computeAttendanceOutcomes(
+  options: ReprocessOptions
+): Promise<CalculatedShiftAttendance[]> {
   const nowBkk = options.referenceNowBkk || getBangkokNowString();
   const nowMin = toEpochMinutes(nowBkk);
 
-  const assignmentParams: unknown[] = [options.dateFrom, options.dateTo];
+  const prevDayBeforeRange = addDays(options.dateFrom, -1);
+  const assignmentParams: unknown[] = [prevDayBeforeRange, options.dateTo];
   let personClause = '';
   if (options.personId) {
     personClause = ' AND sa.person_id = ?';
     assignmentParams.push(options.personId);
   }
 
-  const assignments = await dbQuery<{
+  const rawAssignments = await dbQuery<{
     id: number;
     person_id: string;
     shift_id: number;
@@ -255,6 +287,161 @@ export async function computeAttendanceOutcomes(options: ReprocessOptions): Prom
     assignmentParams
   );
 
+  const personnelParams: unknown[] = [];
+  let personnelWhere = 'WHERE is_active = 1';
+  if (options.personId) {
+    personnelWhere += ' AND person_id = ?';
+    personnelParams.push(options.personId);
+  }
+  const activePersonnel = await dbQuery<{
+    person_id: string;
+    personnel_type_code: string;
+    personnel_type_name: string;
+    mapping_status: string;
+  }>(
+    `SELECT person_id, personnel_type_code, personnel_type_name, mapping_status
+     FROM personnel
+     ${personnelWhere}
+     ORDER BY person_id ASC`,
+    personnelParams
+  );
+
+  const rawOverrides = await dbQuery<DailyOverrideRow>(
+    `SELECT * FROM shift_daily_overrides WHERE work_date >= ? AND work_date <= ?`,
+    [options.dateFrom, options.dateTo]
+  );
+  const overridesByPersonDate = new Map<string, DailyOverrideRow>();
+  for (const ov of rawOverrides) {
+    const pid = String(ov.person_id ?? '').trim();
+    const wDate = normalizeWorkDateString(ov.work_date);
+    overridesByPersonDate.set(`${pid}:${wDate}`, {
+      ...ov,
+      person_id: pid,
+      work_date: wDate,
+    });
+  }
+
+  const rawRules = await dbQuery<PersonnelTypeRuleRow>(
+    'SELECT * FROM personnel_type_rules ORDER BY id ASC'
+  );
+  const rulesByCode = new Map<string, PersonnelTypeRuleRow>();
+  for (const r of rawRules) {
+    rulesByCode.set(String(r.personnel_type_code || '').trim().toUpperCase(), {
+      ...r,
+      effective_from: normalizeWorkDateString(r.effective_from || '2026-01-01'),
+    });
+  }
+
+  const assignmentsByPersonDate = new Map<string, ExistingAssignmentRow[]>();
+  for (const sa of rawAssignments) {
+    const pid = String(sa.person_id ?? '').trim();
+    const wDate = normalizeWorkDateString(sa.work_date);
+    const key = `${pid}:${wDate}`;
+    const list = assignmentsByPersonDate.get(key) || [];
+    list.push({
+      id: sa.id,
+      person_id: pid,
+      shift_id: sa.shift_id,
+      work_date: wDate,
+      snapshot_shift_code: sa.snapshot_shift_code,
+      snapshot_shift_name: sa.snapshot_shift_name,
+      snapshot_start_time: sa.snapshot_start_time,
+      snapshot_end_time: sa.snapshot_end_time,
+      snapshot_grace_minutes: sa.snapshot_grace_minutes,
+      snapshot_cutoff_time: sa.snapshot_cutoff_time,
+      snapshot_is_cross_midnight: sa.snapshot_is_cross_midnight,
+      status: 'ACTIVE',
+    });
+    assignmentsByPersonDate.set(key, list);
+  }
+
+  // Construct effective shift items across all dates in [dateFrom, dateTo]
+  const dateList = buildDateRangeList(options.dateFrom, options.dateTo);
+  const effectiveEvaluatedShifts: Array<{
+    id: number | null;
+    person_id: string;
+    work_date: string;
+    snapshot_shift_code: string;
+    snapshot_shift_name: string;
+    snapshot_start_time: string;
+    snapshot_end_time: string;
+    snapshot_grace_minutes: number;
+    snapshot_cutoff_time: string;
+    snapshot_is_cross_midnight: number;
+    mapping_status: string;
+  }> = [];
+
+  for (const workDate of dateList) {
+    for (const person of activePersonnel) {
+      const pid = String(person.person_id ?? '').trim();
+      const key = `${pid}:${workDate}`;
+      const dayAssignments = assignmentsByPersonDate.get(key) || [];
+      const dayOverride = overridesByPersonDate.get(key) || null;
+
+      const resolved = resolveEffectiveDailyScheduleForPersonDate({
+        person,
+        workDate,
+        activeAssignments: dayAssignments,
+        dailyOverride: dayOverride,
+        rulesByCode,
+      });
+
+      if (
+        resolved.state === 'CLEARED_ALL_SHIFTS' ||
+        resolved.state === 'UNCONFIGURED_DEFAULT_RULE'
+      ) {
+        continue;
+      }
+
+      for (const eff of resolved.effectiveShifts) {
+        if (eff.isDefaultFromType) {
+          // For synthesized default shifts, skip if person has invalid mapping status (unless explicitly restored)
+          if (person.mapping_status !== 'VALID' && resolved.state !== 'RESTORED_DEFAULT') {
+            continue;
+          }
+          // Check time overlap against previous day's cross-midnight shift
+          const prevDate = addDays(workDate, -1);
+          const prevDayList = assignmentsByPersonDate.get(`${pid}:${prevDate}`) || [];
+          const candInt = computeAbsoluteIntervalMinutes(
+            workDate,
+            eff.startTime,
+            eff.endTime,
+            eff.isCrossMidnight
+          );
+          const overlapsPrevCross = prevDayList.some((prevShift) => {
+            const prevInt = computeAbsoluteIntervalMinutes(
+              prevShift.work_date,
+              prevShift.snapshot_start_time,
+              prevShift.snapshot_end_time,
+              prevShift.snapshot_is_cross_midnight
+            );
+            return (
+              Math.max(candInt.startAbsMin, prevInt.startAbsMin) <
+              Math.min(candInt.endAbsMin, prevInt.endAbsMin)
+            );
+          });
+          if (overlapsPrevCross) {
+            continue;
+          }
+        }
+
+        effectiveEvaluatedShifts.push({
+          id: eff.assignmentId,
+          person_id: pid,
+          work_date: workDate,
+          snapshot_shift_code: eff.shiftCode,
+          snapshot_shift_name: eff.shiftName,
+          snapshot_start_time: eff.startTime,
+          snapshot_end_time: eff.endTime,
+          snapshot_grace_minutes: eff.graceMinutes,
+          snapshot_cutoff_time: eff.cutoffTime,
+          snapshot_is_cross_midnight: eff.isCrossMidnight,
+          mapping_status: person.mapping_status,
+        });
+      }
+    }
+  }
+
   const extendedEnd = addDays(options.dateTo, 1);
   const rawScans = await dbQuery<{
     id: number;
@@ -274,22 +461,21 @@ export async function computeAttendanceOutcomes(options: ReprocessOptions): Prom
 
   const results: CalculatedShiftAttendance[] = [];
 
-  for (const sa of assignments) {
+  for (const sa of effectiveEvaluatedShifts) {
     const startTs = `${sa.work_date} ${sa.snapshot_start_time}:00`;
     const isCross =
       Number(sa.snapshot_is_cross_midnight) === 1 || sa.snapshot_end_time <= sa.snapshot_start_time;
     const endDay = isCross ? addDays(sa.work_date, 1) : sa.work_date;
     const endTs = `${endDay} ${sa.snapshot_end_time}:00`;
 
-    // Cutoff can be on work_date or next day if cutoff < start_time
-    const cutoffDay = sa.snapshot_cutoff_time < sa.snapshot_start_time ? addDays(sa.work_date, 1) : sa.work_date;
+    const cutoffDay =
+      sa.snapshot_cutoff_time < sa.snapshot_start_time ? addDays(sa.work_date, 1) : sa.work_date;
     const cutoffTs = `${cutoffDay} ${sa.snapshot_cutoff_time}:00`;
 
     const startMin = toEpochMinutes(startTs);
     const endMin = toEpochMinutes(endTs);
     const cutoffMin = toEpochMinutes(cutoffTs);
 
-    // Check if personnel has a mapping issue (e.g., EMPTY_FINGLE_ID or CONFLICT)
     if (sa.mapping_status && sa.mapping_status !== 'VALID') {
       results.push({
         personId: sa.person_id,
@@ -312,8 +498,6 @@ export async function computeAttendanceOutcomes(options: ReprocessOptions): Prom
       continue;
     }
 
-    // Window for check-in: [start - 180 min, end - 30 min]
-    // Window for check-out: [start + 60 min, end + 240 min]
     const checkinWindowStart = fromEpochMinutes(startMin - 180);
     const checkinWindowEnd = fromEpochMinutes(endMin - 30);
     const checkoutWindowStart = fromEpochMinutes(startMin + 60);
@@ -340,7 +524,6 @@ export async function computeAttendanceOutcomes(options: ReprocessOptions): Prom
       checkoutCandidates.length > 0 ? checkoutCandidates[checkoutCandidates.length - 1] : null;
 
     if (!firstCheckin) {
-      // Only mark NO_SCAN if current reference time has passed the shift's cutoff time!
       if (nowMin < cutoffMin) {
         continue;
       }
@@ -365,14 +548,12 @@ export async function computeAttendanceOutcomes(options: ReprocessOptions): Prom
       continue;
     }
 
-    // Compute lateness against start_time + grace_minutes
     const checkinMin = toEpochMinutes(firstCheckin.canonical_bkk_time);
     const rawDiffMin = checkinMin - startMin;
     const isLate = rawDiffMin > Number(sa.snapshot_grace_minutes) ? 1 : 0;
     const lateMinutes = isLate ? Math.max(0, rawDiffMin) : 0;
 
     if (!lastCheckout) {
-      // Check if shift checkout window has passed
       if (nowMin >= endMin) {
         results.push({
           personId: sa.person_id,
@@ -428,12 +609,13 @@ export async function previewReprocessRange(options: ReprocessOptions) {
     person_id: string;
     work_date: string;
     shift_assignment_id: number | null;
+    shift_code: string | null;
     status: string;
     late_minutes: number;
     check_in_time: string | null;
     check_out_time: string | null;
   }>(
-    `SELECT id, person_id, work_date, shift_assignment_id, status, late_minutes, check_in_time, check_out_time
+    `SELECT id, person_id, work_date, shift_assignment_id, shift_code, status, late_minutes, check_in_time, check_out_time
      FROM attendance
      WHERE work_date >= ? AND work_date <= ?`,
     [options.dateFrom, options.dateTo]
@@ -455,9 +637,11 @@ export async function previewReprocessRange(options: ReprocessOptions) {
   for (const item of projected) {
     const match = existing.find(
       (e) =>
-        e.person_id === item.personId &&
-        e.work_date === item.workDate &&
-        e.shift_assignment_id === item.shiftAssignmentId
+        String(e.person_id).trim() === item.personId &&
+        normalizeWorkDateString(e.work_date) === item.workDate &&
+        (item.shiftAssignmentId !== null
+          ? Number(e.shift_assignment_id) === Number(item.shiftAssignmentId)
+          : e.shift_assignment_id === null && e.shift_code === item.shiftCode)
     );
     if (!match) {
       newRecordsCount++;
@@ -513,19 +697,24 @@ export async function reprocessAttendanceRange(options: ReprocessOptions) {
 
   let insertedCount = 0;
   let updatedCount = 0;
+  const keptAttendanceIds = new Set<number>();
 
   for (const item of projected) {
-    const existing = await dbQuery<{
-      id: number;
-      review_status: string;
-    }>(
-      `SELECT id, review_status FROM attendance
-       WHERE person_id = ? AND work_date = ? AND shift_assignment_id = ? LIMIT 1`,
-      [item.personId, item.workDate, item.shiftAssignmentId]
-    );
+    const existing =
+      item.shiftAssignmentId !== null
+        ? await dbQuery<{ id: number; review_status: string }>(
+            `SELECT id, review_status FROM attendance
+             WHERE person_id = ? AND work_date = ? AND shift_assignment_id = ? LIMIT 1`,
+            [item.personId, item.workDate, item.shiftAssignmentId]
+          )
+        : await dbQuery<{ id: number; review_status: string }>(
+            `SELECT id, review_status FROM attendance
+             WHERE person_id = ? AND work_date = ? AND shift_assignment_id IS NULL AND shift_code = ? LIMIT 1`,
+            [item.personId, item.workDate, item.shiftCode]
+          );
 
     if (existing.length === 0) {
-      await dbExecute(
+      const ins = await dbExecute(
         `INSERT INTO attendance (
           person_id, work_date, shift_assignment_id, shift_code, shift_name,
           scheduled_start, scheduled_end, cutoff_timestamp,
@@ -552,8 +741,10 @@ export async function reprocessAttendanceRange(options: ReprocessOptions) {
           ATTENDANCE_RULE_VERSION,
         ]
       );
+      if (ins.insertId) keptAttendanceIds.add(ins.insertId);
       insertedCount++;
     } else {
+      keptAttendanceIds.add(existing[0].id);
       await dbExecute(
         `UPDATE attendance
          SET shift_code = ?, shift_name = ?, scheduled_start = ?, scheduled_end = ?,
@@ -581,6 +772,36 @@ export async function reprocessAttendanceRange(options: ReprocessOptions) {
         ]
       );
       updatedCount++;
+    }
+  }
+
+  // ลบแถว attendance ที่ยังไม่ผ่านการตรวจของ HR (review_status = 'PENDING' และไม่มีหมายเหตุ)
+  // หากเวรในวันนั้นถูกลบออกหรือตั้งเป็นไม่มีเวร (CLEARED_ALL_SHIFTS) เพื่อไม่ให้เวรที่ลบแล้วค้างในรายงาน
+  const existingInRange = await dbQuery<{
+    id: number;
+    person_id: string;
+    review_status: string;
+  }>(
+    `SELECT id, person_id, review_status FROM attendance
+     WHERE work_date >= ? AND work_date <= ?${options.personId ? ' AND person_id = ?' : ''}`,
+    options.personId
+      ? [options.dateFrom, options.dateTo, options.personId]
+      : [options.dateFrom, options.dateTo]
+  );
+
+  for (const row of existingInRange) {
+    if (!keptAttendanceIds.has(row.id) && row.review_status === 'PENDING') {
+      const notes = await dbQuery<{ id: number }>(
+        'SELECT id FROM attendance_notes WHERE attendance_id = ? LIMIT 1',
+        [row.id]
+      );
+      const reviews = await dbQuery<{ id: number }>(
+        'SELECT id FROM hr_review_history WHERE attendance_id = ? LIMIT 1',
+        [row.id]
+      );
+      if (notes.length === 0 && reviews.length === 0) {
+        await dbExecute('DELETE FROM attendance WHERE id = ?', [row.id]);
+      }
     }
   }
 

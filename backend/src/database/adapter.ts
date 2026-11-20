@@ -137,6 +137,7 @@ async function getMysqlPool(): Promise<mysql.Pool> {
       password: cfg.samAttDb.password,
       database: cfg.samAttDb.database,
       charset: 'utf8mb4',
+      dateStrings: true,
       waitForConnections: true,
       connectionLimit: 10,
       connectTimeout: 4000,
@@ -224,11 +225,12 @@ export async function dbQuery<T = Record<string, unknown>>(
     throw new DatabaseUnavailableError('Simulated database outage');
   }
 
+  const safeParams = params.map((p) => (p === undefined ? null : p));
   const cfg = loadConfig();
   if (cfg.dbEngine === 'mysql') {
     try {
       const pool = await getMysqlPool();
-      const [rows] = await pool.execute(sql, params as any[]);
+      const [rows] = await pool.execute(sql, safeParams as any[]);
       return rows as T[];
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -241,8 +243,7 @@ export async function dbQuery<T = Record<string, unknown>>(
     const db = getSqliteInstance();
     const normalizedSql = sql.replace(/INSERT\s+IGNORE\s+INTO/gi, 'INSERT OR IGNORE INTO');
     const stmt = db.prepare(normalizedSql);
-    const safeParams = params.map((p) => (p === undefined ? null : p)) as (string | number | null)[];
-    return stmt.all(...safeParams) as T[];
+    return stmt.all(...(safeParams as (string | number | null)[])) as T[];
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[Sam_Att DB Error] SQL query execution failed: ${msg}`);
@@ -258,11 +259,12 @@ export async function dbExecute(sql: string, params: unknown[] = []): Promise<Qu
   // บังคับใช้กฎ Append-Only สำหรับตาราง raw_scans (แก้ไข P1 ข้อ 08)
   assertRawScansImmutable(sql);
 
+  const safeParams = params.map((p) => (p === undefined ? null : p));
   const cfg = loadConfig();
   if (cfg.dbEngine === 'mysql') {
     try {
       const pool = await getMysqlPool();
-      const [result] = await pool.execute(sql, params as any[]);
+      const [result] = await pool.execute(sql, safeParams as any[]);
       const header = result as mysql.ResultSetHeader;
       return {
         insertId: header.insertId,
@@ -278,8 +280,7 @@ export async function dbExecute(sql: string, params: unknown[] = []): Promise<Qu
   const db = getSqliteInstance();
   const normalizedSql = sql.replace(/INSERT\s+IGNORE\s+INTO/gi, 'INSERT OR IGNORE INTO');
   const stmt = db.prepare(normalizedSql);
-  const safeParams = params.map((p) => (p === undefined ? null : p)) as (string | number | null)[];
-  const res = stmt.run(...safeParams);
+  const res = stmt.run(...(safeParams as (string | number | null)[]));
   return {
     insertId: Number(res.lastInsertRowid),
     affectedRows: Number(res.changes),
@@ -305,12 +306,14 @@ export async function dbTransaction<T>(
       await conn.beginTransaction();
       const txContext: DbTransactionContext = {
         query: async <R = Record<string, unknown>>(sql: string, params: unknown[] = []) => {
-          const [rows] = await conn.execute(sql, params as any[]);
+          const safeParams = params.map((p) => (p === undefined ? null : p));
+          const [rows] = await conn.execute(sql, safeParams as any[]);
           return rows as R[];
         },
         execute: async (sql: string, params: unknown[] = []) => {
           assertRawScansImmutable(sql);
-          const [result] = await conn.execute(sql, params as any[]);
+          const safeParams = params.map((p) => (p === undefined ? null : p));
+          const [result] = await conn.execute(sql, safeParams as any[]);
           const header = result as mysql.ResultSetHeader;
           return {
             insertId: header.insertId,
@@ -470,66 +473,203 @@ export async function runMigrations(): Promise<{ applied: string[]; totalTables:
  * - ตรวจสอบและซ่อมแซมข้อความภาษาไทยของข้อมูลตั้งต้นที่อาจเพี้ยน (Mojibake เช่น "เธเธนเน...") จากการรัน SQL บน Windows ที่ไม่ได้ระบุ UTF-8
  */
 export async function ensureBaselineSystemCatalog(): Promise<void> {
+  // 0. Safe additive schema upgrades for existing databases (MySQL / SQLite)
+  const additiveAlterStatements = [
+    "ALTER TABLE personnel_type_rules ADD COLUMN default_start_time VARCHAR(5) NOT NULL DEFAULT '08:00'",
+    "ALTER TABLE personnel_type_rules ADD COLUMN default_end_time VARCHAR(5) NOT NULL DEFAULT '16:00'",
+    "ALTER TABLE personnel_type_rules ADD COLUMN default_cutoff_time VARCHAR(5) NOT NULL DEFAULT '11:00'",
+    "ALTER TABLE personnel_type_rules ADD COLUMN effective_from DATE NOT NULL DEFAULT '2026-01-01'",
+    'ALTER TABLE personnel_type_rules ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1',
+  ];
+  for (const alterSql of additiveAlterStatements) {
+    try {
+      await dbExecute(alterSql);
+    } catch {
+      // Column already exists
+    }
+  }
+
+  const cfg = loadConfig();
+  if (cfg.dbEngine === 'mysql') {
+    await dbExecute(`
+      CREATE TABLE IF NOT EXISTS personnel_type_rule_history (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        rule_id INT NOT NULL,
+        personnel_type_code VARCHAR(64) NOT NULL,
+        personnel_type_name VARCHAR(150) NOT NULL,
+        default_start_time VARCHAR(5) NOT NULL,
+        default_end_time VARCHAR(5) NOT NULL,
+        default_grace_minutes INT NOT NULL,
+        default_cutoff_time VARCHAR(5) NOT NULL,
+        effective_from DATE NOT NULL,
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        action_type VARCHAR(32) NOT NULL,
+        changed_by VARCHAR(64) NOT NULL,
+        changed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_ptrh_code_eff (personnel_type_code, effective_from)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await dbExecute(`
+      CREATE TABLE IF NOT EXISTS shift_daily_overrides (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        person_id VARCHAR(64) NOT NULL,
+        work_date DATE NOT NULL,
+        override_state VARCHAR(32) NOT NULL,
+        reason TEXT NULL,
+        updated_by VARCHAR(64) NOT NULL,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_sdo_person_date (person_id, work_date),
+        INDEX idx_sdo_date (work_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await dbExecute(`
+      CREATE TABLE IF NOT EXISTS shift_import_logs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        filename VARCHAR(255) NOT NULL,
+        total_rows INT NOT NULL DEFAULT 0,
+        valid_rows INT NOT NULL DEFAULT 0,
+        invalid_rows INT NOT NULL DEFAULT 0,
+        imported_count INT NOT NULL DEFAULT 0,
+        skipped_count INT NOT NULL DEFAULT 0,
+        imported_by VARCHAR(64) NOT NULL,
+        summary_json LONGTEXT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+  }
+
   const baselineRules = [
     {
       code: 'CIVIL_SERVANT',
       name: 'ข้าราชการ',
+      startTime: '08:00',
+      endTime: '16:00',
       grace: 15,
+      cutoffTime: '11:00',
+      effectiveFrom: '2026-01-01',
       before: 120,
       after: 240,
       reqOut: 1,
       overlap: 0,
-      version: 'v2.1.0-tz-bkk',
+      version: 'v2.2.0-bkk',
     },
     {
       code: 'PUBLIC_HEALTH_EMP',
       name: 'พนักงานกระทรวงสาธารณสุข (พกส.)',
+      startTime: '08:00',
+      endTime: '16:00',
       grace: 15,
+      cutoffTime: '11:00',
+      effectiveFrom: '2026-01-01',
       before: 120,
       after: 240,
       reqOut: 1,
       overlap: 1,
-      version: 'v2.1.0-tz-bkk',
+      version: 'v2.2.0-bkk',
     },
     {
       code: 'TEMP_EMPLOYEE',
       name: 'ลูกจ้างชั่วคราว (รายเดือน/รายวัน)',
+      startTime: '08:00',
+      endTime: '16:00',
       grace: 10,
+      cutoffTime: '11:00',
+      effectiveFrom: '2026-01-01',
       before: 120,
       after: 240,
       reqOut: 1,
       overlap: 1,
-      version: 'v2.1.0-tz-bkk',
+      version: 'v2.2.0-bkk',
+    },
+    {
+      code: 'GOV_EMPLOYEE',
+      name: 'พนักงานราชการ',
+      startTime: '08:00',
+      endTime: '16:00',
+      grace: 15,
+      cutoffTime: '11:00',
+      effectiveFrom: '2026-01-01',
+      before: 120,
+      after: 240,
+      reqOut: 1,
+      overlap: 0,
+      version: 'v2.2.0-bkk',
+    },
+    {
+      code: 'PERMANENT_EMP',
+      name: 'ลูกจ้างประจำ',
+      startTime: '07:30',
+      endTime: '16:00',
+      grace: 0,
+      cutoffTime: '11:00',
+      effectiveFrom: '2026-01-01',
+      before: 120,
+      after: 240,
+      reqOut: 1,
+      overlap: 0,
+      version: 'v2.2.0-bkk',
     },
   ];
 
   for (const r of baselineRules) {
     await dbExecute(
       `INSERT IGNORE INTO personnel_type_rules (
-        personnel_type_code, personnel_type_name, default_grace_minutes,
+        personnel_type_code, personnel_type_name, default_start_time, default_end_time,
+        default_grace_minutes, default_cutoff_time, effective_from, is_active,
         CheckinWindowBeforeMinutes, CheckoutWindowAfterMinutes, require_checkout,
         allow_overlapping_shifts, rule_version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [r.code, r.name, r.grace, r.before, r.after, r.reqOut, r.overlap, r.version]
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)`,
+      [
+        r.code,
+        r.name,
+        r.startTime,
+        r.endTime,
+        r.grace,
+        r.cutoffTime,
+        r.effectiveFrom,
+        r.before,
+        r.after,
+        r.reqOut,
+        r.overlap,
+        r.version,
+      ]
     );
-    const existingRule = await dbQuery<{ personnel_type_name: string }>(
-      'SELECT personnel_type_name FROM personnel_type_rules WHERE personnel_type_code = ? LIMIT 1',
+    const existingRule = await dbQuery<{
+      personnel_type_name: string;
+      default_start_time: string | null;
+      default_cutoff_time: string | null;
+    }>(
+      'SELECT personnel_type_name, default_start_time, default_cutoff_time FROM personnel_type_rules WHERE personnel_type_code = ? LIMIT 1',
       [r.code]
     );
-    if (existingRule.length > 0 && hasThaiMojibake(existingRule[0].personnel_type_name)) {
-      await dbExecute(
-        'UPDATE personnel_type_rules SET personnel_type_name = ? WHERE personnel_type_code = ?',
-        [r.name, r.code]
-      );
+    if (existingRule.length > 0) {
+      if (hasThaiMojibake(existingRule[0].personnel_type_name)) {
+        await dbExecute(
+          'UPDATE personnel_type_rules SET personnel_type_name = ? WHERE personnel_type_code = ?',
+          [r.name, r.code]
+        );
+      }
+      if (!existingRule[0].default_start_time || !existingRule[0].default_cutoff_time) {
+        await dbExecute(
+          `UPDATE personnel_type_rules
+           SET default_start_time = ?, default_end_time = ?, default_grace_minutes = ?, default_cutoff_time = ?
+           WHERE personnel_type_code = ?`,
+          [r.startTime, r.endTime, r.grace, r.cutoffTime, r.code]
+        );
+      }
     }
   }
 
   const baselineShifts = [
     { id: 1, code: 'OFF-0816', name: 'เวรราชการปกติ (08:00–16:00)', cat: 'OFFICIAL', start: '08:00', end: '16:00', grace: 15, cutoff: '10:30', cross: 0 },
-    { id: 2, code: 'MOR-0816', name: 'เวรเช้า (08:00–16:00)', cat: 'MORNING', start: '08:00', end: '16:00', grace: 15, cutoff: '10:30', cross: 0 },
-    { id: 3, code: 'AFT-1600', name: 'เวรบ่าย (16:00–00:00)', cat: 'AFTERNOON', start: '16:00', end: '00:00', grace: 15, cutoff: '18:30', cross: 1 },
-    { id: 4, code: 'NIG-0008', name: 'เวรดึก (00:00–08:00)', cat: 'NIGHT', start: '00:00', end: '08:00', grace: 15, cutoff: '02:30', cross: 0 },
-    { id: 5, code: 'EXT-2008', name: 'เวรข้ามวัน 12 ชม. (20:00–08:00)', cat: 'SPECIAL', start: '20:00', end: '08:00', grace: 15, cutoff: '22:00', cross: 1 },
+    { id: 2, code: 'MOR-0816', name: 'กะเช้า (08:00–16:00)', cat: 'MORNING', start: '08:00', end: '16:00', grace: 15, cutoff: '10:30', cross: 0 },
+    { id: 3, code: 'AFT-1600', name: 'กะบ่าย (16:00–00:00)', cat: 'AFTERNOON', start: '16:00', end: '00:00', grace: 15, cutoff: '18:30', cross: 1 },
+    { id: 4, code: 'NIG-0008', name: 'กะดึก (00:00–08:00)', cat: 'NIGHT', start: '00:00', end: '08:00', grace: 15, cutoff: '02:30', cross: 0 },
+    { id: 5, code: 'EXT-2008', name: 'กะพิเศษข้ามวัน 12 ชม. (20:00–08:00)', cat: 'SPECIAL', start: '20:00', end: '08:00', grace: 15, cutoff: '22:00', cross: 1 },
+    { id: 6, code: 'MORAFT-0800', name: 'กะเช้า–บ่าย (08:00–00:00)', cat: 'SPECIAL', start: '08:00', end: '00:00', grace: 15, cutoff: '11:00', cross: 1 },
+    { id: 7, code: 'AFTNIG-1608', name: 'กะบ่าย–ดึก (16:00–08:00)', cat: 'CROSS_MIDNIGHT', start: '16:00', end: '08:00', grace: 15, cutoff: '18:00', cross: 1 },
+    { id: 8, code: 'FULL-0808', name: 'กะทั้งวัน (08:00–08:00)', cat: 'CROSS_MIDNIGHT', start: '08:00', end: '08:00', grace: 15, cutoff: '11:00', cross: 1 },
+    { id: 9, code: 'MOR-0730', name: 'กะเช้าลูกจ้างประจำ (07:30–16:00)', cat: 'MORNING', start: '07:30', end: '16:00', grace: 0, cutoff: '11:00', cross: 0 },
   ];
 
   for (const s of baselineShifts) {
@@ -625,7 +765,6 @@ export async function ensureBaselineSystemCatalog(): Promise<void> {
   }
 
   // ในโหมด REAL หากยังไม่มีบัญชีผู้ใช้ใดๆ เลย ให้สร้างเฉพาะบัญชี admin เริ่มต้น (ไม่ผูกกับบุคลากรจำลอง SAM-P001)
-  const cfg = loadConfig();
   if (cfg.dataMode === 'REAL' && allUsers.length === 0) {
     const initialAdminPassword = process.env.INITIAL_ADMIN_PASSWORD || 'Admin@SamAtt2026';
     await dbExecute(
@@ -858,6 +997,25 @@ export async function seedDemoSyntheticData(): Promise<{
         snapshot_is_cross_midnight, status, assigned_by
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 'hrstaff')`,
       [a.person_id, a.shift_id, a.work_date, a.code, a.name, a.start, a.end, a.grace, a.cutoff, a.cross]
+    );
+    await dbExecute(
+      `INSERT IGNORE INTO shift_daily_overrides (person_id, work_date, override_state, reason, updated_by)
+       VALUES (?, ?, 'CUSTOM_ASSIGNED', 'ข้อมูลตารางเวรตั้งต้น (Demo Seed)', 'hrstaff')`,
+      [a.person_id, a.work_date]
+    );
+  }
+
+  // SAM-P002 พักเวรในวันที่ 2026-11-13 หลังลงเวรดึกข้ามวัน และ SAM-P005 ยังไม่มีเวรในช่วงทดสอบ
+  const demoClearedDays = [
+    { person_id: 'SAM-P002', work_date: '2026-11-13', reason: 'วันหยุดพักเวรหลังลงกะข้ามเที่ยงคืน' },
+    { person_id: 'SAM-P005', work_date: '2026-11-12', reason: 'รอผูก FINGLE_ID ก่อนจัดตารางเวร' },
+    { person_id: 'SAM-P005', work_date: '2026-11-13', reason: 'รอผูก FINGLE_ID ก่อนจัดตารางเวร' },
+  ];
+  for (const cd of demoClearedDays) {
+    await dbExecute(
+      `INSERT IGNORE INTO shift_daily_overrides (person_id, work_date, override_state, reason, updated_by)
+       VALUES (?, ?, 'CLEARED_ALL_SHIFTS', ?, 'hrstaff')`,
+      [cd.person_id, cd.work_date, cd.reason]
     );
   }
 

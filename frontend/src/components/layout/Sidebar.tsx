@@ -167,8 +167,8 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
       },
       {
         key: 'deployment',
-        label: 'ศูนย์ควบคุมการอัปเดตระบบ',
-        subLabel: 'ตรวจสอบความพร้อมและสำรองข้อมูล',
+        label: 'อัปเดตระบบ Sam_Att',
+        subLabel: 'อัปเดตระบบอัตโนมัติด้วยปุ่มเดียว',
         roles: ['ADMIN'],
         icon: Rocket,
       },
@@ -240,14 +240,14 @@ export function Sidebar({
 
       <aside
         aria-label="เมนูนำทางหลัก"
-        className={`fixed lg:static top-0 bottom-0 left-0 z-50 w-64 bg-white border-r border-[#E7E2E5] flex flex-col transition-transform duration-200 ease-out shrink-0 ${
+        className={`fixed lg:static top-0 bottom-0 left-0 z-50 w-64 bg-white border-r border-[#E7E2F0] flex flex-col transition-transform duration-200 ease-out shrink-0 ${
           mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
         }`}
       >
         {/* Mobile Drawer Header */}
-        <div className="lg:hidden px-5 py-4 border-b border-[#E7E2E5] flex items-center justify-between bg-[#FFF9F9]">
+        <div className="lg:hidden px-5 py-4 border-b border-[#E7E2F0] flex items-center justify-between bg-[#FAF9FD]">
           <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-[#B45363] text-white flex items-center justify-center">
+            <div className="w-8 h-8 rounded-lg bg-[#8B73C7] text-white flex items-center justify-center">
               <HeartHandshake className="w-4 h-4" />
             </div>
             <span className="font-bold text-[15px] text-[#273244]">โรงพยาบาลสามชุก</span>
@@ -255,7 +255,7 @@ export function Sidebar({
           <button
             type="button"
             onClick={onCloseMobile}
-            className="p-1.5 rounded-lg text-[#596579] hover:text-[#273244] hover:bg-[#F8F6F7]"
+            className="p-1.5 rounded-lg text-[#596579] hover:text-[#273244] hover:bg-[#F3EEFC]"
             aria-label="ปิดเมนูนำทาง"
           >
             <X className="w-5 h-5" />
@@ -301,13 +301,13 @@ export function Sidebar({
                           title={item.subLabel}
                           className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-[14.5px] rounded-xl transition-colors text-left ${
                             isActive
-                              ? 'bg-[#F9E8EB] text-[#9F3F50] font-semibold shadow-2xs'
-                              : 'text-[#273244] hover:bg-[#F8F6F7] font-medium'
+                              ? 'bg-[#F3EEFC] text-[#7359B4] font-semibold shadow-2xs'
+                              : 'text-[#273244] hover:bg-[#FAF9FD] font-medium'
                           }`}
                         >
                           <Icon
                             className={`w-4.5 h-4.5 shrink-0 ${
-                              isActive ? 'text-[#B45363]' : 'text-[#596579]'
+                              isActive ? 'text-[#8B73C7]' : 'text-[#596579]'
                             }`}
                           />
                           <span className="truncate leading-snug">{item.label}</span>
@@ -322,13 +322,13 @@ export function Sidebar({
         </nav>
 
         {/* Readable Current User Card */}
-        <div className="p-4 m-3.5 bg-[#FFF9F9] border border-[#E7E2E5] rounded-xl space-y-1.5">
-          <div className="text-[12px] font-semibold text-[#9F3F50]">ผู้ปฏิบัติงานปัจจุบัน</div>
+        <div className="p-4 m-3.5 bg-[#FAF9FD] border border-[#E7E2F0] rounded-xl space-y-1.5">
+          <div className="text-[12px] font-semibold text-[#7359B4]">ผู้ปฏิบัติงานปัจจุบัน</div>
           <div className="text-[14.5px] font-bold text-[#273244] truncate">{user.displayName}</div>
           <div className="text-[12.5px] text-[#596579] font-mono">
             รหัสบุคลากร: {user.approvedPersonId || 'ยังไม่ผูกชื่อบุคลากร'}
           </div>
-          <div className="text-[12.5px] text-[#596579] leading-snug pt-1.5 border-t border-[#E7E2E5]">
+          <div className="text-[12.5px] text-[#596579] leading-snug pt-1.5 border-t border-[#E7E2F0]">
             {user.role === 'GENERAL_USER' && 'สิทธิ์: ดูข้อมูลเวลาของตนเอง'}
             {user.role === 'RESPONSIBLE_STAFF' && 'สิทธิ์: เจ้าหน้าที่บริหารงานบุคคล (HR)'}
             {user.role === 'ADMIN' && 'สิทธิ์: ผู้ดูแลระบบทั้งหมด'}

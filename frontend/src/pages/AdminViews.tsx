@@ -1,30 +1,28 @@
 /**
  * ============================================================================
  * ไฟล์: frontend/src/pages/AdminViews.tsx
- * หน้าที่: หน้าจอจัดการระบบสำหรับผู้ดูแลระบบ (ADMIN) และผู้รับผิดชอบ (RESPONSIBLE_STAFF)
+ * หน้าที่: หน้าจอจัดการระบบสำหรับผู้ดูแลระบบ (ADMIN)
  * ============================================================================
- * ประกอบด้วย 3 คอมโพเนนต์หลัก:
- * 1. ScannersView:
- *    - จัดการทะเบียนเครื่องสแกนลายนิ้วมือ (Scanner Devices) และการตั้งเวลาซิงก์อัตโนมัติ (00:00 / 08:00 น.)
- *    - ปุ่มสั่งดึงข้อมูลจากเครื่องสแกนทันที (Trigger Scanner Sync)
- * 2. UsersView (เฉพาะ ADMIN):
- *    - จัดการบัญชีผู้ใช้งานระบบ (App Users) กำหนดระดับสิทธิ์ 3 ระดับ (ADMIN, RESPONSIBLE_STAFF, GENERAL_USER)
- *    - ผูกบัญชีผู้ใช้งานเข้ากับรหัสบุคลากร (PERSON_ID) เพื่อใช้บังคับสิทธิ์ Own-Only
- * 3. AuditView:
- *    - ตรวจสอบประวัติการใช้งานระบบและแก้ไขข้อมูล (Immutable Audit Trail)
- *    - ตรวจสอบสถานะความพร้อมของฐานข้อมูล (System Health Check)
+ * ประกอบด้วย:
+ * 1. UsersView (mode === 'users'): จัดการบัญชีผู้ใช้งานระบบและผูกชื่อบุคลากร
+ * 2. AuditView (mode === 'auditLogs'): ประวัติการใช้งานและบันทึกความปลอดภัย (Immutable Audit Trail)
+ * 3. SettingsView (mode === 'settings'): ตั้งค่าระบบและตรวจสอบสถานะการเชื่อมต่อ
+ * 4. DeploymentView (mode === 'deployment'): หน้า "อัปเดตระบบ Sam_Att" แบบปุ่มเดียว (Section 12)
+ *    เรียกใช้ C:\inetpub\wwwroot\Sam_Att\deployment\Deploy_Sam_Att.bat อย่างปลอดภัยสำหรับ ADMIN เท่านั้น
  * ============================================================================
  */
 
 import React, { useEffect, useState, useCallback } from 'react';
 import {
   Plus,
-  Shield,
+  Rocket,
   Activity,
   CheckCircle2,
   RotateCcw,
   Search,
   PanelRightOpen,
+  Clock,
+  Terminal,
 } from 'lucide-react';
 import { apiRequest, ApiClientError, type UserRole } from '../services/api.ts';
 import { ErrorBanner, RoleLabel } from '../components/StatusText.tsx';
@@ -36,6 +34,8 @@ import {
   SlideOverDrawer,
   TableEmptyState,
   RequiredMark,
+  ConfirmDialog,
+  ProgressDialog,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
 import { formatThaiDateTime } from '../utils/thaiFormat.ts';
@@ -68,13 +68,17 @@ export function AdminViews({
   const [health, setHealth] = useState<any>(null);
   const [integrityAudit, setIntegrityAudit] = useState<any>(null);
 
-  // Deployment state
+  // Simple One-Button Deployment state (Section 12)
   const [deployStatus, setDeployStatus] = useState<any>(null);
-  const [preflightData, setPreflightData] = useState<any>(null);
-  const [adminPassword, setAdminPassword] = useState('');
-  const [commitSha, setCommitSha] = useState('a1b2c3d4e5f60718293a4b5c6d7e8f9012345678');
-  const [artifactFilePath, setArtifactFilePath] = useState('sam_att_release_2.0.1-standalone.artifact.json');
-  const [artifactSha256, setArtifactSha256] = useState('');
+  const [confirmDeployOpen, setConfirmDeployOpen] = useState(false);
+  const [deployProgressOpen, setDeployProgressOpen] = useState(false);
+  const [deployRunning, setDeployRunning] = useState(false);
+  const [deployStepLabel, setDeployStepLabel] = useState('เตรียมความพร้อมก่อนอัปเดตระบบ...');
+  const [deployPercent, setDeployPercent] = useState<number | null>(null);
+  const [deployResultState, setDeployResultState] = useState<'RUNNING' | 'SUCCESS' | 'FAILED'>('RUNNING');
+  const [deploySummaryText, setDeploySummaryText] = useState<string | null>(null);
+  const [deployErrorText, setDeployErrorText] = useState<string | null>(null);
+  const [lastDeployOutput, setLastDeployOutput] = useState<string | null>(null);
 
   // Sorting & Pagination for Audit Logs
   const [sortKey, setSortKey] = useState('created_at');
@@ -106,11 +110,6 @@ export function AdminViews({
       } else if (mode === 'deployment') {
         const res = await apiRequest('/deployment/status');
         setDeployStatus(res);
-        if (res?.candidateArtifact) {
-          setCommitSha(res.candidateArtifact.commitSha || 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678');
-          setArtifactFilePath(res.candidateArtifact.artifactFilePath || 'sam_att_release_2.0.1-standalone.artifact.json');
-          setArtifactSha256((prev) => prev || res.candidateArtifact.artifactSha256 || '');
-        }
       }
     } catch (err) {
       if (err instanceof ApiClientError) {
@@ -180,70 +179,45 @@ export function AdminViews({
     }
   }
 
-  async function handleRunPreflight() {
+  async function handleExecuteOneButtonUpdate() {
+    setConfirmDeployOpen(false);
     setError(null);
     setNotice(null);
-    try {
-      const res = await apiRequest('/deployment/preflight', { method: 'POST' });
-      setPreflightData(res);
-      setNotice('ตรวจสอบความพร้อมของระบบก่อนอัปเดต (Preflight Check) เรียบร้อยแล้ว');
-    } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
-    }
-  }
+    setDeployRunning(true);
+    setDeployProgressOpen(true);
+    setDeployResultState('RUNNING');
+    setDeployStepLabel('กำลังรันสคริปต์ Deploy_Sam_Att.bat (สำรองข้อมูล · อัปเดต · ตรวจสอบระบบ)...');
+    setDeployPercent(null);
+    setDeploySummaryText(null);
+    setDeployErrorText(null);
 
-  async function handleApproveDeployment(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setNotice(null);
     try {
-      const res = await apiRequest('/deployment/approve', {
+      const res = await apiRequest('/deployment/run-bat', {
         method: 'POST',
-        body: JSON.stringify({
-          adminPassword,
-          releaseVersion: '2.0.1-standalone',
-          commitSha,
-          artifactFilePath,
-          artifactSha256,
-        }),
+        body: JSON.stringify({ confirmRun: true }),
       });
-      setAdminPassword('');
-      setNotice(
-        res.message ||
-          `ดำเนินการอัปเดตสำเร็จ (รหัส #${res.deploymentId} · สถานะ ${res.status}) พร้อมสร้างไฟล์สำรองข้อมูลจริงที่ ${res.backupArchivePath}`
+      setDeployPercent(100);
+      setDeployResultState('SUCCESS');
+      setDeployStepLabel('อัปเดตระบบ Sam_Att สำเร็จ');
+      setDeploySummaryText(
+        res.message || 'อัปเดตระบบ Sam_Att V2 Standalone สำเร็จเรียบร้อยแล้ว (Exit Code: 0)'
       );
+      setLastDeployOutput(res.output || null);
+      setNotice('อัปเดตระบบ Sam_Att สำเร็จเรียบร้อยแล้ว');
       await loadData();
     } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
+      setDeployPercent(null);
+      setDeployResultState('FAILED');
+      setDeployStepLabel('การอัปเดตระบบไม่สำเร็จ');
+      const msg =
+        err instanceof ApiClientError
+          ? err.message
+          : 'เกิดข้อผิดพลาดระหว่างรันสคริปต์อัปเดตระบบ';
+      setDeployErrorText(msg);
+      setError({ message: msg });
       await loadData();
-    }
-  }
-
-  async function handleRollback(backupId: number) {
-    setError(null);
-    setNotice(null);
-    try {
-      const res = await apiRequest('/deployment/rollback', {
-        method: 'POST',
-        body: JSON.stringify({
-          targetBackupId: backupId,
-          reason: 'สั่งย้อนกลับเวอร์ชันผ่านศูนย์ควบคุมของผู้ดูแลระบบ',
-        }),
-      });
-      setNotice(
-        res.message ||
-          `ดำเนินการย้อนกลับไปยังเวอร์ชัน ${res.targetVersion} สำเร็จ (สถานะ ${res.status} · ผลตรวจ Health Check: ${res.healthCheckPassed ? 'ผ่าน' : 'ไม่ผ่าน'})`
-      );
-      await loadData();
-    } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
-      await loadData();
+    } finally {
+      setDeployRunning(false);
     }
   }
 
@@ -260,7 +234,7 @@ export function AdminViews({
         <NotificationBanner message={notice} onClose={() => setNotice(null)} />
 
         <form onSubmit={handleCreateUser} className="ent-card p-6 space-y-5">
-          <div className="border-b border-[#E7E2E5] pb-3">
+          <div className="border-b border-[#E7E2F0] pb-3">
             <h2 className="text-[18px] font-bold text-[#273244]">เพิ่มบัญชีผู้ใช้งานใหม่</h2>
             <p className="text-[13.5px] text-[#596579]">
               สำหรับบุคลากรทั่วไป ระบบจะใช้รหัสบุคลากรที่ผูกไว้นี้เพื่อจำกัดให้ดูได้เฉพาะข้อมูลเวลาของตนเองเท่านั้น
@@ -344,14 +318,13 @@ export function AdminViews({
         </form>
 
         <div className="ent-table-wrapper">
-          <div className="px-4 sm:px-6 py-4 border-b border-[#E7E2E5] bg-[#F8F6F7]">
+          <div className="px-4 sm:px-6 py-4 border-b border-[#E7E2F0] bg-[#FAF9FD]">
             <h2 className="text-[18px] font-bold text-[#273244]">
               รายชื่อบัญชีผู้ใช้งานทั้งหมด ({users.length} บัญชี)
             </h2>
           </div>
 
-          {/* Mobile Card List View (< 768px) */}
-          <div className="md:hidden divide-y divide-[#E7E2E5]">
+          <div className="md:hidden divide-y divide-[#E7E2F0]">
             {users.map((u) => (
               <div key={u.id} className="p-4 space-y-2 bg-white">
                 <div className="flex items-start justify-between gap-2">
@@ -363,7 +336,7 @@ export function AdminViews({
                   </div>
                   <RoleLabel role={u.role} />
                 </div>
-                <div className="p-3 rounded-lg bg-[#FFF9F9] border border-[#E7E2E5] text-[13.5px] space-y-1">
+                <div className="p-3 rounded-lg bg-[#FAF9FD] border border-[#E7E2F0] text-[13.5px] space-y-1">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[#596579]">บุคลากรที่เชื่อมโยง:</span>
                     {u.approved_person_id ? (
@@ -387,11 +360,10 @@ export function AdminViews({
             ))}
           </div>
 
-          {/* Desktop Table View (>= 768px) */}
           <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-left border-collapse text-[14px]">
               <thead>
-                <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
+                <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
                   <th className="py-3.5 px-5 font-semibold">ชื่อบัญชีผู้ใช้งาน</th>
                   <th className="py-3.5 px-5 font-semibold">ชื่อ-นามสกุล</th>
                   <th className="py-3.5 px-5 font-semibold">ระดับสิทธิ์</th>
@@ -400,9 +372,9 @@ export function AdminViews({
                   <th className="py-3.5 px-5 font-semibold">เข้าใช้งานล่าสุด</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#E7E2E5]">
+              <tbody className="divide-y divide-[#E7E2F0]">
                 {users.map((u) => (
-                  <tr key={u.id} className="hover:bg-[#FFF9F9]">
+                  <tr key={u.id} className="hover:bg-[#FAF9FD]">
                     <td className="py-4 px-5 font-mono font-bold text-[#273244]">
                       #{u.id} · {u.username}
                     </td>
@@ -414,7 +386,7 @@ export function AdminViews({
                       {u.approved_person_id ? (
                         <div>
                           <span className="font-semibold text-[#273244]">{u.full_name}</span>{' '}
-                          <span className="font-mono text-[13px] text-[#9F3F50]">
+                          <span className="font-mono text-[13px] text-[#7359B4]">
                             ({u.approved_person_id})
                           </span>
                         </div>
@@ -459,7 +431,7 @@ export function AdminViews({
         <PageHeader
           category="ตั้งค่าระบบและส่วนกลาง"
           title="ประวัติการใช้งานและบันทึกความปลอดภัย (Audit Logs)"
-          subtitle="บันทึกทุกกิจกรรมการเข้าสู่ระบบ การตรวจสอบเวลา การซิงก์ข้อมูล และการอนุมัติอัปเดตระบบ (พร้อมปิดบังรหัสผ่านอัตโนมัติ)"
+          subtitle="บันทึกทุกกิจกรรมการเข้าสู่ระบบ การตรวจสอบเวลา การซิงก์ข้อมูล และการอัปเดตระบบ (พร้อมปิดบังรหัสผ่านอัตโนมัติ)"
           actions={
             <div className="relative w-full sm:w-72">
               <Search className="w-4 h-4 text-[#596579] absolute left-3.5 top-3" aria-hidden="true" />
@@ -481,8 +453,7 @@ export function AdminViews({
         <ErrorBanner error={error} onRetry={loadData} />
 
         <div className="ent-table-wrapper">
-          {/* Mobile Card List View (< 768px) */}
-          <div className="md:hidden divide-y divide-[#E7E2E5]">
+          <div className="md:hidden divide-y divide-[#E7E2F0]">
             {loading ? (
               <div className="py-10 text-center text-[14.5px] text-[#596579]">
                 กำลังโหลดบันทึกประวัติการใช้งาน...
@@ -496,7 +467,7 @@ export function AdminViews({
                 <div key={log.id} className="p-4 space-y-2.5 bg-white">
                   <div className="flex items-start justify-between gap-2">
                     <div>
-                      <div className="font-mono font-bold text-[14.5px] text-[#9F3F50]">
+                      <div className="font-mono font-bold text-[14.5px] text-[#7359B4]">
                         {log.action}
                       </div>
                       <div className="text-[13px] font-mono text-[#596579]">
@@ -513,7 +484,7 @@ export function AdminViews({
                       {log.result === 'SUCCESS' ? 'สำเร็จ' : log.result}
                     </span>
                   </div>
-                  <div className="p-3 rounded-lg bg-[#FFF9F9] border border-[#E7E2E5] text-[13.5px] space-y-1 font-mono">
+                  <div className="p-3 rounded-lg bg-[#FAF9FD] border border-[#E7E2F0] text-[13.5px] space-y-1 font-mono">
                     <div className="flex items-center justify-between">
                       <span className="text-[#596579] font-sans">ผู้ดำเนินการ:</span>
                       <span className="font-bold text-[#273244]">
@@ -530,9 +501,9 @@ export function AdminViews({
                   <button
                     type="button"
                     onClick={() => setSelectedAuditLog(log)}
-                    className="w-full h-10 px-3.5 text-[13.5px] font-semibold text-[#273244] bg-white border border-[#D5CDD2] rounded-lg hover:bg-[#FFF1F3] hover:border-[#B45363] hover:text-[#9F3F50] inline-flex items-center justify-center gap-1.5"
+                    className="w-full h-10 px-3.5 text-[13.5px] font-semibold text-[#273244] bg-white border border-[#D5CEE6] rounded-lg hover:bg-[#F3EEFC] hover:border-[#8B73C7] hover:text-[#7359B4] inline-flex items-center justify-center gap-1.5"
                   >
-                    <PanelRightOpen className="w-4 h-4 text-[#B45363]" />
+                    <PanelRightOpen className="w-4 h-4 text-[#8B73C7]" />
                     <span>ดูข้อมูลรายละเอียด JSON</span>
                   </button>
                 </div>
@@ -540,11 +511,10 @@ export function AdminViews({
             )}
           </div>
 
-          {/* Desktop Table View (>= 768px) */}
           <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-left border-collapse text-[14px]">
               <thead>
-                <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
+                <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
                   <SortableHeader
                     label="วันและเวลา · รหัสอ้างอิง"
                     sortKey="created_at"
@@ -577,7 +547,7 @@ export function AdminViews({
                   <th className="py-3.5 px-4 text-[13.5px] font-semibold text-right">รายละเอียด</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#E7E2E5]">
+              <tbody className="divide-y divide-[#E7E2F0]">
                 {loading ? (
                   <tr>
                     <td colSpan={6} className="py-12 text-center text-[14.5px] text-[#596579]">
@@ -588,7 +558,7 @@ export function AdminViews({
                   <TableEmptyState colSpan={6} title="ไม่พบประวัติการใช้งานตามคำค้นหา" />
                 ) : (
                   pagedLogs.map((log) => (
-                    <tr key={log.id} className="hover:bg-[#FFF9F9] transition-colors">
+                    <tr key={log.id} className="hover:bg-[#FAF9FD] transition-colors">
                       <td className="py-4 px-4 font-mono tabular-nums">
                         <div className="font-semibold text-[#273244]">
                           {formatThaiDateTime(log.created_at)}
@@ -601,7 +571,7 @@ export function AdminViews({
                         <div className="font-bold text-[#273244] font-mono">{log.actor_username}</div>
                         <div className="text-[12.5px] text-[#596579]">{log.actor_role}</div>
                       </td>
-                      <td className="py-4 px-4 font-mono font-semibold text-[#9F3F50]">
+                      <td className="py-4 px-4 font-mono font-semibold text-[#7359B4]">
                         {log.action}
                       </td>
                       <td className="py-4 px-4 font-mono text-[#596579]">
@@ -620,9 +590,9 @@ export function AdminViews({
                         <button
                           type="button"
                           onClick={() => setSelectedAuditLog(log)}
-                          className="h-9 px-3.5 text-[13.5px] font-semibold text-[#273244] bg-white border border-[#D5CDD2] rounded-lg hover:bg-[#FFF1F3] hover:border-[#B45363] hover:text-[#9F3F50] inline-flex items-center gap-1.5"
+                          className="h-9 px-3.5 text-[13.5px] font-semibold text-[#273244] bg-white border border-[#D5CEE6] rounded-lg hover:bg-[#F3EEFC] hover:border-[#8B73C7] hover:text-[#7359B4] inline-flex items-center gap-1.5"
                         >
-                          <PanelRightOpen className="w-4 h-4 text-[#B45363]" />
+                          <PanelRightOpen className="w-4 h-4 text-[#8B73C7]" />
                           <span>ดูข้อมูล</span>
                         </button>
                       </td>
@@ -651,7 +621,7 @@ export function AdminViews({
         >
           {selectedAuditLog && (
             <div className="space-y-4 text-[14px]">
-              <div className="p-4 bg-[#FFF9F9] border border-[#E7E2E5] rounded-xl space-y-2 font-mono text-[13.5px]">
+              <div className="p-4 bg-[#FAF9FD] border border-[#E7E2F0] rounded-xl space-y-2 font-mono text-[13.5px]">
                 <div>รหัสคำขอ (Request ID): {selectedAuditLog.request_id}</div>
                 <div>เวลาที่เกิดเหตุการณ์: {formatThaiDateTime(selectedAuditLog.created_at)}</div>
                 <div>
@@ -686,10 +656,10 @@ export function AdminViews({
         {connections && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="ent-card p-4 sm:p-6 space-y-4">
-              <h2 className="text-[18px] font-bold text-[#273244] border-b border-[#E7E2E5] pb-3">
+              <h2 className="text-[18px] font-bold text-[#273244] border-b border-[#E7E2F0] pb-3">
                 1. ข้อมูลสถาปัตยกรรมระบบและพอร์ตเชื่อมต่อ
               </h2>
-              <dl className="divide-y divide-[#E7E2E5] text-[14px]">
+              <dl className="divide-y divide-[#E7E2F0] text-[14px]">
                 <div className="py-3 flex flex-col sm:flex-row sm:justify-between gap-1 sm:gap-4">
                   <dt className="text-[#596579]">รุ่นของระบบ (Version)</dt>
                   <dd className="font-mono font-bold text-[#273244]">
@@ -698,7 +668,7 @@ export function AdminViews({
                 </div>
                 <div className="py-3 flex flex-col sm:flex-row sm:justify-between gap-1 sm:gap-4">
                   <dt className="text-[#596579]">เวอร์ชัน Node.js เป้าหมาย</dt>
-                  <dd className="font-mono font-semibold text-[#9F3F50]">
+                  <dd className="font-mono font-semibold text-[#7359B4]">
                     {connections.system.targetNodeEngine} (รันจริง:{' '}
                     {connections.system.runtimeNodeVersion})
                   </dd>
@@ -745,10 +715,10 @@ export function AdminViews({
             </div>
 
             <div className="ent-card p-4 sm:p-6 space-y-4">
-              <h2 className="text-[18px] font-bold text-[#273244] border-b border-[#E7E2E5] pb-3">
+              <h2 className="text-[18px] font-bold text-[#273244] border-b border-[#E7E2F0] pb-3">
                 2. สถานะฐานข้อมูลและโปรแกรมอ่านเครื่องสแกน
               </h2>
-              <dl className="divide-y divide-[#E7E2E5] text-[14px]">
+              <dl className="divide-y divide-[#E7E2F0] text-[14px]">
                 <div className="py-3 flex flex-col sm:flex-row sm:justify-between gap-1 sm:gap-4">
                   <dt className="text-[#596579]">ฐานข้อมูลระบบลงเวลา (Sam_Att)</dt>
                   <dd className="font-mono font-semibold text-[#273244]">
@@ -808,7 +778,7 @@ export function AdminViews({
 
         {integrityAudit && (
           <div className="ent-card p-4 sm:p-6 space-y-4">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E7E2E5] pb-3">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E7E2F0] pb-3">
               <div>
                 <h2 className="text-[18px] font-bold text-[#273244]">
                   3. รายงานตรวจสอบข้อมูลจำลองตกค้างและรหัสภาษาไทย (Read-Only Data Integrity Audit)
@@ -828,37 +798,37 @@ export function AdminViews({
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-[13.5px]">
-              <div className="p-3 rounded-xl bg-[#FFF9F9] border border-[#E7E2E5]">
+              <div className="p-3 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0]">
                 <div className="text-[#596579]">บุคลากรจำลอง (SAM-P*)</div>
                 <div className="mt-1 text-[20px] font-mono font-bold text-[#273244]">
                   {integrityAudit.syntheticRecordsFound?.personnelCount ?? 0} รายการ
                 </div>
               </div>
-              <div className="p-3 rounded-xl bg-[#FFF9F9] border border-[#E7E2E5]">
+              <div className="p-3 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0]">
                 <div className="text-[#596579]">บัญชีทดสอบ</div>
                 <div className="mt-1 text-[20px] font-mono font-bold text-[#273244]">
                   {integrityAudit.syntheticRecordsFound?.testUsersCount ?? 0} บัญชี
                 </div>
               </div>
-              <div className="p-3 rounded-xl bg-[#FFF9F9] border border-[#E7E2E5]">
+              <div className="p-3 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0]">
                 <div className="text-[#596579]">เครื่องสแกนจำลอง (101–103)</div>
                 <div className="mt-1 text-[20px] font-mono font-bold text-[#273244]">
                   {integrityAudit.syntheticRecordsFound?.demoScannersCount ?? 0} เครื่อง
                 </div>
               </div>
-              <div className="p-3 rounded-xl bg-[#FFF9F9] border border-[#E7E2E5]">
+              <div className="p-3 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0]">
                 <div className="text-[#596579]">สแกนดิบจำลอง</div>
                 <div className="mt-1 text-[20px] font-mono font-bold text-[#273244]">
                   {integrityAudit.syntheticRecordsFound?.syntheticRawScansCount ?? 0} แถว
                 </div>
               </div>
-              <div className="p-3 rounded-xl bg-[#FFF9F9] border border-[#E7E2E5]">
+              <div className="p-3 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0]">
                 <div className="text-[#596579]">ตารางเวรจำลอง</div>
                 <div className="mt-1 text-[20px] font-mono font-bold text-[#273244]">
                   {integrityAudit.syntheticRecordsFound?.syntheticShiftAssignmentsCount ?? 0} เวร
                 </div>
               </div>
-              <div className="p-3 rounded-xl bg-[#FFF9F9] border border-[#E7E2E5]">
+              <div className="p-3 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0]">
                 <div className="text-[#596579]">ข้อความภาษาไทยเพี้ยน</div>
                 <div
                   className={`mt-1 text-[20px] font-mono font-bold ${
@@ -872,7 +842,7 @@ export function AdminViews({
               </div>
             </div>
 
-            <div className="p-3.5 rounded-xl bg-[#F8F6F7] border border-[#E7E2E5] text-[13.5px] text-[#273244]">
+            <div className="p-3.5 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0] text-[13.5px] text-[#273244]">
               <strong>สรุปผลการตรวจสอบและผลกระทบ Foreign Key:</strong> {integrityAudit.recommendation}
             </div>
           </div>
@@ -881,230 +851,213 @@ export function AdminViews({
     );
   }
 
+  // =========================================================================
+  // โหมด 'deployment': หน้า "อัปเดตระบบ Sam_Att" แบบปุ่มเดียว (Section 12)
+  // =========================================================================
+  const latestDeploy = deployStatus?.history?.[0] || null;
+
   return (
     <div className="space-y-6">
       <PageHeader
         category="ตั้งค่าระบบและส่วนกลาง"
-        title="ศูนย์ควบคุมการอัปเดต สำรองข้อมูล และย้อนกลับเวอร์ชัน"
-        subtitle="ควบคุมการอัปเดตเฉพาะเซอร์วิสระบบลงเวลาบนพอร์ต 4101 โดยไม่กระทบต่อระบบงานอื่นของโรงพยาบาล"
-        actions={
-          <button
-            type="button"
-            onClick={handleRunPreflight}
-            className="ent-btn-primary"
-          >
-            <CheckCircle2 className="w-4 h-4" />
-            <span>ตรวจสอบความพร้อมของระบบก่อนอัปเดต</span>
-          </button>
-        }
+        title="อัปเดตระบบ Sam_Att"
+        subtitle="อัปเดตระบบ Sam_Att V2 Standalone อัตโนมัติด้วยปุ่มเดียว (ดึงโค้ดล่าสุด · สำรองฐานข้อมูล · Build · รีสตาร์ทเฉพาะเซอร์วิส Sam_Att บนพอร์ต 4101 โดยไม่กระทบ Procurement)"
       />
 
-      <ErrorBanner error={error} />
+      <ErrorBanner error={error} onRetry={loadData} />
       <NotificationBanner message={notice} onClose={() => setNotice(null)} />
 
-      {preflightData && (
-        <div className="ent-card p-4 sm:p-6 space-y-3">
-          <h2 className="text-[18px] font-bold text-[#273244]">
-            ผลการตรวจสอบความพร้อมก่อนอัปเดต:{' '}
-            <span className={preflightData.preflightPassed ? 'text-[#047857]' : 'text-[#B91C1C]'}>
-              {preflightData.preflightPassed ? 'ผ่านเกณฑ์ครบทุกข้อ' : 'ไม่ผ่านเกณฑ์'}
-            </span>
-          </h2>
-          <div className="divide-y divide-[#E7E2E5] text-[14px]">
-            {preflightData.checks?.map((c: any) => (
-              <div key={c.id} className="py-3 flex items-center justify-between gap-4">
-                <div>
-                  <span className="font-semibold text-[#273244]">{c.label}</span>
-                  <span className="ml-2 text-[#596579]">({c.detail})</span>
-                </div>
-                <span className={c.passed ? 'text-[#047857] font-bold' : 'text-[#B91C1C] font-bold'}>
-                  {c.passed ? 'ผ่าน' : 'ไม่ผ่าน'}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <form onSubmit={handleApproveDeployment} className="ent-card p-4 sm:p-6 space-y-4">
-          <div className="flex items-center gap-2.5 border-b border-[#E7E2E5] pb-3">
-            <Shield className="w-5 h-5 text-[#B45363]" />
-            <h2 className="text-[18px] font-bold text-[#273244]">
-              อนุมัติแพ็กเกจอัปเดตระบบด้วยรหัสผ่านผู้ดูแลระบบ
+      {/* การ์ดหลัก: สถานะปัจจุบันและปุ่มอัปเดตระบบเพียงปุ่มเดียว */}
+      <div className="ent-card p-6 sm:p-8 space-y-6">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-6 border-b border-[#E7E2F0]">
+          <div className="space-y-2">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-[#F3EEFC] text-[#7359B4] text-[13px] font-semibold">
+              <Rocket className="w-4 h-4" />
+              <span>ระบบอัปเดตอัตโนมัติ (Deploy_Sam_Att.bat)</span>
+            </div>
+            <h2 className="text-[22px] font-bold text-[#273244]">
+              พร้อมอัปเดตระบบ Sam_Att V2 Standalone
             </h2>
+            <p className="text-[14px] text-[#596579] max-w-2xl">
+              เมื่อกดปุ่ม <strong className="text-[#273244]">“อัปเดตระบบ”</strong> ระบบจะเรียกใช้สคริปต์มาตรฐาน{' '}
+              <code className="font-mono text-[13px] bg-[#FAF9FD] px-2 py-0.5 rounded border border-[#E7E2F0]">
+                C:\inetpub\wwwroot\Sam_Att\deployment\Deploy_Sam_Att.bat
+              </code>{' '}
+              เพื่อตรวจสอบความพร้อม สำรองข้อมูล อัปเดตโค้ด และตรวจสอบ Health Check อัตโนมัติ
+            </p>
           </div>
-          <p className="text-[13.5px] text-[#596579] leading-relaxed">
-            บันทึกเลข Commit และรหัสตรวจสอบความถูกต้อง (SHA-256) ลงฐานข้อมูล เพื่อให้สคริปต์อัปเดตบนเซิร์ฟเวอร์ตรวจสอบก่อนติดตั้งจริง
-          </p>
-          <div className="space-y-3.5">
-            <div>
-              <label className="ent-label">
-                รหัส Commit SHA ที่ต้องการอนุมัติ <RequiredMark />
-              </label>
-              <input
-                type="text"
-                required
-                value={commitSha}
-                onChange={(e) => setCommitSha(e.target.value)}
-                className="ent-input w-full font-mono"
-              />
-            </div>
-            <div>
-              <label className="ent-label">
-                รหัสตรวจสอบไฟล์แพ็กเกจ (SHA-256 Checksum) <RequiredMark />
-              </label>
-              <input
-                type="text"
-                required
-                value={artifactSha256}
-                onChange={(e) => setArtifactSha256(e.target.value)}
-                className="ent-input w-full font-mono"
-              />
-            </div>
-            <div>
-              <label className="ent-label">
-                ยืนยันรหัสผ่านของผู้ดูแลระบบ (ADMIN) <RequiredMark />
-              </label>
-              <input
-                type="password"
-                required
-                value={adminPassword}
-                onChange={(e) => setAdminPassword(e.target.value)}
-                placeholder="ระบุรหัสผ่านของ admin เพื่อยืนยันการอนุมัติ"
-                className="ent-input w-full"
-              />
-            </div>
-          </div>
-          <button type="submit" className="ent-btn-primary w-full sm:w-auto">
-            ยืนยันการอนุมัติแพ็กเกจอัปเดต
-          </button>
-        </form>
 
-        <div className="ent-card p-4 sm:p-6 space-y-4">
-          <h2 className="text-[18px] font-bold text-[#273244] border-b border-[#E7E2E5] pb-3">
-            ชุดสคริปต์จัดการเซอร์วิสบนเซิร์ฟเวอร์โรงพยาบาล
-          </h2>
-          <p className="text-[13.5px] text-[#596579]">
-            สคริปต์มาตรฐานสำหรับผู้ดูแลระบบในการติดตั้ง สำรองข้อมูล และสลับเวอร์ชันอย่างปลอดภัย:
-          </p>
-          <div className="space-y-2.5 text-[13.5px] font-mono bg-[#FFF9F9] p-4 rounded-xl border border-[#E7E2E5] text-[#273244]">
-            <div>1. scripts/install-windows.ps1 — ติดตั้งเซอร์วิสพอร์ต 4101</div>
-            <div>2. scripts/backup.ps1 — สำรองฐานข้อมูลและไฟล์ระบบ</div>
-            <div>3. scripts/deploy-test.ps1 — ตรวจสอบ SHA-256 และอัปเดต</div>
-            <div>4. scripts/restore-test.ps1 — กู้คืนข้อมูลจากชุดสำรอง</div>
-            <div>5. scripts/health-check.ps1 — ตรวจสอบสถานะ HTTPS 4101</div>
+          <div className="shrink-0">
+            <button
+              type="button"
+              disabled={deployRunning || Boolean(deployStatus?.inProgress)}
+              onClick={() => setConfirmDeployOpen(true)}
+              className="ent-btn-primary h-12 px-7 text-[15px] shadow-sm w-full sm:w-auto"
+            >
+              <Rocket className="w-5 h-5" />
+              <span>{deployRunning ? 'กำลังอัปเดตระบบ...' : 'อัปเดตระบบ'}</span>
+            </button>
           </div>
         </div>
-      </div>
 
-      <div className="ent-table-wrapper">
-        <div className="px-4 sm:px-6 py-4 border-b border-[#E7E2E5] bg-[#F8F6F7]">
-          <h2 className="text-[18px] font-bold text-[#273244]">
-            ประวัติการอนุมัติอัปเดต สำรองข้อมูล และย้อนกลับเวอร์ชัน
-          </h2>
-        </div>
+        {/* ข้อมูลสำคัญ 3 รายการตามข้อกำหนด 12.1 */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="p-4 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0] space-y-1">
+            <div className="text-[13px] font-medium text-[#596579]">เวอร์ชันปัจจุบัน</div>
+            <div className="text-[20px] font-bold font-mono text-[#273244]">
+              {deployStatus?.currentVersion || '2.0.0-standalone'}
+            </div>
+            <div className="text-[12.5px] text-[#596579]">
+              พอร์ต HTTPS {deployStatus?.httpsPort || 4101} · แยกอิสระจากระบบอื่น
+            </div>
+          </div>
 
-        {/* Mobile Card List View (< 768px) */}
-        <div className="md:hidden divide-y divide-[#E7E2E5]">
-          {deployStatus?.history?.map((h: any) => (
-            <div key={h.id} className="p-4 space-y-2.5 bg-white">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="font-mono font-bold text-[15px] text-[#273244]">
-                    #{h.id} · {h.release_version}
-                  </div>
-                  <div className="font-mono text-[13px] text-[#596579]">{h.action_type}</div>
-                </div>
+          <div className="p-4 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0] space-y-1">
+            <div className="text-[13px] font-medium text-[#596579]">สถานะการอัปเดตล่าสุด</div>
+            <div className="flex items-center gap-2 pt-0.5">
+              {latestDeploy ? (
                 <span
-                  className={`font-semibold text-[13px] px-2.5 py-0.5 rounded-md border ${
-                    h.status === 'SUCCESS'
-                      ? 'text-[#047857] bg-emerald-50 border-emerald-200'
-                      : h.status === 'FAILED'
-                        ? 'text-[#B91C1C] bg-rose-50 border-rose-200'
-                        : h.status === 'RUNNING'
-                          ? 'text-[#0369A1] bg-sky-50 border-sky-200'
-                          : 'text-[#B45309] bg-amber-50 border-amber-200'
+                  className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-[14px] font-bold border ${
+                    latestDeploy.status === 'SUCCESS'
+                      ? 'bg-emerald-50 text-[#047857] border-emerald-200'
+                      : 'bg-red-50 text-[#B91C1C] border-red-200'
                   }`}
                 >
-                  {h.status}
+                  <CheckCircle2 className="w-4 h-4" />
+                  <span>{latestDeploy.status === 'SUCCESS' ? 'อัปเดตสำเร็จ (SUCCESS)' : latestDeploy.status}</span>
                 </span>
-              </div>
-              <div className="p-3 rounded-lg bg-[#FFF9F9] border border-[#E7E2E5] text-[13px] font-mono space-y-1">
-                <div className="break-all">Commit: {h.commit_sha.slice(0, 14)}</div>
-                <div className="break-all text-[#596579]">
-                  Backup: {h.backup_archive_path || '—'}
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => handleRollback(h.id)}
-                className="w-full h-10 px-3.5 text-[13.5px] border border-[#D5CDD2] bg-white rounded-lg hover:bg-[#FFF1F3] hover:border-[#B45363] hover:text-[#9F3F50] inline-flex items-center justify-center gap-1.5 font-semibold text-[#273244] transition-colors"
-              >
-                <RotateCcw className="w-4 h-4 text-[#B45363]" />
-                <span>ย้อนกลับมารุ่นนี้</span>
-              </button>
+              ) : (
+                <span className="text-[15px] font-semibold text-[#047857]">
+                  พร้อมใช้งาน (ยังไม่เคยสั่งอัปเดตผ่านหน้าเว็บ)
+                </span>
+              )}
             </div>
-          ))}
+            <div className="text-[12.5px] text-[#596579]">
+              ผู้ดำเนินการล่าสุด: {latestDeploy?.executed_by || 'ระบบเริ่มต้น'}
+            </div>
+          </div>
+
+          <div className="p-4 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0] space-y-1">
+            <div className="text-[13px] font-medium text-[#596579]">วันที่อัปเดตล่าสุด</div>
+            <div className="text-[17px] font-bold font-mono text-[#273244] flex items-center gap-2 pt-0.5">
+              <Clock className="w-4 h-4 text-[#8B73C7] shrink-0" />
+              <span>
+                {latestDeploy?.executed_at
+                  ? formatThaiDateTime(latestDeploy.executed_at)
+                  : 'ติดตั้งรุ่นเริ่มต้น'}
+              </span>
+            </div>
+            <div className="text-[12.5px] text-[#596579]">
+              สำรองข้อมูลอัตโนมัติก่อนอัปเดตทุกครั้ง
+            </div>
+          </div>
         </div>
 
-        {/* Desktop Table View (>= 768px) */}
-        <div className="hidden md:block overflow-x-auto">
+        {/* ผลการอัปเดตล่าสุด (Console Output) */}
+        {(lastDeployOutput || latestDeploy?.rollback_note) && (
+          <div className="space-y-2 pt-2">
+            <div className="flex items-center gap-2 text-[14px] font-bold text-[#273244]">
+              <Terminal className="w-4 h-4 text-[#7359B4]" />
+              <span>ผลการอัปเดตล่าสุด</span>
+            </div>
+            <pre className="p-4 rounded-xl bg-[#273244] text-white font-mono text-[12.5px] overflow-x-auto leading-relaxed max-h-72">
+              {lastDeployOutput || latestDeploy?.rollback_note}
+            </pre>
+          </div>
+        )}
+      </div>
+
+      {/* ประวัติการอัปเดตย้อนหลังแบบเข้าใจง่าย */}
+      <div className="ent-table-wrapper">
+        <div className="px-5 py-4 border-b border-[#E7E2F0] bg-[#FAF9FD]">
+          <h3 className="text-[16.5px] font-bold text-[#273244]">
+            ประวัติการอัปเดตระบบ ({deployStatus?.history?.length || 0} รายการล่าสุด)
+          </h3>
+        </div>
+        <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse text-[14px]">
             <thead>
-              <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
-                <th className="py-3.5 px-5 font-semibold">รหัส · รุ่นระบบ</th>
-                <th className="py-3.5 px-5 font-semibold">ประเภทคำสั่ง</th>
-                <th className="py-3.5 px-5 font-semibold">รหัส Commit / SHA-256</th>
-                <th className="py-3.5 px-5 font-semibold">พาธไฟล์สำรองข้อมูล</th>
-                <th className="py-3.5 px-5 font-semibold">สถานะ</th>
-                <th className="py-3.5 px-5 font-semibold text-right">การจัดการ</th>
+              <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
+                <th className="py-3 px-5 font-semibold">ครั้งที่ · เวอร์ชัน</th>
+                <th className="py-3 px-5 font-semibold">วันที่และเวลา</th>
+                <th className="py-3 px-5 font-semibold">ผู้สั่งอัปเดต</th>
+                <th className="py-3 px-5 font-semibold">สถานะ</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-[#E7E2E5]">
-              {deployStatus?.history?.map((h: any) => (
-                <tr key={h.id} className="hover:bg-[#FFF9F9]">
-                  <td className="py-4 px-5 font-mono font-bold text-[#273244]">
-                    #{h.id} · {h.release_version}
-                  </td>
-                  <td className="py-4 px-5 font-mono text-[#596579]">{h.action_type}</td>
-                  <td className="py-4 px-5 font-mono text-[13px] text-[#596579]">
-                    {h.commit_sha.slice(0, 10)} · {h.artifact_sha256.slice(0, 12)}...
-                  </td>
-                  <td className="py-4 px-5 font-mono text-[13px] text-[#273244]">
-                    {h.backup_archive_path || '—'}
-                  </td>
-                  <td className="py-4 px-5">
-                    <span
-                      className={`font-semibold text-[12.5px] px-2.5 py-1 rounded-md border ${
-                        h.status === 'SUCCESS'
-                          ? 'text-[#047857] bg-emerald-50 border-emerald-200'
-                          : h.status === 'FAILED'
-                            ? 'text-[#B91C1C] bg-rose-50 border-rose-200'
-                            : h.status === 'RUNNING'
-                              ? 'text-[#0369A1] bg-sky-50 border-sky-200'
-                              : 'text-[#B45309] bg-amber-50 border-amber-200'
-                      }`}
-                    >
-                      {h.status}
-                    </span>
-                  </td>
-                  <td className="py-4 px-5 text-right">
-                    <button
-                      type="button"
-                      onClick={() => handleRollback(h.id)}
-                      className="h-9 px-3.5 text-[13.5px] border border-[#D5CDD2] bg-white rounded-lg hover:bg-[#FFF1F3] hover:border-[#B45363] hover:text-[#9F3F50] inline-flex items-center gap-1.5 whitespace-nowrap font-semibold text-[#273244] transition-colors"
-                    >
-                      <RotateCcw className="w-4 h-4 text-[#B45363]" />
-                      <span>ย้อนกลับมารุ่นนี้</span>
-                    </button>
-                  </td>
-                </tr>
-              ))}
+            <tbody className="divide-y divide-[#E7E2F0]">
+              {!deployStatus?.history || deployStatus.history.length === 0 ? (
+                <TableEmptyState
+                  colSpan={4}
+                  title="ยังไม่มีประวัติการอัปเดตระบบ"
+                  description="เมื่อกดปุ่มอัปเดตระบบ ประวัติและผลการอัปเดตจะแสดงที่นี่"
+                />
+              ) : (
+                deployStatus.history.map((h: any) => (
+                  <tr key={h.id} className="hover:bg-[#FAF9FD]">
+                    <td className="py-3.5 px-5 font-mono font-bold text-[#273244]">
+                      #{h.id} · {h.release_version}
+                    </td>
+                    <td className="py-3.5 px-5 font-mono text-[#596579]">
+                      {h.executed_at ? formatThaiDateTime(h.executed_at) : '—'}
+                    </td>
+                    <td className="py-3.5 px-5 font-mono text-[#273244]">{h.executed_by}</td>
+                    <td className="py-3.5 px-5">
+                      <span
+                        className={`font-semibold text-[12.5px] px-2.5 py-1 rounded-md border ${
+                          h.status === 'SUCCESS'
+                            ? 'text-[#047857] bg-emerald-50 border-emerald-200'
+                            : 'text-[#B91C1C] bg-red-50 border-red-200'
+                        }`}
+                      >
+                        {h.status === 'SUCCESS' ? 'สำเร็จ' : h.status}
+                      </span>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
       </div>
+
+      {/* ConfirmDialog ก่อนอัปเดตระบบ */}
+      <ConfirmDialog
+        open={confirmDeployOpen}
+        title="ยืนยันการอัปเดตระบบ Sam_Att"
+        description="ระบบจะรันสคริปต์ Deploy_Sam_Att.bat เพื่อดึงโค้ดล่าสุด สำรองฐานข้อมูล และอัปเดตระบบอัตโนมัติ"
+        confirmLabel="ยืนยันอัปเดตระบบทันที"
+        loading={deployRunning}
+        onConfirm={handleExecuteOneButtonUpdate}
+        onCancel={() => setConfirmDeployOpen(false)}
+      >
+        <div className="p-4 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0] space-y-2 text-[13.5px] text-[#273244]">
+          <div className="font-bold text-[#7359B4]">ขั้นตอนที่ระบบจะดำเนินการโดยอัตโนมัติ:</div>
+          <ul className="list-disc pl-5 space-y-1 text-[#596579]">
+            <li>ตรวจสอบความพร้อมของระบบ (Preflight Check) และสำรองฐานข้อมูล</li>
+            <li>อัปเดตซอร์สโค้ดและ Build ระบบ Frontend / Backend ใหม่</li>
+            <li>รีสตาร์ทเฉพาะเซอร์วิส Sam_Att บนพอร์ต 4101 โดยไม่กระทบระบบ Procurement</li>
+          </ul>
+        </div>
+      </ConfirmDialog>
+
+      {/* ProgressDialog แสดงความคืบหน้าขณะอัปเดต */}
+      <ProgressDialog
+        open={deployProgressOpen}
+        title="กำลังอัปเดตระบบ Sam_Att V2 Standalone"
+        stepLabel={deployStepLabel}
+        percent={deployPercent}
+        status={deployResultState}
+        summaryText={deploySummaryText}
+        errorMessage={deployErrorText}
+        onClose={() => setDeployProgressOpen(false)}
+        details={
+          lastDeployOutput ? (
+            <pre className="p-3 rounded-lg bg-[#273244] text-white font-mono text-[11.5px] overflow-x-auto max-h-48">
+              {lastDeployOutput}
+            </pre>
+          ) : undefined
+        }
+      />
     </div>
   );
 }

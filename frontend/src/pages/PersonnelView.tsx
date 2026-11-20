@@ -6,6 +6,7 @@
  * หน้าที่หลัก:
  * 1. แสดงรายชื่อบุคลากรที่ซิงก์มาจากตาราง hr_person ของฐานข้อมูล HOSOffice
  * 2. สั่งซิงก์ข้อมูลบุคลากรแบบ Read-Only (POST /api/Sam_Att/personnel/sync)
+ *    พร้อม ConfirmDialog, ProgressDialog และการกู้คืนสถานะงานอัตโนมัติเมื่อรีเฟรชหน้า (Section 10)
  * 3. ตรวจสอบและแจ้งเตือนรายการที่มีปัญหาการผูกรหัสลายนิ้วมือ (เช่น ยังไม่มี FINGLE_ID หรือรหัสซ้ำกัน)
  */
 import React, { useEffect, useState, useCallback } from 'react';
@@ -18,6 +19,8 @@ import {
   TablePaginationBar,
   NotificationBanner,
   TableEmptyState,
+  ConfirmDialog,
+  ProgressDialog,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
 import { formatThaiDate, formatThaiDateTime } from '../utils/thaiFormat.ts';
@@ -33,6 +36,15 @@ export function PersonnelView() {
   const [items, setItems] = useState<any[]>([]);
   const [syncLogs, setSyncLogs] = useState<any[]>([]);
   const [issuesData, setIssuesData] = useState<any>(null);
+
+  // Confirm & Progress Dialog state (Section 10)
+  const [confirmSyncOpen, setConfirmSyncOpen] = useState(false);
+  const [progressOpen, setProgressOpen] = useState(false);
+  const [progressStep, setProgressStep] = useState('กำลังเตรียมเชื่อมต่อฐานข้อมูล HOSOffice...');
+  const [progressPercent, setProgressPercent] = useState<number | null>(null);
+  const [progressStatus, setProgressStatus] = useState<'RUNNING' | 'SUCCESS' | 'FAILED'>('RUNNING');
+  const [progressSummary, setProgressSummary] = useState<string | null>(null);
+  const [progressError, setProgressError] = useState<string | null>(null);
 
   // Sorting & Pagination
   const [sortKey, setSortKey] = useState('person_id');
@@ -70,6 +82,40 @@ export function PersonnelView() {
     loadPersonnel();
   }, [loadPersonnel]);
 
+  // กู้คืนสถานะงานซิงก์หากเปิดหน้าจอขณะกำลังซิงก์อยู่ (Section 9 & 10)
+  useEffect(() => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+    async function checkActiveSyncJob() {
+      try {
+        const res = await apiRequest('/jobs/active?type=HOSOFFICE_PERSONNEL_SYNC');
+        if (res?.inProgress && res?.activeJob) {
+          setSyncing(true);
+          setProgressOpen(true);
+          setProgressStatus('RUNNING');
+          setProgressStep(res.activeJob.currentStep || 'กำลังซิงก์ข้อมูลบุคลากรจาก HOSOffice...');
+          setProgressPercent(
+            typeof res.activeJob.progressPercent === 'number' ? res.activeJob.progressPercent : null
+          );
+        } else if (syncing && res?.latestJob && res.latestJob.status !== 'RUNNING') {
+          setSyncing(false);
+          setProgressPercent(res.latestJob.status === 'SUCCESS' ? 100 : null);
+          setProgressStatus(res.latestJob.status === 'SUCCESS' ? 'SUCCESS' : 'FAILED');
+          setProgressStep(res.latestJob.currentStep || 'ดำเนินการเสร็จสิ้น');
+          await loadPersonnel();
+        }
+      } catch {
+        // ignore background poll error
+      }
+    }
+    checkActiveSyncJob();
+    if (syncing) {
+      timer = setInterval(checkActiveSyncJob, 1500);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [syncing, loadPersonnel]);
+
   function handleSort(key: string) {
     if (sortKey === key) {
       setSortDir((prev) => (prev === 'ASC' ? 'DESC' : 'ASC'));
@@ -80,24 +126,43 @@ export function PersonnelView() {
     setPage(1);
   }
 
-  async function handleSyncHosOffice() {
+  async function handleConfirmSyncHosOffice() {
+    setConfirmSyncOpen(false);
     setSyncing(true);
     setError(null);
     setSyncNotice(null);
+    setProgressOpen(true);
+    setProgressStatus('RUNNING');
+    setProgressStep('กำลังเชื่อมต่อฐานข้อมูล HOSOffice และดึงรายชื่อบุคลากร...');
+    setProgressPercent(null);
+    setProgressSummary(null);
+    setProgressError(null);
+
     try {
       const res = await apiRequest('/personnel/sync', {
         method: 'POST',
         body: JSON.stringify({ effectiveDate: new Date().toISOString().slice(0, 10) }),
       });
-      setSyncNotice(
-        `ซิงก์ข้อมูลจากฐานข้อมูล HOSOffice สำเร็จ: อัปเดต ${res.recordsUpserted} รายการ · พบรายการที่ต้องตรวจสอบรหัสสแกน ${res.mappingConflictsFound} รายการ`
-      );
+      const summaryMsg = `ซิงก์ข้อมูลจากฐานข้อมูล HOSOffice สำเร็จ: อ่าน ${res.recordsFetched} รายการ · อัปเดต ${res.recordsUpserted} รายการ · พบปัญหารหัสสแกน ${res.mappingConflictsFound} รายการ`;
+      setProgressPercent(100);
+      setProgressStatus('SUCCESS');
+      setProgressStep('ซิงก์ข้อมูลบุคลากรสำเร็จ');
+      setProgressSummary(summaryMsg);
+      setSyncNotice(summaryMsg);
       await loadPersonnel();
     } catch (err) {
+      const errMsg =
+        err instanceof ApiClientError
+          ? err.message
+          : 'การเชื่อมต่อฐานข้อมูล HOSOffice ล้มเหลว';
+      setProgressPercent(null);
+      setProgressStatus('FAILED');
+      setProgressStep('ซิงก์ข้อมูลบุคลากรไม่สำเร็จ');
+      setProgressError(errMsg);
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
       } else {
-        setError({ message: 'การเชื่อมต่อฐานข้อมูล HOSOffice ล้มเหลว' });
+        setError({ message: errMsg });
       }
       await loadPersonnel();
     } finally {
@@ -129,12 +194,12 @@ export function PersonnelView() {
           <button
             type="button"
             disabled={syncing}
-            onClick={handleSyncHosOffice}
+            onClick={() => setConfirmSyncOpen(true)}
             className="ent-btn-primary"
           >
             <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
             <span>
-              {syncing ? 'กำลังเชื่อมต่อ HOSOffice...' : 'ซิงก์ข้อมูลบุคลากรจาก HOSOffice'}
+              {syncing ? 'กำลังซิงก์ข้อมูลจาก HOSOffice...' : 'ซิงก์ข้อมูลบุคลากรจาก HOSOffice'}
             </span>
           </button>
         }
@@ -152,7 +217,7 @@ export function PersonnelView() {
               {items.length} คน
             </div>
           </div>
-          <div className="w-11 h-11 rounded-xl bg-[#F8F6F7] flex items-center justify-center text-[#596579]">
+          <div className="w-11 h-11 rounded-xl bg-[#F3EEFC] flex items-center justify-center text-[#7359B4]">
             <Users className="w-5 h-5" />
           </div>
         </div>
@@ -172,7 +237,7 @@ export function PersonnelView() {
         <button
           type="button"
           onClick={() => setTab('issues')}
-          className="ent-card p-5 flex items-center justify-between text-left hover:border-[#B45363] transition-colors"
+          className="ent-card p-5 flex items-center justify-between text-left hover:border-[#8B73C7] transition-colors"
         >
           <div>
             <div className="text-[13.5px] font-medium text-[#596579]">
@@ -190,13 +255,13 @@ export function PersonnelView() {
 
       {/* Filter & View Switcher */}
       <div className="ent-card p-3.5 sm:p-4 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3.5 sm:gap-4">
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 p-1 bg-[#F8F6F7] border border-[#E7E2E5] rounded-xl w-full xl:w-auto">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 p-1 bg-[#FAF9FD] border border-[#E7E2F0] rounded-xl w-full xl:w-auto">
           <button
             type="button"
             onClick={() => setTab('list')}
             className={`px-3.5 py-2 text-[13.5px] font-medium rounded-lg transition-colors text-center whitespace-nowrap ${
               tab === 'list'
-                ? 'bg-[#B45363] text-white shadow-2xs font-semibold'
+                ? 'bg-[#8B73C7] text-white shadow-2xs font-semibold'
                 : 'text-[#596579] hover:text-[#273244]'
             }`}
           >
@@ -207,7 +272,7 @@ export function PersonnelView() {
             onClick={() => setTab('issues')}
             className={`px-3.5 py-2 text-[13.5px] font-medium rounded-lg transition-colors text-center whitespace-nowrap ${
               tab === 'issues'
-                ? 'bg-[#B45363] text-white shadow-2xs font-semibold'
+                ? 'bg-[#8B73C7] text-white shadow-2xs font-semibold'
                 : 'text-[#596579] hover:text-[#273244]'
             }`}
           >
@@ -218,7 +283,7 @@ export function PersonnelView() {
             onClick={() => setTab('syncHistory')}
             className={`px-3.5 py-2 text-[13.5px] font-medium rounded-lg transition-colors text-center whitespace-nowrap ${
               tab === 'syncHistory'
-                ? 'bg-[#B45363] text-white shadow-2xs font-semibold'
+                ? 'bg-[#8B73C7] text-white shadow-2xs font-semibold'
                 : 'text-[#596579] hover:text-[#273244]'
             }`}
           >
@@ -264,15 +329,14 @@ export function PersonnelView() {
         </div>
       ) : tab === 'list' ? (
         <div className="ent-table-wrapper">
-          {/* Mobile Card View (< md) */}
-          <div className="md:hidden divide-y divide-[#E7E2E5]">
+          <div className="md:hidden divide-y divide-[#E7E2F0]">
             {pagedItems.length === 0 ? (
               <div className="p-8 text-center text-[14px] text-[#596579]">
                 ไม่พบรายชื่อบุคลากรตามเงื่อนไขที่ค้นหา
               </div>
             ) : (
               pagedItems.map((p) => (
-                <div key={p.person_id} className="p-4 space-y-2.5 bg-white hover:bg-[#FFF9F9]">
+                <div key={p.person_id} className="p-4 space-y-2.5 bg-white hover:bg-[#FAF9FD]">
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <div className="font-bold text-[15px] text-[#273244]">{p.full_name}</div>
@@ -281,7 +345,7 @@ export function PersonnelView() {
                       </div>
                     </div>
                     {p.fingle_id ? (
-                      <span className="font-mono font-bold text-[13.5px] text-[#273244] bg-[#F8F6F7] px-2.5 py-1 rounded-lg border border-[#E7E2E5] shrink-0">
+                      <span className="font-mono font-bold text-[13.5px] text-[#273244] bg-[#FAF9FD] px-2.5 py-1 rounded-lg border border-[#E7E2F0] shrink-0">
                         สแกน: {p.fingle_id}
                       </span>
                     ) : (
@@ -307,8 +371,8 @@ export function PersonnelView() {
                           {p.mapping_status === 'EMPTY_FINGLE_ID'
                             ? 'ไม่มีรหัสสแกนลายนิ้วมือ'
                             : p.mapping_status === 'DUPLICATE_FINGLE_ID'
-                            ? 'รหัสสแกนซ้ำซ้อนกัน'
-                            : p.mapping_status}
+                              ? 'รหัสสแกนซ้ำซ้อนกัน'
+                              : p.mapping_status}
                         </span>
                       </div>
                     )}
@@ -318,11 +382,10 @@ export function PersonnelView() {
             )}
           </div>
 
-          {/* Desktop Table View (>= md) */}
           <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-left border-collapse text-[14px]">
               <thead>
-                <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
+                <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
                   <SortableHeader
                     label="ชื่อ-นามสกุล · รหัสบุคลากร"
                     sortKey="full_name"
@@ -360,12 +423,12 @@ export function PersonnelView() {
                   />
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#E7E2E5]">
+              <tbody className="divide-y divide-[#E7E2F0]">
                 {pagedItems.length === 0 ? (
                   <TableEmptyState colSpan={5} title="ไม่พบรายชื่อบุคลากรตามเงื่อนไขที่ค้นหา" />
                 ) : (
                   pagedItems.map((p) => (
-                    <tr key={p.person_id} className="hover:bg-[#FFF9F9] transition-colors">
+                    <tr key={p.person_id} className="hover:bg-[#FAF9FD] transition-colors">
                       <td className="py-4 px-4">
                         <div className="font-bold text-[15px] text-[#273244]">{p.full_name}</div>
                         <div className="text-[12.5px] font-mono text-[#596579] mt-0.5">
@@ -381,7 +444,7 @@ export function PersonnelView() {
                       <td className="py-4 px-4 text-[#273244] font-medium">{p.department_name}</td>
                       <td className="py-4 px-4 font-mono tabular-nums">
                         {p.fingle_id ? (
-                          <span className="font-bold text-[14.5px] text-[#273244] bg-[#F8F6F7] px-3 py-1 rounded-lg border border-[#E7E2E5]">
+                          <span className="font-bold text-[14.5px] text-[#273244] bg-[#FAF9FD] px-3 py-1 rounded-lg border border-[#E7E2F0]">
                             {p.fingle_id}
                           </span>
                         ) : (
@@ -404,8 +467,8 @@ export function PersonnelView() {
                                 {p.mapping_status === 'EMPTY_FINGLE_ID'
                                   ? 'ไม่มีรหัสสแกนลายนิ้วมือ'
                                   : p.mapping_status === 'DUPLICATE_FINGLE_ID'
-                                  ? 'รหัสสแกนซ้ำซ้อนกัน'
-                                  : p.mapping_status}
+                                    ? 'รหัสสแกนซ้ำซ้อนกัน'
+                                    : p.mapping_status}
                               </span>
                             </div>
                             {p.mapping_issue_detail && (
@@ -433,7 +496,7 @@ export function PersonnelView() {
       ) : tab === 'issues' ? (
         <div className="space-y-6">
           <div className="ent-table-wrapper">
-            <div className="px-6 py-4 border-b border-[#E7E2E5] bg-[#FFF1F3] flex items-center justify-between">
+            <div className="px-6 py-4 border-b border-[#E7E2F0] bg-[#F3EEFC] flex items-center justify-between">
               <div>
                 <h2 className="text-[18px] font-bold text-[#273244]">
                   รายการบุคลากรที่พบปัญหาการเชื่อมโยงรหัสสแกน ({issueCount} รายการ)
@@ -442,14 +505,14 @@ export function PersonnelView() {
                   บุคลากรที่ยังไม่ได้ระบุรหัสสแกนลายนิ้วมือ (EMPTY_FINGLE_ID) หรือมีรหัสสแกนซ้ำซ้อนกันในฐานข้อมูล HOSOffice
                 </p>
               </div>
-              <span className="px-3 py-1 rounded-lg bg-white border border-[#F9E8EB] text-[13px] font-semibold text-[#9F3F50]">
+              <span className="px-3 py-1 rounded-lg bg-white border border-[#E7E2F0] text-[13px] font-semibold text-[#7359B4]">
                 ต้องแก้ไขที่ต้นทาง HOSOffice แล้วกดซิงก์ใหม่
               </span>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-[14px]">
                 <thead>
-                  <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
+                  <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
                     <th className="py-3.5 px-5 font-semibold">รหัสบุคลากร</th>
                     <th className="py-3.5 px-5 font-semibold">ชื่อ-นามสกุล</th>
                     <th className="py-3.5 px-5 font-semibold">กลุ่มงาน / หน่วยงาน</th>
@@ -457,7 +520,7 @@ export function PersonnelView() {
                     <th className="py-3.5 px-5 font-semibold">สาเหตุที่ตรวจพบ</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#E7E2E5]">
+                <tbody className="divide-y divide-[#E7E2F0]">
                   {!issuesData?.personnelIssues || issuesData.personnelIssues.length === 0 ? (
                     <TableEmptyState
                       colSpan={5}
@@ -465,7 +528,7 @@ export function PersonnelView() {
                     />
                   ) : (
                     issuesData.personnelIssues.map((issue: any) => (
-                      <tr key={issue.person_id} className="hover:bg-[#FFF9F9]">
+                      <tr key={issue.person_id} className="hover:bg-[#FAF9FD]">
                         <td className="py-4 px-5 font-mono font-semibold text-[#273244]">
                           {issue.person_id}
                         </td>
@@ -481,8 +544,8 @@ export function PersonnelView() {
                               {issue.mapping_status === 'EMPTY_FINGLE_ID'
                                 ? 'ไม่มีรหัสสแกนลายนิ้วมือ'
                                 : issue.mapping_status === 'DUPLICATE_FINGLE_ID'
-                                ? 'รหัสสแกนซ้ำซ้อนกัน'
-                                : issue.mapping_status}
+                                  ? 'รหัสสแกนซ้ำซ้อนกัน'
+                                  : issue.mapping_status}
                             </span>
                           </div>
                           {issue.mapping_issue_detail && (
@@ -500,7 +563,7 @@ export function PersonnelView() {
           </div>
 
           <div className="ent-table-wrapper">
-            <div className="px-6 py-4 border-b border-[#E7E2E5] bg-[#F8F6F7]">
+            <div className="px-6 py-4 border-b border-[#E7E2F0] bg-[#FAF9FD]">
               <h2 className="text-[18px] font-bold text-[#273244]">
                 ประวัติการเชื่อมโยงรหัสสแกนตามวันที่มีผลบังคับใช้
               </h2>
@@ -511,7 +574,7 @@ export function PersonnelView() {
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-[14px]">
                 <thead>
-                  <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
+                  <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
                     <th className="py-3.5 px-5 font-semibold">รหัสบุคลากร</th>
                     <th className="py-3.5 px-5 font-semibold">ชื่อ-นามสกุล</th>
                     <th className="py-3.5 px-5 font-semibold">รหัสสแกน (FINGLE_ID)</th>
@@ -520,12 +583,12 @@ export function PersonnelView() {
                     <th className="py-3.5 px-5 font-semibold">สถานะความถูกต้อง</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#E7E2E5]">
+                <tbody className="divide-y divide-[#E7E2F0]">
                   {issuesData?.mappingHistory?.map((m: any) => (
-                    <tr key={m.id} className="hover:bg-[#FFF9F9]">
+                    <tr key={m.id} className="hover:bg-[#FAF9FD]">
                       <td className="py-4 px-5 font-mono font-semibold text-[#273244]">{m.person_id}</td>
                       <td className="py-4 px-5 font-bold text-[#273244]">{m.full_name}</td>
-                      <td className="py-4 px-5 font-mono tabular-nums font-semibold text-[#9F3F50]">
+                      <td className="py-4 px-5 font-mono tabular-nums font-semibold text-[#7359B4]">
                         {m.fingle_id}
                       </td>
                       <td className="py-4 px-5 font-mono tabular-nums text-[#273244]">
@@ -555,7 +618,7 @@ export function PersonnelView() {
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse text-[14px]">
               <thead>
-                <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
+                <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
                   <th className="py-3.5 px-5 font-semibold">รอบการซิงก์</th>
                   <th className="py-3.5 px-5 font-semibold">วันและเวลาที่ดำเนินการ</th>
                   <th className="py-3.5 px-5 font-semibold">สถานะ</th>
@@ -565,12 +628,12 @@ export function PersonnelView() {
                   <th className="py-3.5 px-5 font-semibold">ผู้ดำเนินการ</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#E7E2E5]">
+              <tbody className="divide-y divide-[#E7E2F0]">
                 {syncLogs.length === 0 ? (
                   <TableEmptyState colSpan={7} title="ยังไม่มีประวัติการสั่งซิงก์ข้อมูลจาก HOSOffice" />
                 ) : (
                   syncLogs.map((log) => (
-                    <tr key={log.id} className="hover:bg-[#FFF9F9]">
+                    <tr key={log.id} className="hover:bg-[#FAF9FD]">
                       <td className="py-4 px-5 font-mono tabular-nums font-semibold">#{log.id}</td>
                       <td className="py-4 px-5 font-mono tabular-nums">{formatThaiDateTime(log.started_at)}</td>
                       <td className="py-4 px-5 font-semibold">
@@ -594,6 +657,29 @@ export function PersonnelView() {
           </div>
         </div>
       )}
+
+      {/* ConfirmDialog ก่อนซิงก์ HOSOffice (Section 10) */}
+      <ConfirmDialog
+        open={confirmSyncOpen}
+        title="ยืนยันการซิงก์ข้อมูลบุคลากรจาก HOSOffice"
+        description="ระบบจะดึงข้อมูลบุคลากรแบบอ่านอย่างเดียว (Read-Only) จากฐานข้อมูล HOSOffice โดยไม่ทับตารางเวรที่แก้ไขไว้"
+        confirmLabel="เริ่มซิงก์ข้อมูลบุคลากร"
+        loading={syncing}
+        onConfirm={handleConfirmSyncHosOffice}
+        onCancel={() => setConfirmSyncOpen(false)}
+      />
+
+      {/* ProgressDialog แสดงสถานะการซิงก์ HOSOffice (Section 10) */}
+      <ProgressDialog
+        open={progressOpen}
+        title="ซิงก์ข้อมูลบุคลากรจาก HOSOffice"
+        stepLabel={progressStep}
+        percent={progressPercent}
+        status={progressStatus}
+        summaryText={progressSummary}
+        errorMessage={progressError}
+        onClose={() => setProgressOpen(false)}
+      />
     </div>
   );
 }

@@ -174,7 +174,7 @@ export function ErrorBanner({
   error,
   onRetry,
 }: {
-  error: { code?: string; message: string; failClosed?: boolean } | null;
+  error: { code?: string; message: string; requestId?: string; failClosed?: boolean } | null;
   onRetry?: () => void;
 }) {
   if (!error) return null;
@@ -191,7 +191,12 @@ export function ErrorBanner({
             <span>แจ้งเตือนการตรวจสอบความปลอดภัยของระบบ</span>
             {error.code && (
               <span className="font-mono text-[12.5px] text-red-900 bg-red-100 px-2 py-0.5 rounded-md">
-                รหัสอ้างอิง: {error.code}
+                รหัสข้อผิดพลาด: {error.code}
+              </span>
+            )}
+            {error.requestId && (
+              <span className="font-mono text-[12.5px] text-red-900 bg-red-100 px-2 py-0.5 rounded-md">
+                Request ID: {error.requestId}
               </span>
             )}
           </div>

@@ -4,10 +4,12 @@
  * ไฟล์: frontend/src/pages/RawScansView.tsx
  * ============================================================================
  * หน้าที่หลัก:
- * 1. โหมด 'scanners': แสดงสถานะเครื่องสแกนนิ้ว, ตั้งเวลาดึงข้อมูลอัตโนมัติ (Sync Schedules),
- *    สั่งดึงข้อมูลจาก ScannerReader.exe ทันที และนำเข้า JSON 6 ฟิลด์ตามสัญญา
+ * 1. โหมด 'scanners':
+ *    - แสดงสถานะเครื่องสแกนนิ้ว, ตั้งเวลาดึงข้อมูลอัตโนมัติ (Sync Schedules)
+ *    - สั่งดึงข้อมูลจากเครื่องสแกนทันที พร้อม ConfirmDialog และ ProgressDialog แบบเรียลไทม์ (Section 7.2)
+ *    - ประวัติการดึงข้อมูลจากเครื่องสแกน รองรับการกรอง วันนี้ / 7 วันย้อนหลัง / 30 วันย้อนหลัง /
+ *      เลือกช่วงวันที่เอง / กรองเครื่องสแกน / กรองสถานะ และคลิกดูรายละเอียดของแต่ละรอบได้ (Section 7.1)
  * 2. โหมด 'rawScans': แสดงข้อมูลสแกนลายนิ้วมือต้นฉบับแบบห้ามแก้ไข/ลบ (Immutable)
- *    พร้อมแผงตรวจสอบ JSON 6 ฟิลด์ต้นฉบับและค่า SHA-256 Event Key
  */
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import {
@@ -19,6 +21,7 @@ import {
   AlertTriangle,
   Radio,
   Search,
+  Eye,
 } from 'lucide-react';
 import { apiRequest, ApiClientError, type AuthUser } from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
@@ -30,9 +33,14 @@ import {
   NotificationBanner,
   TableEmptyState,
   RequiredMark,
+  SharedModal,
+  ConfirmDialog,
+  ProgressDialog,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
 import { formatThaiDateTime, getCurrentBangkokDateParts } from '../utils/thaiFormat.ts';
+
+type SyncHistoryPeriod = 'TODAY' | '7D' | '30D' | 'CUSTOM' | 'ALL';
 
 export function RawScansView({
   mode,
@@ -53,6 +61,28 @@ export function RawScansView({
   const [error, setError] = useState<{ code?: string; message: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  // Sync Runs History Filters & Pagination (Section 7.1)
+  const [historyPeriod, setHistoryPeriod] = useState<SyncHistoryPeriod>('30D');
+  const [historyDateFrom, setHistoryDateFrom] = useState(initialBkk.monthStartYmd);
+  const [historyDateTo, setHistoryDateTo] = useState(initialBkk.todayYmd);
+  const [historyMachineNo, setHistoryMachineNo] = useState('');
+  const [historyStatus, setHistoryStatus] = useState('ALL');
+  const [historyItems, setHistoryItems] = useState<any[]>([]);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyPageSize, setHistoryPageSize] = useState<PageSizeOption>(10);
+  const [selectedSyncRunDetail, setSelectedSyncRunDetail] = useState<any | null>(null);
+
+  // Immediate Scanner Sync Confirm & Progress Dialog (Section 7.2)
+  const [confirmSyncOpen, setConfirmSyncOpen] = useState(false);
+  const [syncingHardware, setSyncingHardware] = useState(false);
+  const [syncProgressOpen, setSyncProgressOpen] = useState(false);
+  const [syncStepLabel, setSyncStepLabel] = useState('กำลังเชื่อมต่อเครื่องสแกนลายนิ้วมือ...');
+  const [syncPercent, setSyncPercent] = useState<number | null>(null);
+  const [syncStatus, setSyncStatus] = useState<'RUNNING' | 'SUCCESS' | 'FAILED'>('RUNNING');
+  const [syncSummaryText, setSyncSummaryText] = useState<string | null>(null);
+  const [syncErrorText, setSyncErrorText] = useState<string | null>(null);
+
   // Sorting & Pagination for Raw Scans
   const [sortKey, setSortKey] = useState('canonical_bkk_time');
   const [sortDir, setSortDir] = useState<'ASC' | 'DESC'>('DESC');
@@ -72,7 +102,7 @@ export function RawScansView({
   const [scheduleLabel, setScheduleLabel] = useState('');
   const [cronTime, setCronTime] = useState('12:30');
 
-  // 6-Field EXE Contract Payload Ingestion Test Harness
+  // 6-Field EXE Contract Payload Ingestion
   const [jsonPayloadText, setJsonPayloadText] = useState(() =>
     JSON.stringify(
       [
@@ -98,7 +128,33 @@ export function RawScansView({
     )
   );
 
-  const [syncingHardware, setSyncingHardware] = useState(false);
+  const loadSyncHistory = useCallback(async () => {
+    try {
+      const qs = new URLSearchParams({
+        period: historyPeriod,
+        status: historyStatus,
+        page: String(historyPage),
+        pageSize: String(historyPageSize === 'ALL' ? 200 : historyPageSize),
+        ...(historyPeriod === 'CUSTOM'
+          ? { dateFrom: historyDateFrom, dateTo: historyDateTo }
+          : {}),
+        ...(historyMachineNo ? { machineNo: historyMachineNo } : {}),
+      });
+      const res = await apiRequest(`/sync-runs?${qs.toString()}`);
+      setHistoryItems(res.items || []);
+      setHistoryTotal(Number(res.total || (res.items || []).length));
+    } catch {
+      // fallback to scannerData.syncRuns if needed
+    }
+  }, [
+    historyPeriod,
+    historyStatus,
+    historyPage,
+    historyPageSize,
+    historyDateFrom,
+    historyDateTo,
+    historyMachineNo,
+  ]);
 
   const loadData = useCallback(async (clearError = true) => {
     setLoading(true);
@@ -131,6 +187,45 @@ export function RawScansView({
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  useEffect(() => {
+    loadSyncHistory();
+  }, [loadSyncHistory]);
+
+  // กู้คืนสถานะการซิงก์เครื่องสแกนหากรีเฟรชหน้าจอระหว่างทำงาน (Section 7.2 & 9)
+  useEffect(() => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+    async function checkActiveScannerJob() {
+      try {
+        const res = await apiRequest('/jobs/active?type=SCANNER_MANUAL_SYNC');
+        if (res?.inProgress && res?.activeJob) {
+          setSyncingHardware(true);
+          setSyncProgressOpen(true);
+          setSyncStatus('RUNNING');
+          setSyncStepLabel(res.activeJob.currentStep || 'กำลังดึงข้อมูลจากเครื่องสแกน...');
+          setSyncPercent(
+            typeof res.activeJob.progressPercent === 'number' ? res.activeJob.progressPercent : null
+          );
+        } else if (syncingHardware && res?.latestJob && res.latestJob.status !== 'RUNNING') {
+          setSyncingHardware(false);
+          setSyncPercent(res.latestJob.status === 'SUCCESS' ? 100 : null);
+          setSyncStatus(res.latestJob.status === 'SUCCESS' ? 'SUCCESS' : 'FAILED');
+          setSyncStepLabel(res.latestJob.currentStep || 'ดำเนินการเสร็จสิ้น');
+          await loadData(false);
+          await loadSyncHistory();
+        }
+      } catch {
+        // ignore
+      }
+    }
+    checkActiveScannerJob();
+    if (syncingHardware) {
+      timer = setInterval(checkActiveScannerJob, 1500);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [syncingHardware, loadData, loadSyncHistory]);
 
   function handleSort(key: string) {
     if (sortKey === key) {
@@ -174,28 +269,60 @@ export function RawScansView({
     return filteredAndSortedScans.slice(start, start + pageSize);
   }, [filteredAndSortedScans, page, pageSize]);
 
-  async function handleTriggerHardwareSync() {
+  async function handleConfirmTriggerHardwareSync() {
+    setConfirmSyncOpen(false);
     setError(null);
     setNotice(null);
     setSyncingHardware(true);
+    setSyncProgressOpen(true);
+    setSyncStatus('RUNNING');
+    setSyncStepLabel('กำลังเชื่อมต่อเครื่องสแกนและอ่านข้อมูลสแกน 6 ฟิลด์...');
+    setSyncPercent(null);
+    setSyncSummaryText(null);
+    setSyncErrorText(null);
+
     try {
       const res = await apiRequest('/scanners/sync', {
         method: 'POST',
         body: JSON.stringify({}),
       });
-      setNotice(
-        `ดึงข้อมูลจากโปรแกรม ScannerSyncCli.exe สำเร็จ: อ่าน ${res.totalRead} รายการ · เพิ่มใหม่ ${res.newInserted} · ข้ามรายการซ้ำ ${res.duplicatesSkipped}`
-      );
+      const summary = `ดึงข้อมูลจากเครื่องสแกนสำเร็จ: อ่านทั้งหมด ${res.totalRead} รายการ · บันทึกใหม่ ${res.newInserted} รายการ · ข้ามรายการซ้ำ ${res.duplicatesSkipped} รายการ`;
+      setSyncPercent(100);
+      setSyncStatus('SUCCESS');
+      setSyncStepLabel('ดึงข้อมูลจากเครื่องสแกนเสร็จสมบูรณ์');
+      setSyncSummaryText(summary);
+      setNotice(summary);
       await loadData(false);
+      await loadSyncHistory();
     } catch (err) {
+      const errMsg =
+        err instanceof ApiClientError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'ไม่สามารถดึงข้อมูลจากเครื่องสแกนได้';
+      setSyncPercent(null);
+      setSyncStatus('FAILED');
+      setSyncStepLabel('ดึงข้อมูลจากเครื่องสแกนไม่สำเร็จ');
+      setSyncErrorText(errMsg);
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
-      } else if (err instanceof Error) {
-        setError({ message: err.message });
+      } else {
+        setError({ message: errMsg });
       }
       await loadData(false);
+      await loadSyncHistory();
     } finally {
       setSyncingHardware(false);
+    }
+  }
+
+  async function handleInspectSyncRun(runItem: any) {
+    try {
+      const res = await apiRequest(`/sync-runs/${runItem.id}`);
+      setSelectedSyncRunDetail(res.item || runItem);
+    } catch {
+      setSelectedSyncRunDetail(runItem);
     }
   }
 
@@ -213,6 +340,7 @@ export function RawScansView({
         `นำเข้าข้อมูล JSON 6 ฟิลด์สำเร็จ: อ่าน ${res.totalRead} รายการ · เพิ่มใหม่ ${res.newInserted} · ข้ามรายการซ้ำ ${res.duplicatesSkipped} รายการ`
       );
       await loadData(false);
+      await loadSyncHistory();
     } catch (err) {
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
@@ -311,11 +439,15 @@ export function RawScansView({
           <button
             type="button"
             disabled={syncingHardware}
-            onClick={handleTriggerHardwareSync}
+            onClick={() => setConfirmSyncOpen(true)}
             className="ent-btn-primary disabled:opacity-60"
           >
             <RefreshCw className={`w-4 h-4 ${syncingHardware ? 'animate-spin' : ''}`} />
-            <span>{syncingHardware ? 'กำลังดึงข้อมูลจากเครื่องสแกน...' : 'สั่งดึงข้อมูลจากเครื่องสแกนทันที'}</span>
+            <span>
+              {syncingHardware
+                ? 'กำลังดึงข้อมูลจากเครื่องสแกน...'
+                : 'สั่งดึงข้อมูลจากเครื่องสแกนทันที'}
+            </span>
           </button>
         }
       />
@@ -333,7 +465,7 @@ export function RawScansView({
                 <div key={d.id} className="ent-card p-5 flex flex-col justify-between space-y-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <div className="font-mono text-[13px] font-bold text-[#9F3F50]">
+                      <div className="font-mono text-[13px] font-bold text-[#7359B4]">
                         เครื่องสแกนหมายเลข #{d.machine_no}
                       </div>
                       <h3 className="text-[16.5px] font-bold text-[#273244] mt-0.5">
@@ -345,14 +477,14 @@ export function RawScansView({
                       className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
                         isEnabled
                           ? 'bg-emerald-50 text-[#047857]'
-                          : 'bg-[#F8F6F7] text-[#596579]'
+                          : 'bg-[#FAF9FD] text-[#596579]'
                       }`}
                     >
                       <Radio className="w-5 h-5" />
                     </div>
                   </div>
 
-                  <div className="pt-3 border-t border-[#E7E2E5] space-y-1.5 text-[13.5px]">
+                  <div className="pt-3 border-t border-[#E7E2F0] space-y-1.5 text-[13.5px]">
                     <div className="flex items-center justify-between">
                       <span className="text-[#596579]">ที่อยู่เครือข่าย:</span>
                       <span className="font-mono text-[#273244] tabular-nums">
@@ -377,7 +509,7 @@ export function RawScansView({
                         <button
                           type="button"
                           onClick={() => handleToggleScanner(d.id, Number(d.is_enabled))}
-                          className="px-3 py-1.5 text-[13px] font-semibold border border-[#D5CDD2] rounded-lg bg-white hover:bg-[#F8F6F7] text-[#273244]"
+                          className="px-3 py-1.5 text-[13px] font-semibold border border-[#D5CEE6] rounded-lg bg-white hover:bg-[#FAF9FD] text-[#273244]"
                         >
                           {isEnabled ? 'ปิดใช้งาน' : 'เปิดใช้งาน'}
                         </button>
@@ -392,7 +524,7 @@ export function RawScansView({
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             {/* 6-Field Contract JSON Ingestion Form */}
             <form onSubmit={handleIngestContractJson} className="ent-card p-6 space-y-4">
-              <div className="border-b border-[#E7E2E5] pb-3 flex items-center justify-between">
+              <div className="border-b border-[#E7E2F0] pb-3 flex items-center justify-between">
                 <div>
                   <h2 className="text-[18px] font-bold text-[#273244]">
                     นำเข้าข้อมูลสแกนตามสัญญา 6 ฟิลด์ (JSON Ingest)
@@ -407,7 +539,7 @@ export function RawScansView({
                 aria-label="ข้อมูล JSON 6 ฟิลด์ตามสัญญาโปรแกรมอ่านสแกน"
                 value={jsonPayloadText}
                 onChange={(e) => setJsonPayloadText(e.target.value)}
-                className="w-full p-3.5 text-[13.5px] font-mono border border-[#D5CDD2] rounded-xl bg-[#F8F6F7] text-[#273244]"
+                className="w-full p-3.5 text-[13.5px] font-mono border border-[#D5CEE6] rounded-xl bg-[#FAF9FD] text-[#273244]"
               />
               <button type="submit" className="ent-btn-primary w-full sm:w-auto">
                 <Upload className="w-4 h-4" />
@@ -419,7 +551,7 @@ export function RawScansView({
             <div className="space-y-6">
               {user.role === 'ADMIN' && (
                 <form onSubmit={handleAddScanner} className="ent-card p-4 sm:p-6 space-y-4">
-                  <div className="border-b border-[#E7E2E5] pb-2.5">
+                  <div className="border-b border-[#E7E2F0] pb-2.5">
                     <h2 className="text-[18px] font-bold text-[#273244]">
                       ลงทะเบียนเครื่องสแกนใหม่ (สำหรับผู้ดูแลระบบ)
                     </h2>
@@ -477,7 +609,7 @@ export function RawScansView({
                     </div>
                   </div>
                   <button type="submit" className="ent-btn-secondary w-full sm:w-auto">
-                    <Plus className="w-4 h-4 text-[#B45363]" />
+                    <Plus className="w-4 h-4 text-[#8B73C7]" />
                     <span>เพิ่มเครื่องสแกนเข้าสู่ระบบ</span>
                   </button>
                 </form>
@@ -485,7 +617,7 @@ export function RawScansView({
 
               {/* Sync Schedules Card */}
               <div className="ent-table-wrapper">
-                <div className="px-4 sm:px-6 py-4 border-b border-[#E7E2E5] bg-[#F8F6F7] flex items-center justify-between">
+                <div className="px-4 sm:px-6 py-4 border-b border-[#E7E2F0] bg-[#FAF9FD] flex items-center justify-between">
                   <h2 className="text-[17px] font-bold text-[#273244]">
                     ตารางเวลาดึงข้อมูลอัตโนมัติ ({scannerData?.schedules?.length || 0} รอบ/วัน)
                   </h2>
@@ -494,7 +626,7 @@ export function RawScansView({
                 {user.role === 'ADMIN' && (
                   <form
                     onSubmit={handleAddSchedule}
-                    className="p-4 border-b border-[#E7E2E5] bg-[#FFF9F9] flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2.5"
+                    className="p-4 border-b border-[#E7E2F0] bg-[#FAF9FD] flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-2.5"
                   >
                     <input
                       type="text"
@@ -522,16 +654,16 @@ export function RawScansView({
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse text-[14px]">
                     <thead>
-                      <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
+                      <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
                         <th className="py-3 px-4 sm:px-5 font-semibold">เวลาทำงาน</th>
                         <th className="py-3 px-4 sm:px-5 font-semibold">ชื่อรอบการซิงก์</th>
                         <th className="py-3 px-4 sm:px-5 font-semibold text-right">สถานะ</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-[#E7E2E5]">
+                    <tbody className="divide-y divide-[#E7E2F0]">
                       {scannerData?.schedules?.map((s: any) => (
-                        <tr key={s.id} className="hover:bg-[#FFF9F9]">
-                          <td className="py-3.5 px-4 sm:px-5 font-mono font-bold text-[#9F3F50]">
+                        <tr key={s.id} className="hover:bg-[#FAF9FD]">
+                          <td className="py-3.5 px-4 sm:px-5 font-mono font-bold text-[#7359B4]">
                             {s.cron_time} น.
                           </td>
                           <td className="py-3.5 px-4 sm:px-5 text-[#273244] font-medium">
@@ -545,7 +677,7 @@ export function RawScansView({
                                 className={`text-[13.5px] font-semibold px-3 py-1 rounded-lg border whitespace-nowrap ${
                                   Number(s.is_enabled) === 1
                                     ? 'text-[#047857] border-emerald-200 bg-emerald-50/70'
-                                    : 'text-[#596579] border-[#D5CDD2] bg-white'
+                                    : 'text-[#596579] border-[#D5CEE6] bg-white'
                                 }`}
                               >
                                 {Number(s.is_enabled) === 1 ? 'เปิดใช้งาน' : 'ปิดชั่วคราว'}
@@ -565,17 +697,112 @@ export function RawScansView({
             </div>
           </div>
 
-          {/* Sync Runs History Table */}
+          {/* =================================================================
+              Section 7.1: ประวัติการดึงข้อมูลจากเครื่องสแกน + ตัวกรองย้อนหลัง
+             ================================================================= */}
           <div className="ent-table-wrapper">
-            <div className="px-4 sm:px-6 py-4 border-b border-[#E7E2E5] bg-[#F8F6F7]">
-              <h2 className="text-[18px] font-bold text-[#273244]">
-                ประวัติการดึงข้อมูลจากเครื่องสแกน
-              </h2>
+            <div className="px-4 sm:px-6 py-4 border-b border-[#E7E2F0] bg-[#FAF9FD] flex flex-col xl:flex-row xl:items-center justify-between gap-3.5">
+              <div>
+                <h2 className="text-[18px] font-bold text-[#273244]">
+                  ประวัติการดึงข้อมูลจากเครื่องสแกน
+                </h2>
+                <p className="text-[13px] text-[#596579]">
+                  เลือกดูประวัติย้อนหลัง กรองตามเครื่องสแกนและสถานะ หรือคลิกที่แถวเพื่อดูรายละเอียดของรอบนั้น
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="inline-flex items-center p-1 bg-white border border-[#E7E2F0] rounded-lg">
+                  {(
+                    [
+                      { key: 'TODAY', label: 'วันนี้' },
+                      { key: '7D', label: '7 วันย้อนหลัง' },
+                      { key: '30D', label: '30 วันย้อนหลัง' },
+                      { key: 'CUSTOM', label: 'เลือกช่วงวันที่เอง' },
+                      { key: 'ALL', label: 'ทั้งหมด' },
+                    ] as Array<{ key: SyncHistoryPeriod; label: string }>
+                  ).map((p) => (
+                    <button
+                      key={p.key}
+                      type="button"
+                      onClick={() => {
+                        setHistoryPeriod(p.key);
+                        setHistoryPage(1);
+                      }}
+                      className={`px-2.5 py-1 rounded-md text-[12.5px] font-semibold transition-colors whitespace-nowrap ${
+                        historyPeriod === p.key
+                          ? 'bg-[#8B73C7] text-white'
+                          : 'text-[#596579] hover:text-[#273244]'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
+
+                {historyPeriod === 'CUSTOM' && (
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="date"
+                      aria-label="ตั้งแต่วันที่ประวัติซิงก์"
+                      value={historyDateFrom}
+                      onChange={(e) => {
+                        setHistoryDateFrom(e.target.value);
+                        setHistoryPage(1);
+                      }}
+                      className="ent-input font-mono text-[13px]"
+                    />
+                    <span className="text-[12.5px] text-[#596579]">ถึง</span>
+                    <input
+                      type="date"
+                      aria-label="ถึงวันที่ประวัติซิงก์"
+                      value={historyDateTo}
+                      onChange={(e) => {
+                        setHistoryDateTo(e.target.value);
+                        setHistoryPage(1);
+                      }}
+                      className="ent-input font-mono text-[13px]"
+                    />
+                  </div>
+                )}
+
+                <select
+                  aria-label="กรองประวัติตามเครื่องสแกน"
+                  value={historyMachineNo}
+                  onChange={(e) => {
+                    setHistoryMachineNo(e.target.value);
+                    setHistoryPage(1);
+                  }}
+                  className="ent-input text-[13px]"
+                >
+                  <option value="">ทุกเครื่องสแกน</option>
+                  {scannerData?.devices?.map((d: any) => (
+                    <option key={d.id} value={String(d.machine_no)}>
+                      เครื่อง #{d.machine_no} ({d.device_name})
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  aria-label="กรองประวัติตามสถานะ"
+                  value={historyStatus}
+                  onChange={(e) => {
+                    setHistoryStatus(e.target.value);
+                    setHistoryPage(1);
+                  }}
+                  className="ent-input text-[13px]"
+                >
+                  <option value="ALL">ทุกสถานะ</option>
+                  <option value="SUCCESS">สำเร็จ (SUCCESS)</option>
+                  <option value="FAILED">ไม่สำเร็จ (FAILED)</option>
+                </select>
+              </div>
             </div>
+
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-[14px]">
                 <thead>
-                  <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
+                  <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
                     <th className="py-3.5 px-5 font-semibold">รหัสรอบ · วันและเวลา</th>
                     <th className="py-3.5 px-5 font-semibold">ช่องทางการดึงข้อมูล</th>
                     <th className="py-3.5 px-5 font-semibold">สถานะ</th>
@@ -583,35 +810,74 @@ export function RawScansView({
                     <th className="py-3.5 px-5 font-semibold text-right">บันทึกใหม่</th>
                     <th className="py-3.5 px-5 font-semibold text-right">ข้ามรายการซ้ำ</th>
                     <th className="py-3.5 px-5 font-semibold">หมายเหตุ / ข้อผิดพลาด</th>
+                    <th className="py-3.5 px-5 font-semibold text-right">รายละเอียด</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#E7E2E5]">
-                  {scannerData?.syncRuns?.map((r: any) => (
-                    <tr key={r.id} className="hover:bg-[#FFF9F9]">
-                      <td className="py-4 px-5 font-mono tabular-nums text-[#273244]">
-                        #{r.id} · {formatThaiDateTime(r.started_at)}
-                      </td>
-                      <td className="py-4 px-5 font-mono text-[#596579]">{r.trigger_mode}</td>
-                      <td className="py-4 px-5 font-semibold">
-                        <span className={r.status === 'SUCCESS' ? 'text-[#047857]' : 'text-[#B91C1C]'}>
-                          {r.status === 'SUCCESS' ? 'สำเร็จ' : 'ขัดข้อง'}
-                        </span>
-                      </td>
-                      <td className="py-4 px-5 text-right font-mono tabular-nums">{r.total_events_read}</td>
-                      <td className="py-4 px-5 text-right font-mono tabular-nums font-bold text-[#047857]">
-                        {r.new_scans_inserted}
-                      </td>
-                      <td className="py-4 px-5 text-right font-mono tabular-nums text-[#596579]">
-                        {r.duplicate_scans_skipped}
-                      </td>
-                      <td className="py-4 px-5 text-[#596579]">
-                        {r.error_code ? `${r.error_code}: ${r.error_message}` : 'ทำงานปกติ'}
-                      </td>
-                    </tr>
-                  ))}
+                <tbody className="divide-y divide-[#E7E2F0]">
+                  {historyItems.length === 0 ? (
+                    <TableEmptyState
+                      colSpan={8}
+                      title="ไม่พบประวัติการดึงข้อมูลจากเครื่องสแกนตามเงื่อนไขที่เลือก"
+                    />
+                  ) : (
+                    historyItems.map((r: any) => (
+                      <tr
+                        key={r.id}
+                        onClick={() => handleInspectSyncRun(r)}
+                        className="hover:bg-[#FAF9FD] cursor-pointer transition-colors"
+                      >
+                        <td className="py-4 px-5 font-mono tabular-nums text-[#273244]">
+                          #{r.id} · {formatThaiDateTime(r.started_at)}
+                        </td>
+                        <td className="py-4 px-5 font-mono text-[#596579]">{r.trigger_mode}</td>
+                        <td className="py-4 px-5 font-semibold">
+                          <span
+                            className={
+                              r.status === 'SUCCESS' ? 'text-[#047857]' : 'text-[#B91C1C]'
+                            }
+                          >
+                            {r.status === 'SUCCESS' ? 'สำเร็จ' : 'ขัดข้อง'}
+                          </span>
+                        </td>
+                        <td className="py-4 px-5 text-right font-mono tabular-nums">
+                          {r.total_events_read}
+                        </td>
+                        <td className="py-4 px-5 text-right font-mono tabular-nums font-bold text-[#047857]">
+                          {r.new_scans_inserted}
+                        </td>
+                        <td className="py-4 px-5 text-right font-mono tabular-nums text-[#596579]">
+                          {r.duplicate_scans_skipped}
+                        </td>
+                        <td className="py-4 px-5 text-[#596579]">
+                          {r.error_code ? `${r.error_code}: ${r.error_message}` : 'ทำงานปกติ'}
+                        </td>
+                        <td className="py-4 px-5 text-right">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleInspectSyncRun(r);
+                            }}
+                            className="h-8 px-3 rounded-lg border border-[#D5CEE6] bg-white hover:bg-[#F3EEFC] text-[12.5px] font-semibold text-[#7359B4] inline-flex items-center gap-1"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            <span>ดูรายละเอียด</span>
+                          </button>
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
+
+            <TablePaginationBar
+              totalItems={historyTotal}
+              currentPage={historyPage}
+              pageSize={historyPageSize}
+              onPageChange={setHistoryPage}
+              onPageSizeChange={setHistoryPageSize}
+            />
           </div>
         </div>
       ) : (
@@ -671,15 +937,14 @@ export function RawScansView({
                   setOnlyMultiScan(e.target.checked);
                   setPage(1);
                 }}
-                className="w-4 h-4 rounded-xs border-[#D5CDD2] accent-[#B45363]"
+                className="w-4 h-4 rounded-xs border-[#D5CEE6] accent-[#8B73C7]"
               />
               <span>แสดงเฉพาะผู้ที่สแกนมากกว่า 1 ครั้งในวันเดียวกัน</span>
             </label>
           </div>
 
           <div className="ent-table-wrapper">
-            {/* Mobile Card List View (< 768px) */}
-            <div className="md:hidden divide-y divide-[#E7E2E5]">
+            <div className="md:hidden divide-y divide-[#E7E2F0]">
               {loading ? (
                 <div className="py-10 text-center text-[14.5px] text-[#596579]">
                   กำลังโหลดข้อมูลสแกนต้นฉบับ...
@@ -700,12 +965,12 @@ export function RawScansView({
                           {formatThaiDateTime(rs.canonical_bkk_time)}
                         </div>
                       </div>
-                      <span className="font-mono font-bold text-[13.5px] text-[#9F3F50] bg-[#FFF1F3] px-2.5 py-1 rounded-md border border-[#F9E8EB]">
+                      <span className="font-mono font-bold text-[13.5px] text-[#7359B4] bg-[#F3EEFC] px-2.5 py-1 rounded-md border border-[#E7E2F0]">
                         {rs.enroll_number}
                       </span>
                     </div>
 
-                    <div className="p-3 rounded-lg bg-[#FFF9F9] border border-[#E7E2E5] text-[13.5px] space-y-1.5">
+                    <div className="p-3 rounded-lg bg-[#FAF9FD] border border-[#E7E2F0] text-[13.5px] space-y-1.5">
                       <div className="flex items-center justify-between">
                         <span className="text-[#596579]">ประเภทสแกน:</span>
                         <span className="font-semibold text-[#273244]">
@@ -729,9 +994,9 @@ export function RawScansView({
                     <button
                       type="button"
                       onClick={() => setSelectedScanModal(rs)}
-                      className="w-full h-10 px-3.5 text-[13.5px] bg-white border border-[#D5CDD2] rounded-lg hover:bg-[#FFF1F3] hover:border-[#B45363] hover:text-[#9F3F50] inline-flex items-center justify-center gap-1.5 font-semibold text-[#273244] transition-colors"
+                      className="w-full h-10 px-3.5 text-[13.5px] bg-white border border-[#D5CEE6] rounded-lg hover:bg-[#F3EEFC] hover:border-[#8B73C7] hover:text-[#7359B4] inline-flex items-center justify-center gap-1.5 font-semibold text-[#273244] transition-colors"
                     >
-                      <PanelRightOpen className="w-4 h-4 text-[#B45363]" />
+                      <PanelRightOpen className="w-4 h-4 text-[#8B73C7]" />
                       <span>เปิดดูข้อมูล JSON 6 ฟิลด์ต้นฉบับ</span>
                     </button>
                   </div>
@@ -739,11 +1004,10 @@ export function RawScansView({
               )}
             </div>
 
-            {/* Desktop Table View (>= 768px) */}
             <div className="hidden md:block overflow-x-auto">
               <table className="w-full text-left border-collapse text-[14px]">
                 <thead>
-                  <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
+                  <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
                     <SortableHeader
                       label="ลำดับสแกน"
                       sortKey="id"
@@ -777,7 +1041,7 @@ export function RawScansView({
                     <th className="py-3.5 px-4 text-[13.5px] font-semibold text-right">ข้อมูลต้นฉบับ</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#E7E2E5]">
+                <tbody className="divide-y divide-[#E7E2F0]">
                   {loading ? (
                     <tr>
                       <td colSpan={7} className="py-12 text-center text-[14.5px] text-[#596579]">
@@ -788,7 +1052,7 @@ export function RawScansView({
                     <TableEmptyState colSpan={7} title="ไม่พบข้อมูลสแกนต้นฉบับตามตัวกรองที่เลือก" />
                   ) : (
                     pagedScans.map((rs) => (
-                      <tr key={rs.id} className="hover:bg-[#FFF9F9] transition-colors">
+                      <tr key={rs.id} className="hover:bg-[#FAF9FD] transition-colors">
                         <td className="py-4 px-4 font-mono tabular-nums font-semibold text-[#596579]">
                           #{rs.id}
                         </td>
@@ -804,7 +1068,7 @@ export function RawScansView({
                           เครื่อง #{rs.machine_no}
                         </td>
                         <td className="py-4 px-4 font-mono tabular-nums">
-                          <span className="font-bold text-[#9F3F50] bg-[#FFF1F3] px-2.5 py-1 rounded-md border border-[#F9E8EB]">
+                          <span className="font-bold text-[#7359B4] bg-[#F3EEFC] px-2.5 py-1 rounded-md border border-[#E7E2F0]">
                             {rs.enroll_number}
                           </span>
                         </td>
@@ -838,9 +1102,9 @@ export function RawScansView({
                           <button
                             type="button"
                             onClick={() => setSelectedScanModal(rs)}
-                            className="h-9 px-3.5 text-[13.5px] bg-white border border-[#D5CDD2] rounded-lg hover:bg-[#FFF1F3] hover:border-[#B45363] hover:text-[#9F3F50] inline-flex items-center gap-1.5 whitespace-nowrap font-semibold text-[#273244] transition-colors"
+                            className="h-9 px-3.5 text-[13.5px] bg-white border border-[#D5CEE6] rounded-lg hover:bg-[#F3EEFC] hover:border-[#8B73C7] hover:text-[#7359B4] inline-flex items-center gap-1.5 whitespace-nowrap font-semibold text-[#273244] transition-colors"
                           >
-                            <PanelRightOpen className="w-4 h-4 text-[#B45363]" />
+                            <PanelRightOpen className="w-4 h-4 text-[#8B73C7]" />
                             <span>ดูข้อมูล JSON</span>
                           </button>
                         </td>
@@ -880,10 +1144,10 @@ export function RawScansView({
       >
         {selectedScanModal && (
           <div className="space-y-5">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-[#FFF9F9] p-4 rounded-xl border border-[#E7E2E5]">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-[#FAF9FD] p-4 rounded-xl border border-[#E7E2F0]">
               <div>
                 <div className="text-[13px] text-[#596579]">รหัสลายนิ้วมือ (enrollNumber)</div>
-                <div className="font-mono font-bold text-[16px] text-[#9F3F50] mt-0.5">
+                <div className="font-mono font-bold text-[16px] text-[#7359B4] mt-0.5">
                   {selectedScanModal.enroll_number}
                 </div>
               </div>
@@ -893,7 +1157,7 @@ export function RawScansView({
                   {selectedScanModal.canonical_bkk_time}
                 </div>
               </div>
-              <div className="sm:col-span-2 pt-2 border-t border-[#E7E2E5]">
+              <div className="sm:col-span-2 pt-2 border-t border-[#E7E2F0]">
                 <div className="text-[13px] text-[#596579]">บุคลากรที่เชื่อมโยง</div>
                 <div className="font-bold text-[#273244] mt-0.5">
                   {selectedScanModal.matched_person_id
@@ -901,25 +1165,116 @@ export function RawScansView({
                     : `ยังไม่เชื่อมโยงบุคลากร (${selectedScanModal.mapping_state})`}
                 </div>
               </div>
-              <div className="sm:col-span-2 pt-2 border-t border-[#E7E2E5]">
+              <div className="sm:col-span-2 pt-2 border-t border-[#E7E2F0]">
                 <div className="text-[13px] text-[#596579]">รหัสป้องกันข้อมูลซ้ำ (SHA-256 Event Key)</div>
                 <div className="font-mono text-[12px] text-[#596579] break-all mt-0.5">
-                  {selectedScanModal.event_dedup_key}
+                  {selectedScanModal.unique_event_key}
                 </div>
               </div>
             </div>
 
             <div>
-              <div className="font-bold text-[#273244] mb-2">
-                ข้อมูล 6 ฟิลด์ต้นฉบับจากโปรแกรม ScannerReader.exe:
+              <div className="text-[14px] font-bold text-[#273244] mb-2">
+                ข้อมูล JSON 6 ฟิลด์ตามสัญญาจากโปรแกรม ScannerReader.exe
               </div>
-              <pre className="p-4 bg-[#273244] text-white rounded-xl font-mono text-[13px] overflow-x-auto">
-                {JSON.stringify(JSON.parse(selectedScanModal.raw_payload_json || '{}'), null, 2)}
+              <pre className="p-4 bg-[#273244] text-white rounded-xl font-mono text-[13px] overflow-x-auto leading-relaxed">
+                {selectedScanModal.raw_payload_json}
               </pre>
             </div>
           </div>
         )}
       </SlideOverDrawer>
+
+      {/* Modal แสดงรายละเอียดของรอบการดึงข้อมูลจากเครื่องสแกน (Section 7.1) */}
+      <SharedModal
+        open={Boolean(selectedSyncRunDetail)}
+        onClose={() => setSelectedSyncRunDetail(null)}
+        kickerText="รายละเอียดรอบการดึงข้อมูลจากเครื่องสแกน"
+        title={
+          selectedSyncRunDetail
+            ? `รอบการดึงข้อมูล #${selectedSyncRunDetail.id}`
+            : 'รายละเอียดรอบการดึงข้อมูล'
+        }
+        maxWidthClass="max-w-lg"
+      >
+        {selectedSyncRunDetail && (
+          <div className="space-y-3 text-[14px]">
+            <div className="p-4 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0] space-y-2">
+              <div className="flex justify-between">
+                <span className="text-[#596579]">วันและเวลาที่เริ่ม:</span>
+                <span className="font-mono font-bold text-[#273244]">
+                  {formatThaiDateTime(selectedSyncRunDetail.started_at)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#596579]">ช่องทางการสั่งซิงก์:</span>
+                <span className="font-mono text-[#273244]">{selectedSyncRunDetail.trigger_mode}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#596579]">สถานะ:</span>
+                <span
+                  className={`font-bold ${
+                    selectedSyncRunDetail.status === 'SUCCESS'
+                      ? 'text-[#047857]'
+                      : 'text-[#B91C1C]'
+                  }`}
+                >
+                  {selectedSyncRunDetail.status === 'SUCCESS' ? 'สำเร็จ (SUCCESS)' : 'ขัดข้อง (FAILED)'}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#596579]">จำนวนข้อมูลที่อ่านทั้งหมด:</span>
+                <span className="font-mono font-bold text-[#273244]">
+                  {selectedSyncRunDetail.total_events_read} รายการ
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#596579]">บันทึกสแกนใหม่สำเร็จ:</span>
+                <span className="font-mono font-bold text-[#047857]">
+                  {selectedSyncRunDetail.new_scans_inserted} รายการ
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-[#596579]">ข้ามรายการซ้ำ:</span>
+                <span className="font-mono text-[#596579]">
+                  {selectedSyncRunDetail.duplicate_scans_skipped} รายการ
+                </span>
+              </div>
+              <div className="pt-2 border-t border-[#E7E2F0]">
+                <div className="text-[#596579] mb-1">หมายเหตุ / ข้อผิดพลาด:</div>
+                <div className="font-mono text-[13px] text-[#273244]">
+                  {selectedSyncRunDetail.error_code
+                    ? `${selectedSyncRunDetail.error_code}: ${selectedSyncRunDetail.error_message}`
+                    : 'ดึงข้อมูลและประมวลผลตามปกติ'}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </SharedModal>
+
+      {/* ConfirmDialog ก่อนสั่งดึงข้อมูลจากเครื่องสแกนทันที (Section 7.2) */}
+      <ConfirmDialog
+        open={confirmSyncOpen}
+        title="ยืนยันการสั่งดึงข้อมูลจากเครื่องสแกนทันที"
+        description="ระบบจะเชื่อมต่อโปรแกรมอ่านเครื่องสแกนนิ้ว นำเข้าข้อมูลสแกนใหม่ คัดกรองข้อมูลซ้ำ และคำนวณเวลาปฏิบัติงานให้อัตโนมัติ"
+        confirmLabel="เริ่มดึงข้อมูลจากเครื่องสแกน"
+        loading={syncingHardware}
+        onConfirm={handleConfirmTriggerHardwareSync}
+        onCancel={() => setConfirmSyncOpen(false)}
+      />
+
+      {/* ProgressDialog แสดงสถานะการดึงข้อมูลจากเครื่องสแกน (Section 7.2) */}
+      <ProgressDialog
+        open={syncProgressOpen}
+        title="ดึงข้อมูลจากเครื่องสแกนลายนิ้วมือ"
+        stepLabel={syncStepLabel}
+        percent={syncPercent}
+        status={syncStatus}
+        summaryText={syncSummaryText}
+        errorMessage={syncErrorText}
+        onClose={() => setSyncProgressOpen(false)}
+      />
     </div>
   );
 }

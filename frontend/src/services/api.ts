@@ -193,3 +193,44 @@ export async function downloadLatenessCsv(params: {
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
+
+/**
+ * ฟังก์ชันดาวน์โหลดไฟล์แม่แบบตารางเวร Excel (.xlsx)
+ */
+export async function downloadShiftImportTemplateXlsx(): Promise<void> {
+  const csrfToken = inMemoryCsrfToken || readCsrfCookie();
+  const headers: Record<string, string> = {
+    'X-Requested-With': 'SamAttV2Client',
+  };
+  if (csrfToken) {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
+  if (inMemorySessionJwt) {
+    headers['Authorization'] = `Bearer ${inMemorySessionJwt}`;
+  }
+
+  const res = await fetch(`${API_BASE}/shift-assignments/import-template.xlsx`, {
+    method: 'GET',
+    credentials: 'include',
+    headers,
+  });
+
+  if (!res.ok) {
+    throw new ApiClientError(
+      res.status,
+      `HTTP_${res.status}`,
+      'ไม่สามารถดาวน์โหลดไฟล์ Template Excel ได้'
+    );
+  }
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'Sam_Att_Schedule_Import_Template.xlsx';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+

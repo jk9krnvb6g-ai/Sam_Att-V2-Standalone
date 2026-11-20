@@ -24,6 +24,12 @@ import { dbQuery, dbExecute } from '../../database/adapter.ts';
 import { getCurrentBangkokDateParts } from '../../utils/crypto.ts';
 import { requireAuth, requireRoles } from '../../middleware/auth.ts';
 import { writeAuditLog } from '../audit/service.ts';
+import {
+  startCentralJob,
+  updateCentralJobStep,
+  completeCentralJob,
+  failCentralJob,
+} from '../jobs/tracker.ts';
 
 export const hosofficeRouter = Router();
 
@@ -781,6 +787,19 @@ hosofficeRouter.post(
       }
 
       // 4. ขั้นตอนที่ 2 ของ Outbox Pattern: ตรวจ Contract และเขียนลงตารางปลายทาง HOSOffice
+      let trackedJobId: string | null = null;
+      try {
+        const job = startCentralJob({
+          jobType: 'HOSOFFICE_LIVE_PUSH',
+          actorUsername: req.user!.username,
+          initialStep: `กำลังตรวจสอบโครงสร้างตาราง ${cfg.hosofficePush.targetTable} และส่งข้อมูล ${batch.validItems.length} รายการ...`,
+          totalCount: batch.validItems.length,
+        });
+        trackedJobId = job.jobId;
+      } catch {
+        // Non-fatal if tracker already active
+      }
+
       let pushOutcome: {
         writtenCount: number;
         deduplicatedCount: number;
@@ -796,6 +815,14 @@ hosofficeRouter.post(
         const errCode = (remoteErr as { code?: string })?.code || 'HOSOFFICE_PUSH_TRANSACTION_FAILED';
         const violations = (remoteErr as { violations?: string[] })?.violations;
         const errMsg = remoteErr instanceof Error ? remoteErr.message : String(remoteErr);
+
+        if (trackedJobId) {
+          failCentralJob(trackedJobId, {
+            currentStep: 'การส่งข้อมูลเข้า HOSOffice ล้มเหลว',
+            errorCode: errCode,
+            errorMessage: errMsg,
+          });
+        }
 
         await dbExecute(
           "UPDATE push_history SET status = 'FAILED' WHERE idempotency_key = ?",
@@ -819,6 +846,7 @@ hosofficeRouter.post(
         res.status(httpStatus).json({
           status: 'FAILED',
           error: errCode,
+          jobId: trackedJobId,
           message:
             errCode === 'HOSOFFICE_SCHEMA_CONTRACT_INVALID'
               ? errMsg
@@ -832,6 +860,14 @@ hosofficeRouter.post(
       // 5. ขั้นตอนที่ 3 ของ Outbox Pattern: HOSOffice Commit สำเร็จแล้ว -> ยืนยันสถานะ SUCCESS ใน Sam_Att
       // หากการบันทึกสถานะลง Sam_Att ล้มเหลวหลัง HOSOffice Commit ไปแล้ว จะต้องแยกสถานะเป็น UNKNOWN (ห้ามอ้างว่า Rollback HOSOffice ได้)
       try {
+        if (trackedJobId) {
+          updateCentralJobStep(trackedJobId, {
+            currentStep: 'บันทึกข้อมูลลง HOSOffice สำเร็จ กำลังยืนยันสถานะในระบบ Sam_Att...',
+            processedCount: pushOutcome.writtenCount,
+            totalCount: batch.validItems.length,
+          });
+        }
+
         if (simulatePostHosOfficeCommitLocalDbFailure) {
           throw new Error('SIMULATED_LOCAL_DB_CONFIRMATION_FAILURE');
         }
@@ -840,6 +876,21 @@ hosofficeRouter.post(
           "UPDATE push_history SET status = 'SUCCESS' WHERE idempotency_key = ?",
           [idempotencyKey]
         );
+
+        if (trackedJobId) {
+          completeCentralJob(trackedJobId, {
+            currentStep: `ส่งข้อมูลเข้าตาราง ${cfg.hosofficePush.targetTable} สำเร็จ (${pushOutcome.writtenCount} รายการ)`,
+            processedCount: pushOutcome.writtenCount,
+            totalCount: batch.validItems.length,
+            resultSummary: {
+              targetTable: cfg.hosofficePush.targetTable,
+              idempotencyKey,
+              writtenCount: pushOutcome.writtenCount,
+              deduplicatedCount: pushOutcome.deduplicatedCount,
+              skippedInvalidCount: batch.invalidItems.length,
+            },
+          });
+        }
 
         await writeAuditLog({
           requestId: req.requestId,
@@ -862,6 +913,7 @@ hosofficeRouter.post(
 
         res.status(200).json({
           status: 'SUCCESS',
+          jobId: trackedJobId,
           mode: 'LIVE_PUSH',
           targetTable: cfg.hosofficePush.targetTable,
           idempotencyKey,
@@ -876,6 +928,15 @@ hosofficeRouter.post(
       } catch (localConfirmErr: unknown) {
         const localMsg =
           localConfirmErr instanceof Error ? localConfirmErr.message : String(localConfirmErr);
+
+        if (trackedJobId) {
+          failCentralJob(trackedJobId, {
+            status: 'UNKNOWN',
+            currentStep: 'ส่งเข้า HOSOffice สำเร็จ แต่ยืนยันสถานะใน Sam_Att ไม่สำเร็จ (รอตรวจสอบตรงกัน)',
+            errorCode: 'HOSOFFICE_COMMIT_LOCAL_SYNC_UNKNOWN',
+            errorMessage: localMsg,
+          });
+        }
 
         try {
           await dbExecute(

@@ -102,7 +102,7 @@ export default function App() {
 
   if (initializing) {
     return (
-      <div className="min-h-screen bg-[#FFF9F9] flex items-center justify-center p-4 text-center text-[15px] text-[#596579]">
+      <div className="min-h-screen bg-[#FAF9FD] flex items-center justify-center p-4 text-center text-[15px] text-[#596579]">
         กำลังเตรียมพื้นที่ทำงานระบบบริหารเวลาปฏิบัติงาน โรงพยาบาลสามชุก...
       </div>
     );
@@ -116,7 +116,7 @@ export default function App() {
   const isStaffOrAdmin = user.role === 'ADMIN' || user.role === 'RESPONSIBLE_STAFF';
 
   return (
-    <div className="min-h-screen bg-[#FFF9F9] flex flex-col overflow-x-hidden">
+    <div className="min-h-screen bg-[#FAF9FD] flex flex-col overflow-x-hidden">
       {dataMode === 'DEMO' && (
         <div
           role="status"
@@ -132,13 +132,13 @@ export default function App() {
         </div>
       )}
       {/* Topbar: Responsive height (60px mobile, 68px desktop) */}
-      <header className="bg-white border-b border-[#E7E2E5] px-3 sm:px-6 lg:px-8 h-[60px] sm:h-[68px] flex items-center justify-between gap-2 sm:gap-4 lg:gap-8 sticky top-0 z-20">
+      <header className="bg-white border-b border-[#E7E2F0] px-3 sm:px-6 lg:px-8 h-[60px] sm:h-[68px] flex items-center justify-between gap-2 sm:gap-4 lg:gap-8 sticky top-0 z-20">
         {/* Zone 1: Mobile Drawer Toggle + Hospital Brand Identity */}
         <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
           <button
             type="button"
             onClick={() => setMobileMenuOpen(true)}
-            className="lg:hidden p-2 text-[#273244] hover:bg-[#F8F6F7] rounded-lg shrink-0"
+            className="lg:hidden p-2 text-[#273244] hover:bg-[#F3EEFC] rounded-lg shrink-0"
             aria-label="เปิดเมนูนำทาง"
           >
             <Menu className="w-5 h-5" />
@@ -147,7 +147,7 @@ export default function App() {
             href="/Sam_Att/"
             className="flex items-center gap-2.5 sm:gap-3 group min-w-0"
           >
-            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-[#B45363] text-white flex items-center justify-center shadow-2xs group-hover:bg-[#9F3F50] transition-colors shrink-0">
+            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-[#8B73C7] text-white flex items-center justify-center shadow-2xs group-hover:bg-[#7359B4] transition-colors shrink-0">
               <HeartHandshake className="w-4.5 h-4.5 sm:w-5 sm:h-5" />
             </div>
             <div className="min-w-0">
@@ -157,7 +157,7 @@ export default function App() {
               <div className="hidden md:block text-[12.5px] text-[#596579] leading-tight truncate">
                 ระบบบริหารเวลาปฏิบัติงานบุคลากร
               </div>
-              <div className="md:hidden text-[12px] font-semibold text-[#9F3F50] leading-tight truncate">
+              <div className="md:hidden text-[12px] font-semibold text-[#7359B4] leading-tight truncate">
                 {breadcrumb.itemLabel}
               </div>
             </div>
@@ -169,14 +169,14 @@ export default function App() {
           <nav aria-label="ตำแหน่งหน้าจอปัจจุบัน" className="flex items-center gap-2 truncate pl-2">
             <span className="text-[#596579] truncate">{breadcrumb.groupTitle}</span>
             <ChevronRight className="w-4 h-4 text-[#596579]/60 shrink-0" aria-hidden="true" />
-            <span className="font-semibold text-[#9F3F50] truncate">{breadcrumb.itemLabel}</span>
+            <span className="font-semibold text-[#7359B4] truncate">{breadcrumb.itemLabel}</span>
           </nav>
 
-          <div className="hidden xl:flex items-center gap-3.5 whitespace-nowrap shrink-0 border-l border-[#E7E2E5] pl-5">
+          <div className="hidden xl:flex items-center gap-3.5 whitespace-nowrap shrink-0 border-l border-[#E7E2F0] pl-5">
             <span className="font-semibold text-[#273244] text-[14px]">{user.displayName}</span>
-            <span aria-hidden="true" className="text-[#D5CDD2]">·</span>
+            <span aria-hidden="true" className="text-[#D5CEE6]">·</span>
             <RoleLabel role={user.role} />
-            <span aria-hidden="true" className="text-[#D5CDD2]">·</span>
+            <span aria-hidden="true" className="text-[#D5CEE6]">·</span>
             <span className="font-mono text-[13px] text-[#596579]">
               รหัส: {user.approvedPersonId || 'ยังไม่ผูก'}
             </span>
@@ -188,7 +188,7 @@ export default function App() {
           <button
             type="button"
             onClick={handleLogout}
-            className="h-9 sm:h-[42px] px-2.5 sm:px-4 text-[13px] sm:text-[14px] font-semibold text-[#273244] bg-white border border-[#D5CDD2] rounded-lg hover:bg-[#F8F6F7] inline-flex items-center gap-1.5"
+            className="h-9 sm:h-[42px] px-2.5 sm:px-4 text-[13px] sm:text-[14px] font-semibold text-[#273244] bg-white border border-[#E7E2F0] rounded-lg hover:bg-[#F3EEFC] inline-flex items-center gap-1.5"
             title="ออกจากระบบ"
           >
             <LogOut className="w-4 h-4 text-[#596579] shrink-0" />
@@ -233,7 +233,7 @@ export default function App() {
       {/* Mobile & Tablet Fixed Bottom Quick-Access Bar */}
       <nav
         aria-label="แถบเมนูลัดสำหรับมือถือ"
-        className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/95 backdrop-blur-md border-t border-[#E7E2E5] px-2 py-1.5 shadow-lg"
+        className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/95 backdrop-blur-md border-t border-[#E7E2F0] px-2 py-1.5 shadow-lg"
       >
         <div className="grid grid-cols-5 gap-1 max-w-md mx-auto">
           {isStaffOrAdmin ? (
@@ -243,7 +243,7 @@ export default function App() {
                 onClick={() => setActiveView('dashboard')}
                 className={`flex flex-col items-center justify-center py-1.5 px-1 rounded-lg text-[11.5px] font-semibold transition-colors ${
                   activeView === 'dashboard'
-                    ? 'bg-[#F9E8EB] text-[#9F3F50]'
+                    ? 'bg-[#F3EEFC] text-[#7359B4]'
                     : 'text-[#596579] hover:text-[#273244]'
                 }`}
               >
@@ -255,7 +255,7 @@ export default function App() {
                 onClick={() => setActiveView('attendanceReview')}
                 className={`flex flex-col items-center justify-center py-1.5 px-1 rounded-lg text-[11.5px] font-semibold transition-colors ${
                   activeView === 'attendanceReview' || activeView === 'hrAttendance'
-                    ? 'bg-[#F9E8EB] text-[#9F3F50]'
+                    ? 'bg-[#F3EEFC] text-[#7359B4]'
                     : 'text-[#596579] hover:text-[#273244]'
                 }`}
               >
@@ -267,7 +267,7 @@ export default function App() {
                 onClick={() => setActiveView('myAttendance')}
                 className={`flex flex-col items-center justify-center py-1.5 px-1 rounded-lg text-[11.5px] font-semibold transition-colors ${
                   activeView === 'myAttendance'
-                    ? 'bg-[#F9E8EB] text-[#9F3F50]'
+                    ? 'bg-[#F3EEFC] text-[#7359B4]'
                     : 'text-[#596579] hover:text-[#273244]'
                 }`}
               >
@@ -279,7 +279,7 @@ export default function App() {
                 onClick={() => setActiveView('shifts')}
                 className={`flex flex-col items-center justify-center py-1.5 px-1 rounded-lg text-[11.5px] font-semibold transition-colors ${
                   activeView === 'shifts'
-                    ? 'bg-[#F9E8EB] text-[#9F3F50]'
+                    ? 'bg-[#F3EEFC] text-[#7359B4]'
                     : 'text-[#596579] hover:text-[#273244]'
                 }`}
               >
@@ -291,8 +291,8 @@ export default function App() {
                 onClick={() => setMobileMenuOpen(true)}
                 className={`flex flex-col items-center justify-center py-1.5 px-1 rounded-lg text-[11.5px] font-semibold transition-colors ${
                   mobileMenuOpen
-                    ? 'bg-[#B45363] text-white'
-                    : 'text-[#9F3F50] bg-[#FFF1F3] hover:bg-[#F9E8EB]'
+                    ? 'bg-[#8B73C7] text-white'
+                    : 'text-[#7359B4] bg-[#F3EEFC] hover:bg-[#E7E2F0]'
                 }`}
               >
                 <Grid className="w-4.5 h-4.5 mb-0.5" />
@@ -306,7 +306,7 @@ export default function App() {
                 onClick={() => setActiveView('myAttendance')}
                 className={`col-span-3 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-[13px] font-semibold transition-colors ${
                   activeView === 'myAttendance'
-                    ? 'bg-[#F9E8EB] text-[#9F3F50]'
+                    ? 'bg-[#F3EEFC] text-[#7359B4]'
                     : 'text-[#596579] hover:text-[#273244]'
                 }`}
               >
@@ -316,7 +316,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setMobileMenuOpen(true)}
-                className="col-span-2 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-[13px] font-semibold text-[#9F3F50] bg-[#FFF1F3]"
+                className="col-span-2 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-[13px] font-semibold text-[#7359B4] bg-[#F3EEFC]"
               >
                 <Grid className="w-4.5 h-4.5" />
                 <span>ข้อมูลผู้ใช้</span>

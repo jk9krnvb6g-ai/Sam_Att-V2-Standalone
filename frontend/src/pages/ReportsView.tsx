@@ -4,13 +4,12 @@
  * หน้าที่: หน้าจอรายงานสถิติการมาสาย (Lateness Report) และการส่งข้อมูลเข้า HOSOffice (Direct Push)
  * ============================================================================
  * ประกอบด้วย 2 คอมโพเนนต์หลัก:
- * 1. ReportsView:
- *    - รายงานสรุปสถิติการมาสายของบุคลากรโรงพยาบาลสามชุก
- *    - รองรับการส่งออกไฟล์ CSV (Export CSV) ที่เปิดอ่านภาษาไทยใน Excel ได้ทันที (UTF-8 BOM)
- *    - รองรับทั้งมุมมองตารางบน Desktop และการ์ดสรุปบนหน้าจอมือถือ (Mobile Card List)
- * 2. PushView:
+ * 1. ReportsView (mode === 'reports'):
+ *    - รายงานสรุปสถิติการมาสายของบุคลากรโรงพยาบาลสามชุก รองรับทุกประเภทบุคลากร
+ *    - ส่งออกไฟล์ CSV (Export CSV) ที่เปิดอ่านภาษาไทยใน Excel ได้ทันที (UTF-8 BOM)
+ * 2. PushView (mode === 'hosofficePush'):
  *    - หน้าจอส่งข้อมูลสรุปเวลาปฏิบัติงานเข้าสู่ระบบ HOSOffice โดยตรง (Direct Push)
- *    - ใช้ Idempotency Key ป้องกันการส่งข้อมูลซ้ำ และแสดงประวัติการส่งข้อมูลย้อนหลัง
+ *    - มี ConfirmDialog, ProgressDialog และการกู้คืนสถานะงานอัตโนมัติเมื่อรีเฟรชหน้า (Section 11)
  * ============================================================================
  */
 
@@ -26,6 +25,8 @@ import {
   SharedModal,
   NotificationBanner,
   TableEmptyState,
+  ConfirmDialog,
+  ProgressDialog,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
 import {
@@ -55,6 +56,16 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
   const [pushHistoryData, setPushHistoryData] = useState<any>(null);
   const [previewBatch, setPreviewBatch] = useState<any>(null);
   const [inspectPayloadModal, setInspectPayloadModal] = useState<any | null>(null);
+
+  // HOSOffice Push Confirm & Progress Dialog state (Section 11)
+  const [confirmPushOpen, setConfirmPushOpen] = useState(false);
+  const [pushingLive, setPushingLive] = useState(false);
+  const [pushProgressOpen, setPushProgressOpen] = useState(false);
+  const [pushStepLabel, setPushStepLabel] = useState('กำลังเตรียมชุดข้อมูลส่งกลับ HOSOffice...');
+  const [pushPercent, setPushPercent] = useState<number | null>(null);
+  const [pushStatus, setPushStatus] = useState<'RUNNING' | 'SUCCESS' | 'FAILED'>('RUNNING');
+  const [pushSummary, setPushSummary] = useState<string | null>(null);
+  const [pushError, setPushError] = useState<string | null>(null);
 
   // Sorting & Pagination for Ranking Table
   const [sortKey, setSortKey] = useState('totalLateMinutes');
@@ -107,6 +118,41 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
     loadData();
   }, [loadData]);
 
+  // กู้คืนสถานะงานส่งข้อมูลกลับ HOSOffice หากรีเฟรชหน้าจอ (Section 9 & 11)
+  useEffect(() => {
+    if (mode !== 'hosofficePush') return;
+    let timer: ReturnType<typeof setInterval> | null = null;
+    async function checkActivePushJob() {
+      try {
+        const res = await apiRequest('/jobs/active?type=HOSOFFICE_LIVE_PUSH');
+        if (res?.inProgress && res?.activeJob) {
+          setPushingLive(true);
+          setPushProgressOpen(true);
+          setPushStatus('RUNNING');
+          setPushStepLabel(res.activeJob.currentStep || 'กำลังส่งข้อมูลกลับ HOSOffice...');
+          setPushPercent(
+            typeof res.activeJob.progressPercent === 'number' ? res.activeJob.progressPercent : null
+          );
+        } else if (pushingLive && res?.latestJob && res.latestJob.status !== 'RUNNING') {
+          setPushingLive(false);
+          setPushPercent(res.latestJob.status === 'SUCCESS' ? 100 : null);
+          setPushStatus(res.latestJob.status === 'SUCCESS' ? 'SUCCESS' : 'FAILED');
+          setPushStepLabel(res.latestJob.currentStep || 'ดำเนินการเสร็จสิ้น');
+          await loadData();
+        }
+      } catch {
+        // ignore
+      }
+    }
+    checkActivePushJob();
+    if (pushingLive) {
+      timer = setInterval(checkActivePushJob, 1500);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [mode, pushingLive, loadData]);
+
   function handleSort(key: string) {
     if (sortKey === key) {
       setSortDir((prev) => (prev === 'ASC' ? 'DESC' : 'ASC'));
@@ -156,11 +202,20 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
     }
   }
 
-  async function handleLiveHosOfficePush() {
+  async function handleConfirmLiveHosOfficePush() {
+    setConfirmPushOpen(false);
     setError(null);
     setNotice(null);
+    setPushingLive(true);
+    setPushProgressOpen(true);
+    setPushStatus('RUNNING');
+    setPushStepLabel('กำลังตรวจสอบสิทธิ์และส่งข้อมูลสรุปเวลาปฏิบัติงานกลับ HOSOffice...');
+    setPushPercent(null);
+    setPushSummary(null);
+    setPushError(null);
+
     try {
-      await apiRequest('/hosoffice/push', {
+      const res = await apiRequest('/hosoffice/push', {
         method: 'POST',
         body: JSON.stringify({
           dateFrom: effectiveRange.dateFrom,
@@ -170,10 +225,31 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
             `LIVE-${effectiveRange.dateFrom}-${effectiveRange.dateTo}`,
         }),
       });
+      const summaryMsg =
+        res.message || `ส่งข้อมูลกลับ HOSOffice สำเร็จ (${res.pushedRecords ?? 0} รายการ)`;
+      setPushPercent(100);
+      setPushStatus('SUCCESS');
+      setPushStepLabel('ส่งข้อมูลกลับ HOSOffice สำเร็จ');
+      setPushSummary(summaryMsg);
+      setNotice(summaryMsg);
+      await loadData();
     } catch (err) {
+      const errMsg =
+        err instanceof ApiClientError
+          ? err.message
+          : 'ไม่สามารถส่งข้อมูลกลับ HOSOffice ได้';
+      setPushPercent(null);
+      setPushStatus('FAILED');
+      setPushStepLabel('การส่งข้อมูลกลับ HOSOffice ไม่สำเร็จ');
+      setPushError(errMsg);
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
+      } else {
+        setError({ message: errMsg });
       }
+      await loadData();
+    } finally {
+      setPushingLive(false);
     }
   }
 
@@ -191,12 +267,13 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
                 onClick={handlePreviewHosOfficePush}
                 className="ent-btn-secondary"
               >
-                <Eye className="w-4 h-4 text-[#B45363]" />
+                <Eye className="w-4 h-4 text-[#8B73C7]" />
                 <span>1. ตรวจสอบและสร้างชุดข้อมูลจำลอง (Preview)</span>
               </button>
               <button
                 type="button"
-                onClick={handleLiveHosOfficePush}
+                disabled={pushingLive}
+                onClick={() => setConfirmPushOpen(true)}
                 className="ent-btn-primary"
               >
                 <Send className="w-4 h-4" />
@@ -237,7 +314,7 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
                 <button
                   type="button"
                   onClick={() => setInspectPayloadModal(previewBatch)}
-                  className="text-[13.5px] font-semibold text-[#9F3F50] hover:underline inline-flex items-center gap-1.5"
+                  className="text-[13.5px] font-semibold text-[#7359B4] hover:underline inline-flex items-center gap-1.5"
                 >
                   <FileText className="w-4 h-4" />
                   <span>ขยายดูข้อมูลเต็มจอ</span>
@@ -252,7 +329,7 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
               <h2 className="text-[18px] font-bold text-[#B91C1C]">
                 รายการที่ไม่ผ่านเกณฑ์ตรวจสอบก่อนส่ง ({previewBatch.invalidCount} รายการ)
               </h2>
-              <div className="divide-y divide-[#E7E2E5] text-[14px] max-h-72 overflow-y-auto">
+              <div className="divide-y divide-[#E7E2F0] text-[14px] max-h-72 overflow-y-auto">
                 {previewBatch.invalidItems?.map((inv: any) => (
                   <div key={inv.attendanceId} className="py-3">
                     <div className="font-bold text-[#273244]">
@@ -268,7 +345,7 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
         )}
 
         <div className="ent-table-wrapper">
-          <div className="px-6 py-4 border-b border-[#E7E2E5] bg-[#F8F6F7]">
+          <div className="px-6 py-4 border-b border-[#E7E2F0] bg-[#FAF9FD]">
             <h2 className="text-[18px] font-bold text-[#273244]">
               ประวัติการตรวจสอบและส่งข้อมูลกลับ HOSOffice
             </h2>
@@ -276,7 +353,7 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse text-[14px]">
               <thead>
-                <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
+                <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
                   <th className="py-3.5 px-5 font-semibold">รหัสอ้างอิงชุดข้อมูล</th>
                   <th className="py-3.5 px-5 font-semibold">โหมดการทำงาน</th>
                   <th className="py-3.5 px-5 font-semibold">ช่วงวันที่ข้อมูล</th>
@@ -285,12 +362,12 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
                   <th className="py-3.5 px-5 font-semibold">ผู้ดำเนินการ · วันเวลา</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#E7E2E5]">
+              <tbody className="divide-y divide-[#E7E2F0]">
                 {pushHistoryData?.items?.length === 0 ? (
                   <TableEmptyState colSpan={6} title="ยังไม่มีประวัติการสร้างชุดข้อมูลส่งกลับ HOSOffice" />
                 ) : (
                   pushHistoryData?.items?.map((p: any) => (
-                    <tr key={p.id} className="hover:bg-[#FFF9F9]">
+                    <tr key={p.id} className="hover:bg-[#FAF9FD]">
                       <td className="py-4 px-5 font-mono font-semibold text-[#273244]">
                         {p.idempotency_key}
                       </td>
@@ -302,7 +379,7 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
                         {p.total_records} / <span className="text-[#047857] font-bold">{p.valid_records}</span> /{' '}
                         <span className="text-[#B91C1C] font-bold">{p.invalid_records}</span>
                       </td>
-                      <td className="py-4 px-5 font-semibold text-[#9F3F50]">{p.status}</td>
+                      <td className="py-4 px-5 font-semibold text-[#7359B4]">{p.status}</td>
                       <td className="py-4 px-5 font-mono tabular-nums text-[#596579]">
                         {p.initiated_by} · {formatThaiDateTime(p.created_at)}
                       </td>
@@ -328,6 +405,29 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
             </div>
           )}
         </SharedModal>
+
+        {/* ConfirmDialog ก่อนส่งข้อมูลกลับ HOSOffice (Section 11) */}
+        <ConfirmDialog
+          open={confirmPushOpen}
+          title="ยืนยันการส่งข้อมูลสรุปเวลาปฏิบัติงานกลับ HOSOffice"
+          description={`ช่วงวันที่ ${formatThaiDate(effectiveRange.dateFrom)} ถึง ${formatThaiDate(effectiveRange.dateTo)}`}
+          confirmLabel="ยืนยันส่งข้อมูลกลับ HOSOffice"
+          loading={pushingLive}
+          onConfirm={handleConfirmLiveHosOfficePush}
+          onCancel={() => setConfirmPushOpen(false)}
+        />
+
+        {/* ProgressDialog แสดงสถานะการส่งข้อมูลกลับ HOSOffice (Section 11) */}
+        <ProgressDialog
+          open={pushProgressOpen}
+          title="ส่งข้อมูลสรุปเวลาปฏิบัติงานกลับ HOSOffice"
+          stepLabel={pushStepLabel}
+          percent={pushPercent}
+          status={pushStatus}
+          summaryText={pushSummary}
+          errorMessage={pushError}
+          onClose={() => setPushProgressOpen(false)}
+        />
       </div>
     );
   }
@@ -401,7 +501,9 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
           >
             <option value="">ทุกประเภทบุคลากร</option>
             <option value="CIVIL_SERVANT">ข้าราชการ</option>
+            <option value="GOV_EMPLOYEE">พนักงานราชการ</option>
             <option value="PUBLIC_HEALTH_EMP">พนักงานกระทรวงสาธารณสุข (พกส.)</option>
+            <option value="PERMANENT_EMP">ลูกจ้างประจำ</option>
             <option value="TEMP_EMPLOYEE">ลูกจ้างชั่วคราว</option>
           </select>
         }
@@ -449,7 +551,7 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
             <div className="text-[13.5px] font-semibold text-[#596579]">
               ค่าเฉลี่ยนาทีสายต่อครั้ง
             </div>
-            <div className="mt-1.5 text-[28px] font-bold text-[#9F3F50] tabular-nums">
+            <div className="mt-1.5 text-[28px] font-bold text-[#7359B4] tabular-nums">
               {kpi.avgLateMinutesPerOccurrence} นาที/ครั้ง
             </div>
             <div className="text-[12.5px] text-[#596579] mt-1">
@@ -459,7 +561,6 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
         </div>
       )}
 
-      {/* Visual Department Comparison Chart (Real Data) */}
       {deptBreakdown.length > 0 && (
         <div className="ent-card p-4 sm:p-6 space-y-4">
           <div>
@@ -482,15 +583,15 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
                       <span className="text-[#B45309] font-semibold">
                         สาย {d.latePeople} คน ({d.lateOccurrences} ครั้ง)
                       </span>
-                      <span className="font-bold text-[#9F3F50]">
+                      <span className="font-bold text-[#7359B4]">
                         รวม {d.totalLateMinutes} นาที
                       </span>
                     </div>
                   </div>
-                  <div className="h-3 w-full bg-[#F8F6F7] rounded-full overflow-hidden border border-[#E7E2E5]">
+                  <div className="h-3 w-full bg-[#FAF9FD] rounded-full overflow-hidden border border-[#E7E2F0]">
                     <div
                       style={{ width: `${Math.max(d.totalLateMinutes > 0 ? 6 : 0, barPct)}%` }}
-                      className="h-full bg-[#B45363] rounded-full transition-all"
+                      className="h-full bg-[#8B73C7] rounded-full transition-all"
                     />
                   </div>
                 </div>
@@ -500,16 +601,14 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
         </div>
       )}
 
-      {/* Lateness Ranking Table */}
       <div className="ent-table-wrapper">
-        <div className="px-4 sm:px-6 py-4 border-b border-[#E7E2E5] bg-[#F8F6F7]">
+        <div className="px-4 sm:px-6 py-4 border-b border-[#E7E2F0] bg-[#FAF9FD]">
           <h2 className="text-[18px] font-bold text-[#273244]">
             ตารางจัดอันดับสถิติการมาสายรายบุคคล
           </h2>
         </div>
 
-        {/* Mobile Card List View (< 768px) */}
-        <div className="md:hidden divide-y divide-[#E7E2E5]">
+        <div className="md:hidden divide-y divide-[#E7E2F0]">
           {loading ? (
             <div className="py-10 text-center text-[14.5px] text-[#596579]">
               กำลังประมวลผลรายงาน...
@@ -535,7 +634,7 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
                   </span>
                 </div>
                 <div className="grid grid-cols-3 gap-2 pt-1 text-center font-mono text-[13px]">
-                  <div className="p-2 rounded-lg bg-[#F8F6F7] border border-[#E7E2E5]">
+                  <div className="p-2 rounded-lg bg-[#FAF9FD] border border-[#E7E2F0]">
                     <div className="text-[11.5px] text-[#596579]">เวรทั้งหมด</div>
                     <div className="font-bold text-[#273244]">{r.totalShifts}</div>
                   </div>
@@ -555,11 +654,10 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
           )}
         </div>
 
-        {/* Desktop Table View (>= 768px) */}
         <div className="hidden md:block overflow-x-auto">
           <table className="w-full text-left border-collapse text-[14px]">
             <thead>
-              <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
+              <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
                 <th className="py-3.5 px-4 font-semibold">อันดับ</th>
                 <SortableHeader
                   label="ชื่อ-นามสกุล · รหัสบุคลากร"
@@ -617,7 +715,7 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
                 />
               </tr>
             </thead>
-            <tbody className="divide-y divide-[#E7E2E5]">
+            <tbody className="divide-y divide-[#E7E2F0]">
               {loading ? (
                 <tr>
                   <td colSpan={8} className="py-12 text-center text-[14.5px] text-[#596579]">
@@ -628,7 +726,7 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
                 <TableEmptyState colSpan={8} title="ไม่พบข้อมูลการจัดอันดับในช่วงเวลาที่เลือก" />
               ) : (
                 pagedRanking.map((r: any, idx: number) => (
-                  <tr key={r.personId} className="hover:bg-[#FFF9F9] transition-colors">
+                  <tr key={r.personId} className="hover:bg-[#FAF9FD] transition-colors">
                     <td className="py-4 px-4 font-mono tabular-nums font-semibold text-[#596579]">
                       #{(page - 1) * numericSize + idx + 1}
                     </td>

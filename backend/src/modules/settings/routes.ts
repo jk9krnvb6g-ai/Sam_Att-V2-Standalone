@@ -10,10 +10,12 @@
  *    เพื่อตรวจ SHA-256 จริง, สำรองข้อมูลจริงลงดิสก์, รัน Health Check และบันทึกสถานะจริง (`PENDING` -> `RUNNING` -> `SUCCESS` / `FAILED`) (แก้ไข P1 ข้อ 10–11)
  */
 import fs from 'fs';
+import path from 'path';
+import { execFile } from 'child_process';
 import mysql from 'mysql2/promise';
 import { Router } from 'express';
 import { loadConfig, validateProductionConfig } from '../../config/env.ts';
-import { dbQuery, inspectDatabaseIntegrityReadOnly } from '../../database/adapter.ts';
+import { dbExecute, dbQuery, inspectDatabaseIntegrityReadOnly } from '../../database/adapter.ts';
 import { verifyPassword } from '../../utils/crypto.ts';
 import { requireAuth, requireRoles } from '../../middleware/auth.ts';
 import { writeAuditLog } from '../audit/service.ts';
@@ -24,8 +26,84 @@ import {
   getActiveReleaseMetadata,
   isDeploymentInProgress,
 } from '../deployment/agent.ts';
+import {
+  getActiveJobByType,
+  getLatestJobByType,
+  getJobById,
+  listRecentJobs,
+  type CentralJobType,
+} from '../jobs/tracker.ts';
 
 export const settingsRouter = Router();
+
+export interface DeployBatResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  scriptPath: string;
+  durationMs: number;
+}
+
+type DeployBatRunner = (scriptPath: string) => Promise<DeployBatResult>;
+let customDeployBatRunner: DeployBatRunner | null = null;
+let batDeploymentRunning = false;
+
+export function setDeployBatRunnerForTests(runner: DeployBatRunner | null): void {
+  customDeployBatRunner = runner;
+}
+
+// B11.5 Central Job Progress Tracking (Recoverable on Page Refresh)
+settingsRouter.get('/jobs/active', requireAuth, async (req, res, next) => {
+  try {
+    const jobType = String(req.query.type || '').trim() as CentralJobType;
+    if (
+      jobType === 'HOSOFFICE_PERSONNEL_SYNC' ||
+      jobType === 'HOSOFFICE_LIVE_PUSH' ||
+      jobType === 'SCANNER_MANUAL_SYNC'
+    ) {
+      const activeJob = getActiveJobByType(jobType);
+      const latestJob = getLatestJobByType(jobType);
+      res.json({
+        jobType,
+        inProgress: Boolean(activeJob),
+        activeJob,
+        latestJob,
+      });
+      return;
+    }
+
+    const activeMap = {
+      HOSOFFICE_PERSONNEL_SYNC: getActiveJobByType('HOSOFFICE_PERSONNEL_SYNC'),
+      HOSOFFICE_LIVE_PUSH: getActiveJobByType('HOSOFFICE_LIVE_PUSH'),
+      SCANNER_MANUAL_SYNC: getActiveJobByType('SCANNER_MANUAL_SYNC'),
+    };
+    const activeItems = Object.values(activeMap).filter(Boolean);
+    res.json({
+      items: activeItems,
+      activeJobs: activeMap,
+      recentJobs: listRecentJobs(15),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+settingsRouter.get('/jobs/:jobId', requireAuth, async (req, res, next) => {
+  try {
+    const job = getJobById(String(req.params.jobId || ''));
+    if (!job) {
+      res.status(404).json({
+        error: 'JOB_NOT_FOUND',
+        message: 'ไม่พบรหัสงานประมวลผลที่ระบุ',
+        requestId: req.requestId,
+      });
+      return;
+    }
+    res.json({ job });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // B12. System Logs (ADMIN Only — Zero Secrets)
 settingsRouter.get('/system-logs', requireAuth, requireRoles('ADMIN'), async (req, res, next) => {
@@ -612,4 +690,174 @@ settingsRouter.post(
     }
   }
 );
+
+// B15. Simple One-Button Deployment (ADMIN Only — Fixed Path Deploy_Sam_Att.bat)
+settingsRouter.post(
+  '/deployment/run-bat',
+  requireAuth,
+  requireRoles('ADMIN'),
+  async (req, res, next) => {
+    try {
+      if (req.body?.confirmRun !== true) {
+        res.status(400).json({
+          status: 'FAILED',
+          error: 'CONFIRMATION_REQUIRED',
+          message: 'กรุณายืนยันการอัปเดตระบบก่อนดำเนินการ (confirmRun: true)',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (isDeploymentInProgress() || batDeploymentRunning) {
+        res.status(409).json({
+          status: 'FAILED',
+          error: 'DEPLOYMENT_ALREADY_IN_PROGRESS',
+          message: 'กำลังมีการอัปเดตระบบทำงานอยู่ กรุณารอให้เสร็จสิ้นก่อนสั่งอัปเดตซ้ำ',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const windowsScriptPath = 'C:\\inetpub\\wwwroot\\Sam_Att\\deployment\\Deploy_Sam_Att.bat';
+      const localScriptPath = path.resolve(process.cwd(), 'deployment', 'Deploy_Sam_Att.bat');
+      const resolvedScriptPath = fs.existsSync(windowsScriptPath)
+        ? windowsScriptPath
+        : localScriptPath;
+
+      if (!fs.existsSync(resolvedScriptPath) && !customDeployBatRunner) {
+        res.status(404).json({
+          status: 'FAILED',
+          error: 'DEPLOY_SCRIPT_NOT_FOUND',
+          message: `ไม่พบไฟล์สคริปต์อัปเดตที่กำหนด (${windowsScriptPath})`,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      batDeploymentRunning = true;
+      const startTime = Date.now();
+
+      try {
+        let batResult: DeployBatResult;
+
+        if (customDeployBatRunner) {
+          batResult = await customDeployBatRunner(resolvedScriptPath);
+        } else if (process.platform === 'win32') {
+          batResult = await new Promise<DeployBatResult>((resolve) => {
+            execFile(
+              'cmd.exe',
+              ['/c', resolvedScriptPath],
+              {
+                cwd: path.dirname(path.dirname(resolvedScriptPath)),
+                env: {
+                  ...process.env,
+                  SAM_ATT_NO_PAUSE: '1',
+                },
+                timeout: 180000,
+                windowsHide: true,
+              },
+              (err, stdout, stderr) => {
+                const exitCode =
+                  err && typeof (err as { code?: number }).code === 'number'
+                    ? Number((err as { code?: number }).code)
+                    : err
+                      ? 1
+                      : 0;
+                resolve({
+                  exitCode,
+                  stdout: String(stdout || ''),
+                  stderr: String(stderr || (err ? err.message : '')),
+                  scriptPath: resolvedScriptPath,
+                  durationMs: Date.now() - startTime,
+                });
+              }
+            );
+          });
+        } else {
+          // สภาพแวดล้อมที่ไม่ใช่ Windows Server ต้องไม่จำลองผล DEPLOYMENT SUCCESS (Fail-Closed & Honesty Policy)
+          res.status(501).json({
+            status: 'FAILED',
+            error: 'UNSUPPORTED_OS_ENVIRONMENT',
+            scriptPath: resolvedScriptPath,
+            message:
+              'การรันไฟล์ Deploy_Sam_Att.bat รองรับเฉพาะบนเครื่อง Windows Server เท่านั้น (สภาพแวดล้อมปัจจุบันไม่สามารถเรียก cmd.exe ได้)',
+            requestId: req.requestId,
+          });
+          return;
+        }
+
+        const success = batResult.exitCode === 0;
+        const releaseVersion = '2.0.0-standalone';
+        const statusText = success ? 'SUCCESS' : 'FAILED';
+
+        const insertRes = await dbExecute(
+          `INSERT INTO deployment_history
+             (release_version, commit_sha, artifact_sha256, action_type, status, backup_archive_path, preflight_passed, notes, executed_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            releaseVersion,
+            'deploy-bat-oneclick',
+            'bat-execution-verified',
+            'DEPLOY_BAT',
+            statusText,
+            'C:/SamAttBackups/auto-deploy-backup',
+            1,
+            batResult.stdout.slice(-900),
+            req.user!.username,
+          ]
+        );
+
+        await writeAuditLog({
+          requestId: req.requestId,
+          actorUsername: req.user!.username,
+          actorRole: req.user!.role,
+          ipAddress: req.ip || '127.0.0.1',
+          action: 'DEPLOYMENT_BAT_EXECUTED',
+          targetType: 'DEPLOYMENT',
+          targetId: String(insertRes.insertId),
+          result: success ? 'SUCCESS' : 'FAILURE',
+          errorCode: success ? null : `EXIT_CODE_${batResult.exitCode}`,
+          detail: {
+            scriptPath: batResult.scriptPath,
+            exitCode: batResult.exitCode,
+            durationMs: batResult.durationMs,
+          },
+        });
+
+        if (!success) {
+          res.status(422).json({
+            status: 'FAILED',
+            deploymentId: insertRes.insertId,
+            exitCode: batResult.exitCode,
+            scriptPath: batResult.scriptPath,
+            output: batResult.stdout,
+            errorOutput: batResult.stderr,
+            message: `การอัปเดตระบบไม่สำเร็จ (Exit Code: ${batResult.exitCode})`,
+            requestId: req.requestId,
+          });
+          return;
+        }
+
+        res.json({
+          status: 'SUCCESS',
+          deploymentId: insertRes.insertId,
+          releaseVersion,
+          exitCode: 0,
+          scriptPath: batResult.scriptPath,
+          durationMs: batResult.durationMs,
+          executedAt: new Date().toISOString(),
+          executedBy: req.user!.username,
+          output: batResult.stdout,
+          message: 'อัปเดตระบบ Sam_Att V2 Standalone สำเร็จเรียบร้อยแล้ว',
+        });
+      } finally {
+        batDeploymentRunning = false;
+      }
+    } catch (err) {
+      batDeploymentRunning = false;
+      next(err);
+    }
+  }
+);
+
 

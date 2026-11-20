@@ -7,25 +7,25 @@
     --font-display: 'Sarabun', 'Plus Jakarta Sans', sans-serif;
     --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
 
-    /* Color Palette Tokens — Soft Rose Enterprise + Warm Slate + Clean White */
-    --brand-primary: #B45363;
-    --brand-primary-hover: #9F3F50;
-    --brand-soft: #F9E8EB;
-    --brand-subtle: #FFF1F3;
+    /* Color Palette Tokens — Soft Lavender & Clean White Hospital Enterprise */
+    --brand-primary: #8B73C7;
+    --brand-primary-hover: #7359B4;
+    --brand-soft: #F3EEFC;
+    --brand-subtle: #F7F4FD;
 
-    --surface-canvas: #FFF9F9;
+    --surface-canvas: #FAF9FD;
     --surface-card: #FFFFFF;
-    --surface-secondary: #F8F6F7;
+    --surface-secondary: #F6F4FA;
 
     --text-primary: #273244;
     --text-secondary: #596579;
     --text-muted: #6E7A8E;
 
-    --border-subtle: #E7E2E5;
-    --border-default: #D5CDD2;
-    --border-focus: #B45363;
+    --border-subtle: #E7E2F0;
+    --border-default: #D5CEE6;
+    --border-focus: #8B73C7;
 
-    /* Semantic Status Colors (WCAG AA Validated — Zero Purple/Violet) */
+    /* Semantic Status Colors (WCAG AA Validated) */
     --status-success: #047857;
     --status-warning: #B45309;
     --status-danger: #B91C1C;
