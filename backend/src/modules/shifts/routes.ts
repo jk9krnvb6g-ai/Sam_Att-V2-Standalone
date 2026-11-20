@@ -108,14 +108,33 @@ interface PersonnelSummaryRow {
   personnel_type_name: string;
 }
 
+export type BulkOperationMode =
+  | 'ADD_SHIFTS'
+  | 'REPLACE_SHIFTS'
+  | 'REMOVE_SELECTED_SHIFTS'
+  | 'CLEAR_ALL_SHIFTS';
+
 export interface BulkPreviewItem {
   personId: string;
   fullName: string;
   departmentName: string;
   workDate: string;
-  status: 'READY' | 'DUPLICATE_SAME_SHIFT' | 'TIME_OVERLAP_CONFLICT';
+  shiftId: number | null;
+  shiftCode: string | null;
+  shiftName: string | null;
+  startTime: string | null;
+  endTime: string | null;
+  isCrossMidnight: number;
+  operationMode: BulkOperationMode;
+  status:
+    | 'READY'
+    | 'DUPLICATE_SAME_SHIFT'
+    | 'TIME_OVERLAP_CONFLICT'
+    | 'SELECTED_SHIFTS_OVERLAP'
+    | 'NOT_ASSIGNED';
   conflictCode: string | null;
   conflictMessage: string | null;
+  existingOnDateCount?: number;
   existingAssignment: {
     id: number;
     workDate: string;
@@ -370,12 +389,49 @@ async function upsertDailyOverrideRecord(
   }
 }
 
+/**
+ * ตรวจสอบว่าชุดแม่แบบกะที่เลือกพร้อมกัน (Multi-Shift) มีเวลาทับซ้อนกันเองในวันเดียวกันหรือไม่
+ */
+export function findSelectedShiftsSelfOverlap(
+  shifts: ShiftRow[],
+  referenceDate = '2026-01-01'
+): { shiftA: ShiftRow; shiftB: ShiftRow; message: string } | null {
+  for (let i = 0; i < shifts.length; i++) {
+    for (let j = i + 1; j < shifts.length; j++) {
+      const a = shifts[i];
+      const b = shifts[j];
+      const intA = computeAbsoluteIntervalMinutes(
+        referenceDate,
+        a.start_time,
+        a.end_time,
+        a.is_cross_midnight
+      );
+      const intB = computeAbsoluteIntervalMinutes(
+        referenceDate,
+        b.start_time,
+        b.end_time,
+        b.is_cross_midnight
+      );
+      if (Math.max(intA.startAbsMin, intB.startAbsMin) < Math.min(intA.endAbsMin, intB.endAbsMin)) {
+        return {
+          shiftA: a,
+          shiftB: b,
+          message: `แม่แบบกะที่เลือก "${a.shift_name}" (${a.start_time}–${a.end_time} น.) และ "${b.shift_name}" (${b.start_time}–${b.end_time} น.) มีช่วงเวลาทับซ้อนกัน`,
+        };
+      }
+    }
+  }
+  return null;
+}
+
 export async function evaluateBulkShiftAssignments(
   queryRunner: <T = Record<string, unknown>>(sql: string, params?: unknown[]) => Promise<T[]>,
   options: {
     personIds: string[];
-    shift: ShiftRow;
+    shift?: ShiftRow;
+    shifts?: ShiftRow[];
     workDates: string[];
+    operationMode?: BulkOperationMode;
   }
 ): Promise<{
   items: BulkPreviewItem[];
@@ -385,9 +441,19 @@ export async function evaluateBulkShiftAssignments(
     conflictCount: number;
     duplicateCount: number;
     overlapCount: number;
+    notAssignedCount: number;
+    replaceAffectedCells: number;
+    clearAffectedCells: number;
   };
 }> {
-  const { personIds, shift, workDates } = options;
+  const { personIds, workDates } = options;
+  const operationMode: BulkOperationMode = options.operationMode || 'ADD_SHIFTS';
+  const selectedShifts: ShiftRow[] =
+    options.shifts && options.shifts.length > 0
+      ? options.shifts
+      : options.shift
+        ? [options.shift]
+        : [];
 
   const personPlaceholders = personIds.map(() => '?').join(', ');
   const personnelRows = await queryRunner<PersonnelSummaryRow>(
@@ -406,6 +472,7 @@ export async function evaluateBulkShiftAssignments(
   }
 
   const sortedDates = [...workDates].map((d) => normalizeWorkDateString(d)).sort();
+  const selectedDateSet = new Set(sortedDates);
   const minDateMinusOne = addDaysToDateString(sortedDates[0], -1);
   const maxDatePlusOne = addDaysToDateString(sortedDates[sortedDates.length - 1], 1);
 
@@ -440,6 +507,9 @@ export async function evaluateBulkShiftAssignments(
   let readyCount = 0;
   let duplicateCount = 0;
   let overlapCount = 0;
+  let notAssignedCount = 0;
+  let replaceAffectedCells = 0;
+  let clearAffectedCells = 0;
 
   for (const rawPersonId of personIds) {
     const personId = String(rawPersonId ?? '').trim();
@@ -448,88 +518,283 @@ export async function evaluateBulkShiftAssignments(
     const departmentName = personInfo?.department_name || '-';
     const personExisting = existingByPerson.get(personId) || [];
 
+    // โหมด 4: ลบกะทั้งหมด (ตั้งเป็นไม่มีเวร / CLEARED_ALL_SHIFTS)
+    if (operationMode === 'CLEAR_ALL_SHIFTS') {
+      for (const workDate of sortedDates) {
+        const sameDayActive = personExisting.filter((ex) => ex.work_date === workDate);
+        clearAffectedCells++;
+        readyCount++;
+        items.push({
+          personId,
+          fullName,
+          departmentName,
+          workDate,
+          shiftId: null,
+          shiftCode: 'OFF',
+          shiftName: 'ลบกะทั้งหมด (ตั้งเป็นไม่มีเวร)',
+          startTime: null,
+          endTime: null,
+          isCrossMidnight: 0,
+          operationMode,
+          status: 'READY',
+          conflictCode: null,
+          conflictMessage: null,
+          existingOnDateCount: sameDayActive.length,
+          existingAssignment: sameDayActive[0]
+            ? {
+                id: sameDayActive[0].id,
+                workDate: sameDayActive[0].work_date,
+                shiftCode: sameDayActive[0].snapshot_shift_code,
+                shiftName: sameDayActive[0].snapshot_shift_name,
+                startTime: sameDayActive[0].snapshot_start_time,
+                endTime: sameDayActive[0].snapshot_end_time,
+                isCrossMidnight: Number(sameDayActive[0].snapshot_is_cross_midnight),
+              }
+            : null,
+        });
+      }
+      continue;
+    }
+
+    // โหมด 3: ลบเฉพาะกะที่เลือก
+    if (operationMode === 'REMOVE_SELECTED_SHIFTS') {
+      for (const workDate of sortedDates) {
+        for (const shift of selectedShifts) {
+          const matchingEx = personExisting.find(
+            (ex) => ex.work_date === workDate && Number(ex.shift_id) === Number(shift.id)
+          );
+          if (!matchingEx) {
+            notAssignedCount++;
+            items.push({
+              personId,
+              fullName,
+              departmentName,
+              workDate,
+              shiftId: shift.id,
+              shiftCode: shift.shift_code,
+              shiftName: shift.shift_name,
+              startTime: shift.start_time,
+              endTime: shift.end_time,
+              isCrossMidnight: Number(shift.is_cross_midnight),
+              operationMode,
+              status: 'NOT_ASSIGNED',
+              conflictCode: 'NOT_ASSIGNED',
+              conflictMessage: `ไม่พบเวรกะ ${shift.shift_name} ที่มอบหมายไว้ในวันที่ ${workDate}`,
+              existingOnDateCount: 0,
+              existingAssignment: null,
+            });
+            continue;
+          }
+
+          readyCount++;
+          items.push({
+            personId,
+            fullName,
+            departmentName,
+            workDate,
+            shiftId: shift.id,
+            shiftCode: shift.shift_code,
+            shiftName: shift.shift_name,
+            startTime: shift.start_time,
+            endTime: shift.end_time,
+            isCrossMidnight: Number(shift.is_cross_midnight),
+            operationMode,
+            status: 'READY',
+            conflictCode: null,
+            conflictMessage: null,
+            existingOnDateCount: 1,
+            existingAssignment: {
+              id: matchingEx.id,
+              workDate: matchingEx.work_date,
+              shiftCode: matchingEx.snapshot_shift_code,
+              shiftName: matchingEx.snapshot_shift_name,
+              startTime: matchingEx.snapshot_start_time,
+              endTime: matchingEx.snapshot_end_time,
+              isCrossMidnight: Number(matchingEx.snapshot_is_cross_midnight),
+            },
+          });
+        }
+      }
+      continue;
+    }
+
+    // โหมด 1 (ADD_SHIFTS) และ โหมด 2 (REPLACE_SHIFTS): เก็บรายการที่ผ่านในรอบนี้ไว้ตรวจเวลาทับซ้อนข้ามวัน/ในวันเดียวกัน
+    const acceptedInBatch: Array<{
+      workDate: string;
+      shift: ShiftRow;
+      startAbsMin: number;
+      endAbsMin: number;
+    }> = [];
+
     for (const workDate of sortedDates) {
-      const candidateInterval = computeAbsoluteIntervalMinutes(
-        workDate,
-        shift.start_time,
-        shift.end_time,
-        shift.is_cross_midnight
-      );
+      const sameDayExisting = personExisting.filter((ex) => ex.work_date === workDate);
+      if (operationMode === 'REPLACE_SHIFTS' && sameDayExisting.length > 0) {
+        replaceAffectedCells++;
+      }
 
-      const sameShiftDup = personExisting.find(
-        (ex) => Number(ex.shift_id) === Number(shift.id) && ex.work_date === workDate
-      );
+      // สำหรับ REPLACE_SHIFTS: เวรเดิมที่อยู่ในวันที่ถูกเลือกจะถูกแทนที่ จึงตรวจเทียบกับเวรเดิมที่อยู่นอกชุดวันที่เลือกเท่านั้น (เช่น วันก่อนหน้า/วันถัดไปที่ข้ามวัน)
+      const dbToCompare =
+        operationMode === 'REPLACE_SHIFTS'
+          ? personExisting.filter((ex) => !selectedDateSet.has(ex.work_date))
+          : personExisting;
 
-      if (sameShiftDup) {
-        duplicateCount++;
+      for (const shift of selectedShifts) {
+        const candidateInterval = computeAbsoluteIntervalMinutes(
+          workDate,
+          shift.start_time,
+          shift.end_time,
+          shift.is_cross_midnight
+        );
+
+        // 1. ตรวจทับซ้อนกับกะอื่นในชุดคำสั่งรอบเดียวกัน (ทั้งในวันเดียวกัน และกะข้ามวันจากวันก่อนหน้าในชุดวันที่เลือก)
+        const batchOverlap = acceptedInBatch.find(
+          (b) =>
+            Math.max(candidateInterval.startAbsMin, b.startAbsMin) <
+            Math.min(candidateInterval.endAbsMin, b.endAbsMin)
+        );
+        if (batchOverlap) {
+          overlapCount++;
+          items.push({
+            personId,
+            fullName,
+            departmentName,
+            workDate,
+            shiftId: shift.id,
+            shiftCode: shift.shift_code,
+            shiftName: shift.shift_name,
+            startTime: shift.start_time,
+            endTime: shift.end_time,
+            isCrossMidnight: Number(shift.is_cross_midnight),
+            operationMode,
+            status: 'SELECTED_SHIFTS_OVERLAP',
+            conflictCode: 'SELECTED_SHIFTS_OVERLAP',
+            conflictMessage: `เวลาทับซ้อนกับกะที่เลือกในชุดเดียวกัน: ${batchOverlap.shift.shift_name} (${batchOverlap.shift.start_time}–${batchOverlap.shift.end_time} น. วันที่ ${batchOverlap.workDate})`,
+            existingOnDateCount: sameDayExisting.length,
+            existingAssignment: null,
+          });
+          continue;
+        }
+
+        // 2. ตรวจซ้ำกะเดิมในระบบ (เฉพาะโหมด ADD_SHIFTS)
+        if (operationMode === 'ADD_SHIFTS') {
+          const sameShiftDup = dbToCompare.find(
+            (ex) => Number(ex.shift_id) === Number(shift.id) && ex.work_date === workDate
+          );
+
+          if (sameShiftDup) {
+            duplicateCount++;
+            items.push({
+              personId,
+              fullName,
+              departmentName,
+              workDate,
+              shiftId: shift.id,
+              shiftCode: shift.shift_code,
+              shiftName: shift.shift_name,
+              startTime: shift.start_time,
+              endTime: shift.end_time,
+              isCrossMidnight: Number(shift.is_cross_midnight),
+              operationMode,
+              status: 'DUPLICATE_SAME_SHIFT',
+              conflictCode: 'DUPLICATE_SAME_SHIFT',
+              conflictMessage: `มีเวรกะ ${sameShiftDup.snapshot_shift_name} (${sameShiftDup.snapshot_start_time}–${sameShiftDup.snapshot_end_time} น.) ในวันนี้อยู่แล้ว`,
+              existingOnDateCount: sameDayExisting.length,
+              existingAssignment: {
+                id: sameShiftDup.id,
+                workDate: sameShiftDup.work_date,
+                shiftCode: sameShiftDup.snapshot_shift_code,
+                shiftName: sameShiftDup.snapshot_shift_name,
+                startTime: sameShiftDup.snapshot_start_time,
+                endTime: sameShiftDup.snapshot_end_time,
+                isCrossMidnight: Number(sameShiftDup.snapshot_is_cross_midnight),
+              },
+            });
+            continue;
+          }
+        }
+
+        // 3. ตรวจเวลาทับซ้อนกับเวรเดิมในระบบ (รวมกะข้ามวันจากวันก่อนหน้า/วันถัดไป)
+        const overlappingEx = dbToCompare.find((ex) => {
+          const exInterval = computeAbsoluteIntervalMinutes(
+            ex.work_date,
+            ex.snapshot_start_time,
+            ex.snapshot_end_time,
+            ex.snapshot_is_cross_midnight
+          );
+          return (
+            Math.max(candidateInterval.startAbsMin, exInterval.startAbsMin) <
+            Math.min(candidateInterval.endAbsMin, exInterval.endAbsMin)
+          );
+        });
+
+        if (overlappingEx) {
+          overlapCount++;
+          items.push({
+            personId,
+            fullName,
+            departmentName,
+            workDate,
+            shiftId: shift.id,
+            shiftCode: shift.shift_code,
+            shiftName: shift.shift_name,
+            startTime: shift.start_time,
+            endTime: shift.end_time,
+            isCrossMidnight: Number(shift.is_cross_midnight),
+            operationMode,
+            status: 'TIME_OVERLAP_CONFLICT',
+            conflictCode: 'TIME_OVERLAP_CONFLICT',
+            conflictMessage: `เวลาทับซ้อนกับ ${overlappingEx.snapshot_shift_name} (${overlappingEx.snapshot_start_time}–${overlappingEx.snapshot_end_time} น. วันที่ ${overlappingEx.work_date})`,
+            existingOnDateCount: sameDayExisting.length,
+            existingAssignment: {
+              id: overlappingEx.id,
+              workDate: overlappingEx.work_date,
+              shiftCode: overlappingEx.snapshot_shift_code,
+              shiftName: overlappingEx.snapshot_shift_name,
+              startTime: overlappingEx.snapshot_start_time,
+              endTime: overlappingEx.snapshot_end_time,
+              isCrossMidnight: Number(overlappingEx.snapshot_is_cross_midnight),
+            },
+          });
+          continue;
+        }
+
+        acceptedInBatch.push({
+          workDate,
+          shift,
+          startAbsMin: candidateInterval.startAbsMin,
+          endAbsMin: candidateInterval.endAbsMin,
+        });
+        readyCount++;
         items.push({
           personId,
           fullName,
           departmentName,
           workDate,
-          status: 'DUPLICATE_SAME_SHIFT',
-          conflictCode: 'DUPLICATE_SAME_SHIFT',
-          conflictMessage: `มีเวรกะ ${sameShiftDup.snapshot_shift_name} (${sameShiftDup.snapshot_start_time}–${sameShiftDup.snapshot_end_time} น.) ในวันนี้อยู่แล้ว`,
-          existingAssignment: {
-            id: sameShiftDup.id,
-            workDate: sameShiftDup.work_date,
-            shiftCode: sameShiftDup.snapshot_shift_code,
-            shiftName: sameShiftDup.snapshot_shift_name,
-            startTime: sameShiftDup.snapshot_start_time,
-            endTime: sameShiftDup.snapshot_end_time,
-            isCrossMidnight: Number(sameShiftDup.snapshot_is_cross_midnight),
-          },
+          shiftId: shift.id,
+          shiftCode: shift.shift_code,
+          shiftName: shift.shift_name,
+          startTime: shift.start_time,
+          endTime: shift.end_time,
+          isCrossMidnight: Number(shift.is_cross_midnight),
+          operationMode,
+          status: 'READY',
+          conflictCode: null,
+          conflictMessage: null,
+          existingOnDateCount: sameDayExisting.length,
+          existingAssignment:
+            operationMode === 'REPLACE_SHIFTS' && sameDayExisting[0]
+              ? {
+                  id: sameDayExisting[0].id,
+                  workDate: sameDayExisting[0].work_date,
+                  shiftCode: sameDayExisting[0].snapshot_shift_code,
+                  shiftName: sameDayExisting[0].snapshot_shift_name,
+                  startTime: sameDayExisting[0].snapshot_start_time,
+                  endTime: sameDayExisting[0].snapshot_end_time,
+                  isCrossMidnight: Number(sameDayExisting[0].snapshot_is_cross_midnight),
+                }
+              : null,
         });
-        continue;
       }
-
-      const overlappingEx = personExisting.find((ex) => {
-        const exInterval = computeAbsoluteIntervalMinutes(
-          ex.work_date,
-          ex.snapshot_start_time,
-          ex.snapshot_end_time,
-          ex.snapshot_is_cross_midnight
-        );
-        return (
-          Math.max(candidateInterval.startAbsMin, exInterval.startAbsMin) <
-          Math.min(candidateInterval.endAbsMin, exInterval.endAbsMin)
-        );
-      });
-
-      if (overlappingEx) {
-        overlapCount++;
-        items.push({
-          personId,
-          fullName,
-          departmentName,
-          workDate,
-          status: 'TIME_OVERLAP_CONFLICT',
-          conflictCode: 'TIME_OVERLAP_CONFLICT',
-          conflictMessage: `เวลาทับซ้อนกับ ${overlappingEx.snapshot_shift_name} (${overlappingEx.snapshot_start_time}–${overlappingEx.snapshot_end_time} น. วันที่ ${overlappingEx.work_date})`,
-          existingAssignment: {
-            id: overlappingEx.id,
-            workDate: overlappingEx.work_date,
-            shiftCode: overlappingEx.snapshot_shift_code,
-            shiftName: overlappingEx.snapshot_shift_name,
-            startTime: overlappingEx.snapshot_start_time,
-            endTime: overlappingEx.snapshot_end_time,
-            isCrossMidnight: Number(overlappingEx.snapshot_is_cross_midnight),
-          },
-        });
-        continue;
-      }
-
-      readyCount++;
-      items.push({
-        personId,
-        fullName,
-        departmentName,
-        workDate,
-        status: 'READY',
-        conflictCode: null,
-        conflictMessage: null,
-        existingAssignment: null,
-      });
     }
   }
 
@@ -541,6 +806,9 @@ export async function evaluateBulkShiftAssignments(
       conflictCount: duplicateCount + overlapCount,
       duplicateCount,
       overlapCount,
+      notAssignedCount,
+      replaceAffectedCells,
+      clearAffectedCells,
     },
   };
 }
@@ -2652,6 +2920,51 @@ shiftsRouter.post(
 // 6. การมอบหมายเวรแบบกลุ่มและรายเดี่ยว (Bulk & Single Assignment + Soft Cancel)
 // ============================================================================
 
+function parseBulkShiftIds(body: Record<string, unknown>): number[] {
+  const result: number[] = [];
+  if (Array.isArray(body?.shiftIds)) {
+    for (const raw of body.shiftIds) {
+      const n = Number(raw);
+      if (Number.isInteger(n) && n > 0 && !result.includes(n)) {
+        result.push(n);
+      }
+    }
+  }
+  if (body?.shiftId) {
+    const n = Number(body.shiftId);
+    if (Number.isInteger(n) && n > 0 && !result.includes(n)) {
+      result.push(n);
+    }
+  }
+  return result;
+}
+
+function parseBulkOperationMode(raw: unknown): BulkOperationMode {
+  const val = String(raw || 'ADD_SHIFTS').trim().toUpperCase();
+  if (
+    val === 'ADD_SHIFTS' ||
+    val === 'REPLACE_SHIFTS' ||
+    val === 'REMOVE_SELECTED_SHIFTS' ||
+    val === 'CLEAR_ALL_SHIFTS'
+  ) {
+    return val;
+  }
+  return 'ADD_SHIFTS';
+}
+
+function formatShiftSnapshotItem(s: ShiftRow) {
+  return {
+    shiftId: s.id,
+    shiftCode: s.shift_code,
+    shiftName: s.shift_name,
+    startTime: s.start_time,
+    endTime: s.end_time,
+    graceMinutes: s.grace_minutes,
+    cutoffTime: s.cutoff_time,
+    isCrossMidnight: Number(s.is_cross_midnight),
+  };
+}
+
 shiftsRouter.post(
   '/shift-assignments/bulk-preview',
   requireAuth,
@@ -2660,7 +2973,8 @@ shiftsRouter.post(
     try {
       const rawPersonIds: unknown[] = Array.isArray(req.body?.personIds) ? req.body.personIds : [];
       const rawWorkDates: unknown[] = Array.isArray(req.body?.workDates) ? req.body.workDates : [];
-      const shiftId = Number(req.body?.shiftId);
+      const operationMode = parseBulkOperationMode(req.body?.operationMode);
+      const shiftIds = parseBulkShiftIds((req.body || {}) as Record<string, unknown>);
 
       const personIds = Array.from(
         new Set(rawPersonIds.map((id) => String(id || '').trim()).filter(Boolean))
@@ -2673,26 +2987,53 @@ shiftsRouter.post(
         )
       ).sort();
 
-      if (personIds.length === 0 || workDates.length === 0 || !shiftId) {
+      if (
+        personIds.length === 0 ||
+        workDates.length === 0 ||
+        (operationMode !== 'CLEAR_ALL_SHIFTS' && shiftIds.length === 0)
+      ) {
         res.status(400).json({
           error: 'VALIDATION_ERROR',
-          message: 'กรุณาเลือกบุคลากรอย่างน้อย 1 คน กะทำงาน และวันที่ปฏิบัติงานอย่างน้อย 1 วัน',
+          message:
+            operationMode === 'CLEAR_ALL_SHIFTS'
+              ? 'กรุณาเลือกบุคลากรอย่างน้อย 1 คน และวันที่ปฏิบัติงานอย่างน้อย 1 วัน'
+              : 'กรุณาเลือกบุคลากรอย่างน้อย 1 คน แม่แบบกะทำงานอย่างน้อย 1 กะ และวันที่ปฏิบัติงานอย่างน้อย 1 วัน',
           requestId: req.requestId,
         });
         return;
       }
 
-      const shifts = await dbQuery<ShiftRow>(
-        'SELECT * FROM shifts WHERE id = ? AND is_active = 1 LIMIT 1',
-        [shiftId]
-      );
-      if (shifts.length === 0) {
-        res.status(404).json({
-          error: 'SHIFT_NOT_FOUND',
-          message: 'ไม่พบแม่แบบกะทำงานที่เลือก หรือแม่แบบกะนี้ถูกปิดใช้งาน',
-          requestId: req.requestId,
-        });
-        return;
+      let selectedShifts: ShiftRow[] = [];
+      if (operationMode !== 'CLEAR_ALL_SHIFTS') {
+        const placeholders = shiftIds.map(() => '?').join(', ');
+        const foundShifts = await dbQuery<ShiftRow>(
+          `SELECT * FROM shifts WHERE id IN (${placeholders}) AND is_active = 1`,
+          shiftIds
+        );
+        if (foundShifts.length !== shiftIds.length) {
+          res.status(404).json({
+            error: 'SHIFT_NOT_FOUND',
+            message: 'ไม่พบแม่แบบกะทำงานบางรายการที่เลือก หรือแม่แบบกะถูกปิดใช้งาน',
+            requestId: req.requestId,
+          });
+          return;
+        }
+        // รักษาลำดับตามที่ผู้ใช้เลือก
+        const byId = new Map(foundShifts.map((s) => [Number(s.id), s]));
+        selectedShifts = shiftIds.map((id) => byId.get(id)!).filter(Boolean);
+
+        // ตรวจการทับซ้อนกันเองของกะที่เลือกในโหมด ADD_SHIFTS / REPLACE_SHIFTS
+        if (operationMode === 'ADD_SHIFTS' || operationMode === 'REPLACE_SHIFTS') {
+          const selfOverlap = findSelectedShiftsSelfOverlap(selectedShifts, workDates[0]);
+          if (selfOverlap) {
+            res.status(409).json({
+              error: 'SELECTED_SHIFTS_OVERLAP',
+              message: selfOverlap.message,
+              requestId: req.requestId,
+            });
+            return;
+          }
+        }
       }
 
       const personPlaceholders = personIds.map(() => '?').join(', ');
@@ -2709,25 +3050,20 @@ shiftsRouter.post(
         return;
       }
 
-      const shift = shifts[0];
       const evaluation = await evaluateBulkShiftAssignments(dbQuery, {
         personIds,
-        shift,
+        shifts: selectedShifts,
         workDates,
+        operationMode,
       });
+
+      const shiftSnapshots = selectedShifts.map(formatShiftSnapshotItem);
 
       res.json({
         requestId: req.requestId,
-        shiftSnapshot: {
-          shiftId: shift.id,
-          shiftCode: shift.shift_code,
-          shiftName: shift.shift_name,
-          startTime: shift.start_time,
-          endTime: shift.end_time,
-          graceMinutes: shift.grace_minutes,
-          cutoffTime: shift.cutoff_time,
-          isCrossMidnight: Number(shift.is_cross_midnight),
-        },
+        operationMode,
+        shiftSnapshot: shiftSnapshots[0] || null,
+        shiftSnapshots,
         summary: evaluation.summary,
         items: evaluation.items,
       });
@@ -2745,11 +3081,29 @@ shiftsRouter.post(
     try {
       const rawPersonIds: unknown[] = Array.isArray(req.body?.personIds) ? req.body.personIds : [];
       const rawWorkDates: unknown[] = Array.isArray(req.body?.workDates) ? req.body.workDates : [];
-      const shiftId = Number(req.body?.shiftId);
+      const operationMode = parseBulkOperationMode(req.body?.operationMode);
+      const shiftIds = parseBulkShiftIds((req.body || {}) as Record<string, unknown>);
+      const reason = String(req.body?.reason || '').trim() || null;
       const conflictStrategy =
         req.body?.conflictStrategy === 'ABORT_ON_CONFLICT'
           ? 'ABORT_ON_CONFLICT'
           : 'SKIP_CONFLICTS';
+
+      // ห้ามแทนที่หรือลบข้อมูลกะเดิมโดยไม่ได้รับการยืนยันอย่างชัดเจน
+      if (
+        (operationMode === 'REPLACE_SHIFTS' ||
+          operationMode === 'REMOVE_SELECTED_SHIFTS' ||
+          operationMode === 'CLEAR_ALL_SHIFTS') &&
+        req.body?.confirmAction !== true
+      ) {
+        res.status(400).json({
+          error: 'CONFIRMATION_REQUIRED',
+          message:
+            'การแทนที่กะเดิมหรือลบกะทำงานต้องได้รับการยืนยันอย่างชัดเจนจากผู้ใช้งานก่อนบันทึก (confirmAction: true)',
+          requestId: req.requestId,
+        });
+        return;
+      }
 
       const personIds = Array.from(
         new Set(rawPersonIds.map((id) => String(id || '').trim()).filter(Boolean))
@@ -2762,29 +3116,54 @@ shiftsRouter.post(
         )
       ).sort();
 
-      if (personIds.length === 0 || workDates.length === 0 || !shiftId) {
+      if (
+        personIds.length === 0 ||
+        workDates.length === 0 ||
+        (operationMode !== 'CLEAR_ALL_SHIFTS' && shiftIds.length === 0)
+      ) {
         res.status(400).json({
           error: 'VALIDATION_ERROR',
-          message: 'กรุณาเลือกบุคลากรอย่างน้อย 1 คน กะทำงาน และวันที่ปฏิบัติงานอย่างน้อย 1 วัน',
+          message:
+            operationMode === 'CLEAR_ALL_SHIFTS'
+              ? 'กรุณาเลือกบุคลากรอย่างน้อย 1 คน และวันที่ปฏิบัติงานอย่างน้อย 1 วัน'
+              : 'กรุณาเลือกบุคลากรอย่างน้อย 1 คน แม่แบบกะทำงานอย่างน้อย 1 กะ และวันที่ปฏิบัติงานอย่างน้อย 1 วัน',
           requestId: req.requestId,
         });
         return;
       }
 
-      const shifts = await dbQuery<ShiftRow>(
-        'SELECT * FROM shifts WHERE id = ? AND is_active = 1 LIMIT 1',
-        [shiftId]
-      );
-      if (shifts.length === 0) {
-        res.status(404).json({
-          error: 'SHIFT_NOT_FOUND',
-          message: 'ไม่พบแม่แบบกะทำงานที่เลือก หรือแม่แบบกะนี้ถูกปิดใช้งาน',
-          requestId: req.requestId,
-        });
-        return;
+      let selectedShifts: ShiftRow[] = [];
+      if (operationMode !== 'CLEAR_ALL_SHIFTS') {
+        const placeholders = shiftIds.map(() => '?').join(', ');
+        const foundShifts = await dbQuery<ShiftRow>(
+          `SELECT * FROM shifts WHERE id IN (${placeholders}) AND is_active = 1`,
+          shiftIds
+        );
+        if (foundShifts.length !== shiftIds.length) {
+          res.status(404).json({
+            error: 'SHIFT_NOT_FOUND',
+            message: 'ไม่พบแม่แบบกะทำงานบางรายการที่เลือก หรือแม่แบบกะถูกปิดใช้งาน',
+            requestId: req.requestId,
+          });
+          return;
+        }
+        const byId = new Map(foundShifts.map((s) => [Number(s.id), s]));
+        selectedShifts = shiftIds.map((id) => byId.get(id)!).filter(Boolean);
+
+        if (operationMode === 'ADD_SHIFTS' || operationMode === 'REPLACE_SHIFTS') {
+          const selfOverlap = findSelectedShiftsSelfOverlap(selectedShifts, workDates[0]);
+          if (selfOverlap) {
+            res.status(409).json({
+              error: 'SELECTED_SHIFTS_OVERLAP',
+              message: selfOverlap.message,
+              requestId: req.requestId,
+            });
+            return;
+          }
+        }
       }
 
-      const shift = shifts[0];
+      const shiftById = new Map(selectedShifts.map((s) => [Number(s.id), s]));
 
       const personPlaceholders = personIds.map(() => '?').join(', ');
       const validPersons = await dbQuery<{ person_id: string }>(
@@ -2803,17 +3182,22 @@ shiftsRouter.post(
       const txOutcome = await dbTransaction(async (tx: DbTransactionContext) => {
         const evaluation = await evaluateBulkShiftAssignments(tx.query, {
           personIds,
-          shift,
+          shifts: selectedShifts,
           workDates,
+          operationMode,
         });
 
-        const conflicts = evaluation.items.filter((item) => item.status !== 'READY');
+        const conflicts = evaluation.items.filter(
+          (item) => item.status !== 'READY' && item.status !== 'NOT_ASSIGNED'
+        );
         const readyItems = evaluation.items.filter((item) => item.status === 'READY');
 
         if (conflictStrategy === 'ABORT_ON_CONFLICT' && conflicts.length > 0) {
           return {
             abortedDueToConflict: true,
             insertedIds: [] as number[],
+            cancelledCount: 0,
+            clearedCellsCount: 0,
             readyItems,
             conflicts,
             summary: evaluation.summary,
@@ -2821,43 +3205,167 @@ shiftsRouter.post(
         }
 
         const insertedIds: number[] = [];
-        for (const item of readyItems) {
-          const ins = await tx.execute(
-            `INSERT INTO shift_assignments (
-              person_id, shift_id, work_date, snapshot_shift_code, snapshot_shift_name,
-              snapshot_start_time, snapshot_end_time, snapshot_grace_minutes, snapshot_cutoff_time,
-              snapshot_is_cross_midnight, status, assigned_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)`,
-            [
+        let cancelledCount = 0;
+        let clearedCellsCount = 0;
+
+        const cancelActiveForPersonDate = async (
+          personId: string,
+          workDate: string,
+          cancelReasonText: string,
+          onlyShiftId?: number | null
+        ): Promise<number> => {
+          const existingActive = onlyShiftId
+            ? await tx.query<ExistingAssignmentRow>(
+                `SELECT id, person_id, shift_id, work_date, snapshot_shift_code, snapshot_shift_name,
+                        snapshot_start_time, snapshot_end_time, snapshot_is_cross_midnight, status
+                 FROM shift_assignments
+                 WHERE person_id = ? AND work_date = ? AND shift_id = ? AND status = 'ACTIVE'`,
+                [personId, workDate, onlyShiftId]
+              )
+            : await tx.query<ExistingAssignmentRow>(
+                `SELECT id, person_id, shift_id, work_date, snapshot_shift_code, snapshot_shift_name,
+                        snapshot_start_time, snapshot_end_time, snapshot_is_cross_midnight, status
+                 FROM shift_assignments
+                 WHERE person_id = ? AND work_date = ? AND status = 'ACTIVE'`,
+                [personId, workDate]
+              );
+
+          for (const ex of existingActive) {
+            await tx.execute(
+              "UPDATE shift_assignments SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+              [ex.id]
+            );
+            await tx.execute(
+              `INSERT INTO shift_cancellation_logs (
+                shift_assignment_id, person_id, work_date, shift_code, cancel_reason, cancelled_by
+              ) VALUES (?, ?, ?, ?, ?, ?)`,
+              [
+                ex.id,
+                personId,
+                workDate,
+                ex.snapshot_shift_code,
+                cancelReasonText,
+                req.user!.username,
+              ]
+            );
+          }
+          return existingActive.length;
+        };
+
+        if (operationMode === 'CLEAR_ALL_SHIFTS') {
+          for (const item of readyItems) {
+            const c = await cancelActiveForPersonDate(
               item.personId,
-              shift.id,
               item.workDate,
-              shift.shift_code,
-              shift.shift_name,
-              shift.start_time,
-              shift.end_time,
-              shift.grace_minutes,
-              shift.cutoff_time,
-              shift.is_cross_midnight,
-              req.user!.username,
-            ]
-          );
-          if (ins.insertId) {
-            insertedIds.push(ins.insertId);
+              reason || 'ลบกะทั้งหมดแบบกลุ่ม (ตั้งเป็นไม่มีเวร)'
+            );
+            cancelledCount += c;
+            clearedCellsCount++;
+            await upsertDailyOverrideRecord(tx.execute, tx.query, {
+              personId: item.personId,
+              workDate: item.workDate,
+              overrideState: 'CLEARED_ALL_SHIFTS',
+              reason: reason || 'ลบกะทั้งหมดแบบกลุ่ม (ตั้งเป็นไม่มีเวร)',
+              actorUsername: req.user!.username,
+            });
+          }
+        } else if (operationMode === 'REMOVE_SELECTED_SHIFTS') {
+          const touchedPersonDates = new Set<string>();
+          for (const item of readyItems) {
+            if (!item.shiftId) continue;
+            const c = await cancelActiveForPersonDate(
+              item.personId,
+              item.workDate,
+              reason || `ลบกะที่เลือกแบบกลุ่ม (${item.shiftCode || item.shiftId})`,
+              item.shiftId
+            );
+            cancelledCount += c;
+            touchedPersonDates.add(`${item.personId}|${item.workDate}`);
           }
 
-          await upsertDailyOverrideRecord(tx.execute, tx.query, {
-            personId: item.personId,
-            workDate: item.workDate,
-            overrideState: 'CUSTOM_ASSIGNED',
-            reason: `มอบหมายเวรแบบกลุ่ม (${shift.shift_code})`,
-            actorUsername: req.user!.username,
-          });
+          // ตรวจแต่ละ (personId, workDate) ที่ลบกะแล้ว: หากไม่เหลือกะ ACTIVE ให้คงสถานะ CLEARED_ALL_SHIFTS (ห้ามสร้างกะเริ่มต้นกลับมาเอง)
+          for (const key of touchedPersonDates) {
+            const [pid, wDate] = key.split('|');
+            const remaining = await tx.query<{ id: number }>(
+              "SELECT id FROM shift_assignments WHERE person_id = ? AND work_date = ? AND status = 'ACTIVE' LIMIT 1",
+              [pid, wDate]
+            );
+            const nextState =
+              remaining.length > 0 ? ('CUSTOM_ASSIGNED' as const) : ('CLEARED_ALL_SHIFTS' as const);
+            if (nextState === 'CLEARED_ALL_SHIFTS') {
+              clearedCellsCount++;
+            }
+            await upsertDailyOverrideRecord(tx.execute, tx.query, {
+              personId: pid,
+              workDate: wDate,
+              overrideState: nextState,
+              reason: reason || 'ลบกะที่เลือกแบบกลุ่ม',
+              actorUsername: req.user!.username,
+            });
+          }
+        } else {
+          // ADD_SHIFTS หรือ REPLACE_SHIFTS
+          const replacedKeys = new Set<string>();
+          for (const item of readyItems) {
+            const shift = item.shiftId ? shiftById.get(Number(item.shiftId)) : undefined;
+            if (!shift) continue;
+
+            if (operationMode === 'REPLACE_SHIFTS') {
+              const key = `${item.personId}|${item.workDate}`;
+              if (!replacedKeys.has(key)) {
+                replacedKeys.add(key);
+                const c = await cancelActiveForPersonDate(
+                  item.personId,
+                  item.workDate,
+                  reason || `แทนที่กะเดิมแบบกลุ่ม (${selectedShifts.map((s) => s.shift_code).join(', ')})`
+                );
+                cancelledCount += c;
+              }
+            }
+
+            const ins = await tx.execute(
+              `INSERT INTO shift_assignments (
+                person_id, shift_id, work_date, snapshot_shift_code, snapshot_shift_name,
+                snapshot_start_time, snapshot_end_time, snapshot_grace_minutes, snapshot_cutoff_time,
+                snapshot_is_cross_midnight, status, assigned_by
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)`,
+              [
+                item.personId,
+                shift.id,
+                item.workDate,
+                shift.shift_code,
+                shift.shift_name,
+                shift.start_time,
+                shift.end_time,
+                shift.grace_minutes,
+                shift.cutoff_time,
+                shift.is_cross_midnight,
+                req.user!.username,
+              ]
+            );
+            if (ins.insertId) {
+              insertedIds.push(ins.insertId);
+            }
+
+            await upsertDailyOverrideRecord(tx.execute, tx.query, {
+              personId: item.personId,
+              workDate: item.workDate,
+              overrideState: 'CUSTOM_ASSIGNED',
+              reason:
+                reason ||
+                (operationMode === 'REPLACE_SHIFTS'
+                  ? `แทนที่กะแบบกลุ่ม (${shift.shift_code})`
+                  : `มอบหมายเวรแบบกลุ่ม (${shift.shift_code})`),
+              actorUsername: req.user!.username,
+            });
+          }
         }
 
         return {
           abortedDueToConflict: false,
           insertedIds,
+          cancelledCount,
+          clearedCellsCount,
           readyItems,
           conflicts,
           summary: evaluation.summary,
@@ -2875,21 +3383,36 @@ shiftsRouter.post(
         return;
       }
 
+      const shiftSnapshots = selectedShifts.map(formatShiftSnapshotItem);
+
       await writeAuditLog({
         requestId: req.requestId,
         actorUsername: req.user!.username,
         actorRole: req.user!.role,
         ipAddress: req.ip || '127.0.0.1',
-        action: 'SHIFT_BULK_ASSIGNED',
+        action:
+          operationMode === 'CLEAR_ALL_SHIFTS'
+            ? 'SHIFT_BULK_CLEARED'
+            : operationMode === 'REMOVE_SELECTED_SHIFTS'
+              ? 'SHIFT_BULK_REMOVED'
+              : operationMode === 'REPLACE_SHIFTS'
+                ? 'SHIFT_BULK_REPLACED'
+                : 'SHIFT_BULK_ASSIGNED',
         targetType: 'SHIFT_ASSIGNMENT',
-        targetId: (txOutcome.insertedIds.join(',') || 'NONE').slice(0, 120),
+        targetId: (txOutcome.insertedIds.join(',') || `${operationMode}:${personIds.length}p`).slice(
+          0,
+          120
+        ),
         result: 'SUCCESS',
         detail: {
-          shiftId: shift.id,
-          shiftCode: shift.shift_code,
+          operationMode,
+          shiftIds,
+          shiftCodes: selectedShifts.map((s) => s.shift_code),
           conflictStrategy,
           totalRequested: txOutcome.summary.totalRequested,
           insertedCount: txOutcome.insertedIds.length,
+          cancelledCount: txOutcome.cancelledCount,
+          clearedCellsCount: txOutcome.clearedCellsCount,
           skippedConflictCount: txOutcome.conflicts.length,
           personIds,
           workDates,
@@ -2899,17 +3422,12 @@ shiftsRouter.post(
       res.status(201).json({
         status: 'SUCCESS',
         requestId: req.requestId,
-        shiftSnapshot: {
-          shiftId: shift.id,
-          shiftCode: shift.shift_code,
-          shiftName: shift.shift_name,
-          startTime: shift.start_time,
-          endTime: shift.end_time,
-          graceMinutes: shift.grace_minutes,
-          cutoffTime: shift.cutoff_time,
-          isCrossMidnight: Number(shift.is_cross_midnight),
-        },
+        operationMode,
+        shiftSnapshot: shiftSnapshots[0] || null,
+        shiftSnapshots,
         insertedCount: txOutcome.insertedIds.length,
+        cancelledCount: txOutcome.cancelledCount,
+        clearedCellsCount: txOutcome.clearedCellsCount,
         skippedConflictCount: txOutcome.conflicts.length,
         insertedIds: txOutcome.insertedIds,
         conflicts: txOutcome.conflicts,
