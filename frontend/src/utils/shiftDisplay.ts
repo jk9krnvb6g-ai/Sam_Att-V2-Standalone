@@ -418,3 +418,198 @@ export function intervalsOverlapHalfOpen(
 ): boolean {
   return Math.max(a.startAbsMin, b.startAbsMin) < Math.min(a.endAbsMin, b.endAbsMin);
 }
+
+export type FilteredSelectionTriState = 'unchecked' | 'indeterminate' | 'checked';
+
+export interface FilteredSelectionStateResult {
+  state: FilteredSelectionTriState;
+  totalFilteredCount: number;
+  selectedInFilteredCount: number;
+  uniqueSelectedTotalCount: number;
+  disabled: boolean;
+}
+
+/**
+ * คำนวณสถานะ Checkbox เลือกทั้งหมดแบบ 3 สถานะ (Unchecked / Indeterminate / Checked)
+ * โดยอิงจากรายการบุคลากรที่ตรงกับตัวกรองทั้งหมด (ไม่ใช่เฉพาะแถวที่มองเห็นในพื้นที่ Scroll)
+ */
+export function computeFilteredSelectionState(
+  filteredIds: string[],
+  selectedIds: string[]
+): FilteredSelectionStateResult {
+  const uniqueFiltered = Array.from(
+    new Set(filteredIds.map((id) => String(id ?? '').trim()).filter(Boolean))
+  );
+  const uniqueSelectedSet = new Set(
+    selectedIds.map((id) => String(id ?? '').trim()).filter(Boolean)
+  );
+
+  let selectedInFilteredCount = 0;
+  for (const fid of uniqueFiltered) {
+    if (uniqueSelectedSet.has(fid)) {
+      selectedInFilteredCount++;
+    }
+  }
+
+  const totalFilteredCount = uniqueFiltered.length;
+  const disabled = totalFilteredCount === 0;
+  let state: FilteredSelectionTriState = 'unchecked';
+  if (totalFilteredCount > 0 && selectedInFilteredCount === totalFilteredCount) {
+    state = 'checked';
+  } else if (selectedInFilteredCount > 0) {
+    state = 'indeterminate';
+  }
+
+  return {
+    state,
+    totalFilteredCount,
+    selectedInFilteredCount,
+    uniqueSelectedTotalCount: uniqueSelectedSet.size,
+    disabled,
+  };
+}
+
+/**
+ * สลับสถานะ Checkbox เลือกทั้งหมดตามตัวกรองปัจจุบัน:
+ * - หากยังเลือกไม่ครบในตัวกรองปัจจุบัน -> เพิ่มทุกคนที่ตรงตัวกรองเข้าสู่รายการที่เลือก (ไม่ซ้ำ)
+ * - หากเลือกครบทุกคนในตัวกรองปัจจุบันแล้ว -> เอาออกเฉพาะคนที่ตรงตัวกรองปัจจุบัน โดยรักษารายชื่อที่เลือกจากตัวกรองอื่นไว้ครบถ้วน
+ */
+export function toggleSelectAllFiltered(filteredIds: string[], selectedIds: string[]): string[] {
+  const uniqueFiltered = Array.from(
+    new Set(filteredIds.map((id) => String(id ?? '').trim()).filter(Boolean))
+  );
+  const uniqueSelected = Array.from(
+    new Set(selectedIds.map((id) => String(id ?? '').trim()).filter(Boolean))
+  );
+
+  if (uniqueFiltered.length === 0) {
+    return uniqueSelected;
+  }
+
+  const meta = computeFilteredSelectionState(uniqueFiltered, uniqueSelected);
+  if (meta.state === 'checked') {
+    const filteredSet = new Set(uniqueFiltered);
+    return uniqueSelected.filter((id) => !filteredSet.has(id));
+  }
+
+  const nextSet = new Set(uniqueSelected);
+  for (const fid of uniqueFiltered) {
+    nextSet.add(fid);
+  }
+  return Array.from(nextSet);
+}
+
+export interface ClientShiftOverlapDetail {
+  kind: 'SAME_DAY' | 'CROSS_MIDNIGHT_NEXT_DAY';
+  shiftAId: number;
+  shiftAName: string;
+  shiftATime: string;
+  shiftACrossMidnight: boolean;
+  shiftBId: number;
+  shiftBName: string;
+  shiftBTime: string;
+  shiftBCrossMidnight: boolean;
+  message: string;
+}
+
+/**
+ * ตรวจสอบคู่แม่แบบกะที่มีช่วงเวลาทับซ้อนกันทั้งหมดตามหลักการช่วงเวลา [start, end)
+ * - ตรวจทุกคู่ภายในวันเดียวกัน (SAME_DAY)
+ * - หากมีวันที่เลือกติดกันอย่างน้อย 1 คู่ (d และ d+1) จะตรวจกะข้ามวัน (+1 วัน) เทียบกับกะในวันถัดไปด้วย (CROSS_MIDNIGHT_NEXT_DAY)
+ * - กะที่สิ้นสุดเวลาเดียวกับอีกกะเริ่มต้น เช่น [08:00, 16:00) กับ [16:00, 00:00) หรือ 20:00–08:00 (+1 วัน) กับ 08:00–16:00 วันถัดไป ถือว่าไม่ทับซ้อน
+ */
+export function findAllClientSelectedShiftsOverlaps(
+  selectedShifts: Array<{
+    id: number;
+    shift_code: string;
+    shift_name: string;
+    start_time: string;
+    end_time: string;
+    is_cross_midnight: number | boolean;
+  }>,
+  selectedDates?: string[]
+): ClientShiftOverlapDetail[] {
+  if (selectedShifts.length === 0) return [];
+
+  const overlaps: ClientShiftOverlapDetail[] = [];
+  const baseDate = '2026-01-01';
+  const nextDate = '2026-01-02';
+
+  // 1. ตรวจสอบการทับซ้อนกันเองในวันเดียวกัน (ทุกคู่)
+  for (let i = 0; i < selectedShifts.length; i++) {
+    for (let j = i + 1; j < selectedShifts.length; j++) {
+      const a = selectedShifts[i];
+      const b = selectedShifts[j];
+      const intA = computeClientShiftInterval(baseDate, a.start_time, a.end_time, a.is_cross_midnight);
+      const intB = computeClientShiftInterval(baseDate, b.start_time, b.end_time, b.is_cross_midnight);
+
+      if (intervalsOverlapHalfOpen(intA, intB)) {
+        const nameA = cleanShiftDisplayName(a.shift_name);
+        const nameB = cleanShiftDisplayName(b.shift_name);
+        const timeA = `${a.start_time}–${a.end_time} น.${intA.isCrossMidnight ? ' (+1 วัน)' : ''}`;
+        const timeB = `${b.start_time}–${b.end_time} น.${intB.isCrossMidnight ? ' (+1 วัน)' : ''}`;
+        overlaps.push({
+          kind: 'SAME_DAY',
+          shiftAId: Number(a.id),
+          shiftAName: nameA,
+          shiftATime: timeA,
+          shiftACrossMidnight: intA.isCrossMidnight,
+          shiftBId: Number(b.id),
+          shiftBName: nameB,
+          shiftBTime: timeB,
+          shiftBCrossMidnight: intB.isCrossMidnight,
+          message: `"${nameA}" (${timeA}) ทับซ้อนกับ "${nameB}" (${timeB}) ในวันเดียวกัน`,
+        });
+      }
+    }
+  }
+
+  // 2. ตรวจสอบการทับซ้อนของกะข้ามวัน (+1 วัน) กับกะของวันถัดไป เมื่อมีวันที่เลือกติดกัน
+  const normalizedDates = Array.from(
+    new Set((selectedDates || []).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ''))))
+  ).sort();
+  const dateSet = new Set(normalizedDates);
+  const hasConsecutiveDates = normalizedDates.some((d) => dateSet.has(addDaysYmd(d, 1)));
+
+  if (hasConsecutiveDates) {
+    const seenCrossPairs = new Set<string>();
+    for (const a of selectedShifts) {
+      const intA = computeClientShiftInterval(baseDate, a.start_time, a.end_time, a.is_cross_midnight);
+      if (!intA.isCrossMidnight) continue;
+
+      for (const b of selectedShifts) {
+        const intBNext = computeClientShiftInterval(
+          nextDate,
+          b.start_time,
+          b.end_time,
+          b.is_cross_midnight
+        );
+        if (intervalsOverlapHalfOpen(intA, intBNext)) {
+          const pairKey = `${a.id}->${b.id}`;
+          if (seenCrossPairs.has(pairKey)) continue;
+          seenCrossPairs.add(pairKey);
+
+          const nameA = cleanShiftDisplayName(a.shift_name);
+          const nameB = cleanShiftDisplayName(b.shift_name);
+          const timeA = `${a.start_time}–${a.end_time} น. (+1 วัน)`;
+          const timeB = `${b.start_time}–${b.end_time} น.${intBNext.isCrossMidnight ? ' (+1 วัน)' : ''}`;
+          overlaps.push({
+            kind: 'CROSS_MIDNIGHT_NEXT_DAY',
+            shiftAId: Number(a.id),
+            shiftAName: nameA,
+            shiftATime: timeA,
+            shiftACrossMidnight: true,
+            shiftBId: Number(b.id),
+            shiftBName: nameB,
+            shiftBTime: timeB,
+            shiftBCrossMidnight: intBNext.isCrossMidnight,
+            message: `กะข้ามวัน "${nameA}" (${timeA}) ทับซ้อนกับ "${nameB}" (${timeB}) ของวันถัดไป`,
+          });
+        }
+      }
+    }
+  }
+
+  return overlaps;
+}
+

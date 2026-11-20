@@ -34,14 +34,18 @@ import {
   evaluateDailyCellChange,
   evaluateDailyCellSync,
   findSelectedShiftsSelfOverlap,
+  findAllSelectedShiftsSelfOverlaps,
   normalizeWorkDateString,
 } from '../src/modules/shifts/routes.ts';
 import {
   classifyShiftIconKind,
   buildCompactMonthlyCellViewModel,
   findClientSelectedShiftsOverlap,
+  findAllClientSelectedShiftsOverlaps,
   computeClientShiftInterval,
   intervalsOverlapHalfOpen,
+  computeFilteredSelectionState,
+  toggleSelectAllFiltered,
 } from '../../frontend/src/utils/shiftDisplay.ts';
 import {
   setScannerExeTestDouble,
@@ -3727,6 +3731,297 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     assert.equal(dupEval.specialExistingAssignments.length, 1);
     assert.equal(dupEval.specialExistingAssignments[0].assignmentId, 9002);
     assert.equal(dupEval.specialExistingAssignments[0].specialReason, 'DUPLICATE_TEMPLATE');
+  });
+
+  test('28. Bulk Assign Workspace UX Logic: Tri-state Filtered Personnel Select-All, Cross-Filter Preservation, Multi-Shift Overlap (Same-Day & Cross-Midnight), and Backend Bulk Validation + RBAC', async () => {
+    // -------------------------------------------------------------------------
+    // Part A: Unit tests for Personnel Tri-State Header Checkbox & Filter Preservation
+    // -------------------------------------------------------------------------
+    const nursingIds = ['N-01', 'N-02', 'N-03', 'N-04', 'N-05', 'N-06', 'N-07', 'N-08', 'N-09', 'N-10'];
+    const adminIds = ['A-01', 'A-02', 'A-03', 'A-04', 'A-05'];
+
+    // A1: Empty filtered result -> disabled & unchecked
+    const emptyState = computeFilteredSelectionState([], []);
+    assert.equal(emptyState.disabled, true);
+    assert.equal(emptyState.state, 'unchecked');
+    assert.equal(emptyState.totalFilteredCount, 0);
+
+    // A2: Select 1 by 1 -> indeterminate
+    let selected = ['N-01', 'N-02'];
+    const partialState = computeFilteredSelectionState(nursingIds, selected);
+    assert.equal(partialState.disabled, false);
+    assert.equal(partialState.state, 'indeterminate');
+    assert.equal(partialState.selectedInFilteredCount, 2);
+    assert.equal(partialState.uniqueSelectedTotalCount, 2);
+
+    // A3: Toggle select-all in Nursing -> all 10 selected & checked
+    selected = toggleSelectAllFiltered(nursingIds, selected);
+    assert.equal(selected.length, 10);
+    const nursingChecked = computeFilteredSelectionState(nursingIds, selected);
+    assert.equal(nursingChecked.state, 'checked');
+    assert.equal(nursingChecked.selectedInFilteredCount, 10);
+
+    // A4: Switch filter to Admin -> Nursing 10 MUST remain preserved, Admin header checkbox is unchecked
+    const adminBefore = computeFilteredSelectionState(adminIds, selected);
+    assert.equal(adminBefore.state, 'unchecked');
+    assert.equal(adminBefore.uniqueSelectedTotalCount, 10);
+
+    // A5: Select all 5 in Admin -> total unique selected = 15 (10 Nursing + 5 Admin)
+    selected = toggleSelectAllFiltered(adminIds, selected);
+    assert.equal(selected.length, 15);
+    const adminAfter = computeFilteredSelectionState(adminIds, selected);
+    assert.equal(adminAfter.state, 'checked');
+    assert.equal(adminAfter.uniqueSelectedTotalCount, 15);
+
+    // A6: Uncheck select-all while filtered to Admin -> removes ONLY Admin's 5, keeps Nursing's 10
+    selected = toggleSelectAllFiltered(adminIds, selected);
+    assert.equal(selected.length, 10);
+    assert.deepEqual(selected.sort(), [...nursingIds].sort());
+    assert.equal(computeFilteredSelectionState(nursingIds, selected).state, 'checked');
+    assert.equal(computeFilteredSelectionState(adminIds, selected).state, 'unchecked');
+
+    // A7: Search subset (2 matching rows) -> select-all selects only matching rows without losing others
+    const searchSubset = ['A-01', 'A-03'];
+    selected = toggleSelectAllFiltered(searchSubset, selected);
+    assert.equal(selected.length, 12);
+    assert.equal(computeFilteredSelectionState(adminIds, selected).state, 'indeterminate');
+    assert.equal(computeFilteredSelectionState(searchSubset, selected).state, 'checked');
+
+    // -------------------------------------------------------------------------
+    // Part B: Unit tests for Multi-Shift Select-All & Half-Open [start, end) Overlap (Same-Day + Cross-Midnight)
+    // -------------------------------------------------------------------------
+    const sampleShifts = [
+      { id: 1, shift_code: 'OFF-0816', shift_name: 'เวรราชการปกติ', start_time: '08:00', end_time: '16:00', is_cross_midnight: 0 },
+      { id: 2, shift_code: 'MOR-0816', shift_name: 'เวรเช้า', start_time: '08:00', end_time: '16:00', is_cross_midnight: 0 },
+      { id: 3, shift_code: 'AFT-1600', shift_name: 'เวรบ่าย', start_time: '16:00', end_time: '00:00', is_cross_midnight: 1 },
+      { id: 4, shift_code: 'EXT-2008', shift_name: 'เวรดึกพิเศษ', start_time: '20:00', end_time: '08:00', is_cross_midnight: 1 },
+      { id: 5, shift_code: 'EARLY-0614', shift_name: 'เวรเช้าตรู่', start_time: '06:00', end_time: '14:00', is_cross_midnight: 0 },
+    ];
+
+    // B1: Boundary-touching [08:00, 16:00) + [16:00, 00:00) -> 0 overlaps
+    const nonOverlapPair = findAllClientSelectedShiftsOverlaps([sampleShifts[1], sampleShifts[2]], [
+      '2026-12-01',
+      '2026-12-02',
+    ]);
+    assert.equal(nonOverlapPair.length, 0, '[08:00, 16:00) and [16:00, 00:00) must NOT overlap');
+
+    // B2: Cross-midnight 20:00–08:00 (+1) touching next-day 08:00–16:00 -> 0 overlaps
+    const nightTouchMorning = findAllClientSelectedShiftsOverlaps(
+      [sampleShifts[1], sampleShifts[3]],
+      ['2026-12-01', '2026-12-02']
+    );
+    assert.equal(
+      nightTouchMorning.length,
+      0,
+      '20:00-08:00 (+1) touching 08:00-16:00 next day must NOT overlap under [start, end)'
+    );
+
+    // B3: Cross-midnight 20:00–08:00 (+1) vs next-day 06:00–14:00 on consecutive dates -> CROSS_MIDNIGHT_NEXT_DAY overlap!
+    const nightOverlapEarly = findAllClientSelectedShiftsOverlaps(
+      [sampleShifts[3], sampleShifts[4]],
+      ['2026-12-01', '2026-12-02']
+    );
+    assert.equal(nightOverlapEarly.length, 1);
+    assert.equal(nightOverlapEarly[0].kind, 'CROSS_MIDNIGHT_NEXT_DAY');
+
+    // B4: Same two shifts on non-consecutive dates -> 0 overlaps
+    const nightNonConsec = findAllClientSelectedShiftsOverlaps(
+      [sampleShifts[3], sampleShifts[4]],
+      ['2026-12-01', '2026-12-03']
+    );
+    assert.equal(nightNonConsec.length, 0);
+
+    // B5: Select ALL shifts -> immediately flags all overlapping pairs (OFF-0816 vs MOR-0816, AFT-1600 vs EXT-2008, etc.)
+    const selectAllOverlaps = findAllClientSelectedShiftsOverlaps(sampleShifts, [
+      '2026-12-01',
+      '2026-12-02',
+    ]);
+    assert.ok(selectAllOverlaps.length >= 4, 'Selecting all templates must report every overlapping pair');
+    assert.ok(
+      selectAllOverlaps.some(
+        (o) => o.kind === 'SAME_DAY' && o.shiftAId === 1 && o.shiftBId === 2
+      ),
+      'Must report OFF-0816 (08:00-16:00) overlapping MOR-0816 (08:00-16:00)'
+    );
+
+    // Backend pure helper check
+    const backendAllOverlaps = findAllSelectedShiftsSelfOverlaps(
+      sampleShifts.map((s) => ({
+        ...s,
+        shift_category: 'SPECIAL',
+        grace_minutes: 15,
+        cutoff_time: '10:00',
+        is_active: 1,
+      })) as any,
+      '2026-12-01'
+    );
+    assert.ok(backendAllOverlaps.length >= 3);
+
+    // -------------------------------------------------------------------------
+    // Part C: Integration Tests (Backend Validation, Multi-Person/Multi-Day Modes & RBAC)
+    // -------------------------------------------------------------------------
+    const adminLogin = await apiCall('/api/Sam_Att/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'Admin@SamAtt2026' },
+    });
+    assert.equal(adminLogin.status, 200);
+    const adminToken = adminLogin.data.token as string;
+    const shiftsRes = await apiCall('/api/Sam_Att/shifts?activeOnly=true', { token: adminToken });
+    assert.equal(shiftsRes.status, 200);
+    const activeShifts = shiftsRes.data.items as Array<{
+      id: number;
+      shift_code: string;
+      start_time: string;
+      end_time: string;
+    }>;
+    const allActiveShiftIds = activeShifts.map((s) => Number(s.id));
+    assert.ok(allActiveShiftIds.length >= 3, 'Must have real shift templates from Backend');
+
+    const morShift = activeShifts.find((s) => s.shift_code === 'MOR-0816')!;
+    const aftShift = activeShifts.find((s) => s.shift_code === 'AFT-1600')!;
+    assert.ok(morShift && aftShift);
+
+    // C1: Selecting ALL overlapping shifts in ADD_SHIFTS -> bulk-preview & bulk MUST return 409 SELECTED_SHIFTS_OVERLAP with conflicts[]
+    const overlapPreviewRes = await apiCall('/api/Sam_Att/shift-assignments/bulk-preview', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        personIds: ['SAM-P001', 'SAM-P002'],
+        shiftIds: allActiveShiftIds,
+        workDates: ['2026-12-10', '2026-12-11'],
+        operationMode: 'ADD_SHIFTS',
+      },
+    });
+    assert.equal(overlapPreviewRes.status, 409);
+    assert.equal(overlapPreviewRes.data.error, 'SELECTED_SHIFTS_OVERLAP');
+    assert.ok(Array.isArray(overlapPreviewRes.data.conflicts) && overlapPreviewRes.data.conflicts.length >= 1);
+
+    const overlapSaveRes = await apiCall('/api/Sam_Att/shift-assignments/bulk', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        personIds: ['SAM-P001', 'SAM-P002'],
+        shiftIds: allActiveShiftIds,
+        workDates: ['2026-12-10', '2026-12-11'],
+        operationMode: 'ADD_SHIFTS',
+        confirmAction: true,
+      },
+    });
+    assert.equal(overlapSaveRes.status, 409);
+    assert.equal(overlapSaveRes.data.error, 'SELECTED_SHIFTS_OVERLAP');
+
+    // Verify 0 rows inserted on 2026-12-10/11
+    const afterBlockedRows = await dbQuery<{ id: number }>(
+      `SELECT id FROM shift_assignments
+       WHERE person_id IN ('SAM-P001', 'SAM-P002')
+         AND work_date IN ('2026-12-10', '2026-12-11')
+         AND status = 'ACTIVE'`
+    );
+    assert.equal(afterBlockedRows.length, 0, 'Overlapping bulk save must NEVER write rows to DB');
+
+    // C2: Multi-person (2) x Multi-day (2) x Non-overlapping Multi-shift (MOR + AFT) -> ADD_SHIFTS succeeds (8 rows)
+    const validAddRes = await apiCall('/api/Sam_Att/shift-assignments/bulk', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        personIds: ['SAM-P001', 'SAM-P002'],
+        shiftIds: [morShift.id, aftShift.id],
+        workDates: ['2026-12-10', '2026-12-11'],
+        operationMode: 'ADD_SHIFTS',
+        confirmAction: true,
+      },
+    });
+    assert.equal(validAddRes.status, 201);
+    assert.equal(validAddRes.data.insertedCount, 8);
+
+    // C3: REMOVE_SELECTED_SHIFTS allows selecting ALL shifts (including overlapping pairs) without 409
+    const removePreviewRes = await apiCall('/api/Sam_Att/shift-assignments/bulk-preview', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        personIds: ['SAM-P001'],
+        shiftIds: allActiveShiftIds,
+        workDates: ['2026-12-10'],
+        operationMode: 'REMOVE_SELECTED_SHIFTS',
+      },
+    });
+    assert.equal(
+      removePreviewRes.status,
+      200,
+      'REMOVE_SELECTED_SHIFTS must allow selecting overlapping templates to remove'
+    );
+    assert.equal(removePreviewRes.data.summary.readyCount, 2);
+
+    // C4: CLEAR_ALL_SHIFTS works with empty shiftIds: [] (must NOT require selecting templates)
+    const clearAllPreviewRes = await apiCall('/api/Sam_Att/shift-assignments/bulk-preview', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        personIds: ['SAM-P001', 'SAM-P002'],
+        shiftIds: [],
+        workDates: ['2026-12-10', '2026-12-11'],
+        operationMode: 'CLEAR_ALL_SHIFTS',
+      },
+    });
+    assert.equal(clearAllPreviewRes.status, 200);
+    assert.equal(clearAllPreviewRes.data.summary.readyCount, 4);
+
+    const clearAllSaveRes = await apiCall('/api/Sam_Att/shift-assignments/bulk', {
+      method: 'POST',
+      token: adminToken,
+      body: {
+        personIds: ['SAM-P001', 'SAM-P002'],
+        shiftIds: [],
+        workDates: ['2026-12-10', '2026-12-11'],
+        operationMode: 'CLEAR_ALL_SHIFTS',
+        confirmAction: true,
+        reason: 'ทดสอบลบกะทั้งหมดแบบกลุ่มโดยไม่เลือกแม่แบบกะ',
+      },
+    });
+    assert.equal(clearAllSaveRes.status, 201);
+    assert.equal(clearAllSaveRes.data.cancelledCount, 8);
+    assert.equal(clearAllSaveRes.data.clearedCellsCount, 4);
+
+    // Verify CLEARED_ALL_SHIFTS persisted in shift_daily_overrides
+    const clearedOverrides = await dbQuery<{ override_state: string }>(
+      `SELECT override_state FROM shift_daily_overrides
+       WHERE person_id IN ('SAM-P001', 'SAM-P002')
+         AND work_date IN ('2026-12-10', '2026-12-11')`
+    );
+    assert.equal(clearedOverrides.length, 4);
+    assert.ok(clearedOverrides.every((r) => r.override_state === 'CLEARED_ALL_SHIFTS'));
+
+    // C5: RBAC Authorization check — GENERAL_USER MUST receive 403 on bulk-preview and bulk
+    const genLogin = await apiCall('/api/Sam_Att/auth/login', {
+      method: 'POST',
+      body: { username: 'user1003', password: 'User@SamAtt2026' },
+    });
+    assert.equal(genLogin.status, 200);
+    const generalToken = genLogin.data.token as string;
+    const rbacPreviewRes = await apiCall('/api/Sam_Att/shift-assignments/bulk-preview', {
+      method: 'POST',
+      token: generalToken,
+      body: {
+        personIds: ['SAM-P001'],
+        shiftIds: [morShift.id],
+        workDates: ['2026-12-12'],
+        operationMode: 'ADD_SHIFTS',
+      },
+    });
+    assert.equal(rbacPreviewRes.status, 403, 'GENERAL_USER must be forbidden from bulk-preview');
+
+    const rbacBulkRes = await apiCall('/api/Sam_Att/shift-assignments/bulk', {
+      method: 'POST',
+      token: generalToken,
+      body: {
+        personIds: ['SAM-P001'],
+        shiftIds: [morShift.id],
+        workDates: ['2026-12-12'],
+        operationMode: 'ADD_SHIFTS',
+        confirmAction: true,
+      },
+    });
+    assert.equal(rbacBulkRes.status, 403, 'GENERAL_USER must be forbidden from bulk save');
   });
 });
 

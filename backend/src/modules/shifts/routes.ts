@@ -391,12 +391,14 @@ async function upsertDailyOverrideRecord(
 }
 
 /**
- * ตรวจสอบว่าชุดแม่แบบกะที่เลือกพร้อมกัน (Multi-Shift) มีเวลาทับซ้อนกันเองในวันเดียวกันหรือไม่
+ * ตรวจสอบทุกคู่ของแม่แบบกะที่เลือกพร้อมกัน (Multi-Shift) ว่ามีช่วงเวลาทับซ้อนกันเองในวันเดียวกันหรือไม่
+ * ใช้หลักการช่วงเวลา [start, end) เช่น [08:00, 16:00) กับ [16:00, 24:00) ถือว่าไม่ทับซ้อน
  */
-export function findSelectedShiftsSelfOverlap(
+export function findAllSelectedShiftsSelfOverlaps(
   shifts: ShiftRow[],
   referenceDate = '2026-01-01'
-): { shiftA: ShiftRow; shiftB: ShiftRow; message: string } | null {
+): Array<{ shiftA: ShiftRow; shiftB: ShiftRow; message: string }> {
+  const conflicts: Array<{ shiftA: ShiftRow; shiftB: ShiftRow; message: string }> = [];
   for (let i = 0; i < shifts.length; i++) {
     for (let j = i + 1; j < shifts.length; j++) {
       const a = shifts[i];
@@ -414,15 +416,28 @@ export function findSelectedShiftsSelfOverlap(
         b.is_cross_midnight
       );
       if (Math.max(intA.startAbsMin, intB.startAbsMin) < Math.min(intA.endAbsMin, intB.endAbsMin)) {
-        return {
+        const crossA = Number(a.is_cross_midnight) === 1 ? ' (+1 วัน)' : '';
+        const crossB = Number(b.is_cross_midnight) === 1 ? ' (+1 วัน)' : '';
+        conflicts.push({
           shiftA: a,
           shiftB: b,
-          message: `แม่แบบกะที่เลือก "${a.shift_name}" (${a.start_time}–${a.end_time} น.) และ "${b.shift_name}" (${b.start_time}–${b.end_time} น.) มีช่วงเวลาทับซ้อนกัน`,
-        };
+          message: `แม่แบบกะที่เลือก "${a.shift_name}" (${a.start_time}–${a.end_time} น.${crossA}) และ "${b.shift_name}" (${b.start_time}–${b.end_time} น.${crossB}) มีช่วงเวลาทับซ้อนกัน`,
+        });
       }
     }
   }
-  return null;
+  return conflicts;
+}
+
+/**
+ * ตรวจสอบว่าชุดแม่แบบกะที่เลือกพร้อมกัน (Multi-Shift) มีเวลาทับซ้อนกันเองในวันเดียวกันหรือไม่
+ */
+export function findSelectedShiftsSelfOverlap(
+  shifts: ShiftRow[],
+  referenceDate = '2026-01-01'
+): { shiftA: ShiftRow; shiftB: ShiftRow; message: string } | null {
+  const all = findAllSelectedShiftsSelfOverlaps(shifts, referenceDate);
+  return all.length > 0 ? all[0] : null;
 }
 
 // ============================================================================
@@ -4773,11 +4788,27 @@ shiftsRouter.post(
 
         // ตรวจการทับซ้อนกันเองของกะที่เลือกในโหมด ADD_SHIFTS / REPLACE_SHIFTS
         if (operationMode === 'ADD_SHIFTS' || operationMode === 'REPLACE_SHIFTS') {
-          const selfOverlap = findSelectedShiftsSelfOverlap(selectedShifts, workDates[0]);
-          if (selfOverlap) {
+          const selfOverlaps = findAllSelectedShiftsSelfOverlaps(selectedShifts, workDates[0]);
+          if (selfOverlaps.length > 0) {
+            const summaryMessage =
+              selfOverlaps.length === 1
+                ? selfOverlaps[0].message
+                : `พบแม่แบบกะที่มีเวลาทับซ้อนกัน ${selfOverlaps.length} คู่ กรุณาตรวจสอบก่อนบันทึก: ${selfOverlaps
+                    .slice(0, 3)
+                    .map((o) => `${o.shiftA.shift_name} กับ ${o.shiftB.shift_name}`)
+                    .join(', ')}${selfOverlaps.length > 3 ? ` และอีก ${selfOverlaps.length - 3} คู่` : ''}`;
             res.status(409).json({
               error: 'SELECTED_SHIFTS_OVERLAP',
-              message: selfOverlap.message,
+              message: summaryMessage,
+              conflicts: selfOverlaps.map((o) => ({
+                shiftAId: o.shiftA.id,
+                shiftAName: o.shiftA.shift_name,
+                shiftATime: `${o.shiftA.start_time}–${o.shiftA.end_time}`,
+                shiftBId: o.shiftB.id,
+                shiftBName: o.shiftB.shift_name,
+                shiftBTime: `${o.shiftB.start_time}–${o.shiftB.end_time}`,
+                message: o.message,
+              })),
               requestId: req.requestId,
             });
             return;
@@ -4900,11 +4931,27 @@ shiftsRouter.post(
         selectedShifts = shiftIds.map((id) => byId.get(id)!).filter(Boolean);
 
         if (operationMode === 'ADD_SHIFTS' || operationMode === 'REPLACE_SHIFTS') {
-          const selfOverlap = findSelectedShiftsSelfOverlap(selectedShifts, workDates[0]);
-          if (selfOverlap) {
+          const selfOverlaps = findAllSelectedShiftsSelfOverlaps(selectedShifts, workDates[0]);
+          if (selfOverlaps.length > 0) {
+            const summaryMessage =
+              selfOverlaps.length === 1
+                ? selfOverlaps[0].message
+                : `พบแม่แบบกะที่มีเวลาทับซ้อนกัน ${selfOverlaps.length} คู่ กรุณาตรวจสอบก่อนบันทึก: ${selfOverlaps
+                    .slice(0, 3)
+                    .map((o) => `${o.shiftA.shift_name} กับ ${o.shiftB.shift_name}`)
+                    .join(', ')}${selfOverlaps.length > 3 ? ` และอีก ${selfOverlaps.length - 3} คู่` : ''}`;
             res.status(409).json({
               error: 'SELECTED_SHIFTS_OVERLAP',
-              message: selfOverlap.message,
+              message: summaryMessage,
+              conflicts: selfOverlaps.map((o) => ({
+                shiftAId: o.shiftA.id,
+                shiftAName: o.shiftA.shift_name,
+                shiftATime: `${o.shiftA.start_time}–${o.shiftA.end_time}`,
+                shiftBId: o.shiftB.id,
+                shiftBName: o.shiftB.shift_name,
+                shiftBTime: `${o.shiftB.start_time}–${o.shiftB.end_time}`,
+                message: o.message,
+              })),
               requestId: req.requestId,
             });
             return;

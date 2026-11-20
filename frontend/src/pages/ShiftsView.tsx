@@ -71,9 +71,11 @@ import {
 import {
   classifyShiftIconKind,
   buildCompactMonthlyCellViewModel,
-  findClientSelectedShiftsOverlap,
   computeClientShiftInterval,
   intervalsOverlapHalfOpen,
+  computeFilteredSelectionState,
+  toggleSelectAllFiltered,
+  findAllClientSelectedShiftsOverlaps,
   type ShiftIconKind,
 } from '../utils/shiftDisplay.ts';
 
@@ -355,6 +357,9 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
   const [assignPersonDeptFilter, setAssignPersonDeptFilter] = useState('ALL');
   const [assignPersonSearch, setAssignPersonSearch] = useState('');
   const [assignPersonnelRenderLimit, setAssignPersonnelRenderLimit] = useState<number>(80);
+  const [confirmClearPersonsOpen, setConfirmClearPersonsOpen] = useState<boolean>(false);
+  const [showAllSelectedPersonChips, setShowAllSelectedPersonChips] = useState<boolean>(false);
+  const selectAllFilteredCheckboxRef = useRef<HTMLInputElement | null>(null);
 
   const [selectedShiftIds, setSelectedShiftIds] = useState<number[]>([]);
   const [bulkOperationMode, setBulkOperationMode] = useState<BulkOperationMode>('ADD_SHIFTS');
@@ -1340,21 +1345,41 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
     return `มีวันที่เลือกจำนวน ${outside.length} วัน อยู่นอกเดือน${formatThaiMonthTitle(selectedMonth)} (เช่น ${formatThaiDate(outside[0])}) กรุณาตรวจสอบเดือนให้ถูกต้องก่อนบันทึก`;
   }, [effectiveSelectedDates, selectedMonth]);
 
-  // แม่แบบกะที่กำลังเลือกอยู่ในหน้าจัดเวร (รองรับเลือกได้หลายกะพร้อมกัน)
-  const selectedShiftTemplates = useMemo(
-    () => shifts.filter((s) => selectedShiftIds.includes(Number(s.id))),
-    [shifts, selectedShiftIds]
+  // แม่แบบกะที่เปิดใช้งานและสามารถเลือกได้จริงจาก Backend
+  const selectableShiftTemplates = useMemo(
+    () => shifts.filter((s) => s.is_active === undefined || Number(s.is_active) === 1),
+    [shifts]
   );
 
-  // ตรวจสอบเบื้องต้นว่าแม่แบบกะหลายกะที่ติ๊กเลือกพร้อมกันมีช่วงเวลาทับซ้อนกันเองหรือไม่
-  const clientShiftOverlapWarning = useMemo(() => {
-    if (bulkOperationMode !== 'ADD_SHIFTS' && bulkOperationMode !== 'REPLACE_SHIFTS') {
-      return null;
-    }
-    return findClientSelectedShiftsOverlap(selectedShiftTemplates);
-  }, [selectedShiftTemplates, bulkOperationMode]);
+  // แม่แบบกะที่กำลังเลือกอยู่ในหน้าจัดเวร (อ้างอิงด้วย Shift Template ID เสมอ)
+  const selectedShiftTemplates = useMemo(
+    () => selectableShiftTemplates.filter((s) => selectedShiftIds.includes(Number(s.id))),
+    [selectableShiftTemplates, selectedShiftIds]
+  );
 
-  // บุคลากรที่กรองในหน้า "จัดเวร / เพิ่มเวรใหม่"
+  // ตรวจสอบทุกคู่แม่แบบกะที่เลือกพร้อมกันว่ามีช่วงเวลาทับซ้อนกันหรือไม่ (ทั้งในวันเดียวกันและกะข้ามวันต่อวันถัดไป ตามหลักการ [start, end))
+  const clientShiftOverlaps = useMemo(() => {
+    if (bulkOperationMode !== 'ADD_SHIFTS' && bulkOperationMode !== 'REPLACE_SHIFTS') {
+      return [];
+    }
+    return findAllClientSelectedShiftsOverlaps(selectedShiftTemplates, effectiveSelectedDates);
+  }, [selectedShiftTemplates, effectiveSelectedDates, bulkOperationMode]);
+
+  const hasSameDayClientShiftOverlap = useMemo(
+    () => clientShiftOverlaps.some((o) => o.kind === 'SAME_DAY'),
+    [clientShiftOverlaps]
+  );
+
+  const overlappingShiftIdSet = useMemo(() => {
+    const ids = new Set<number>();
+    for (const o of clientShiftOverlaps) {
+      ids.add(o.shiftAId);
+      ids.add(o.shiftBId);
+    }
+    return ids;
+  }, [clientShiftOverlaps]);
+
+  // บุคลากรที่กรองในหน้า "จัดเวร / เพิ่มเวรใหม่" (ไม่ล้างรายการที่เลือกไว้เมื่อเปลี่ยนตัวกรองหรือคำค้นหา)
   const assignFilteredPersonnel = useMemo(() => {
     const q = assignPersonSearch.trim().toLowerCase();
     return personnel.filter((p) => {
@@ -1369,15 +1394,37 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
     });
   }, [personnel, assignPersonDeptFilter, assignPersonSearch]);
 
+  // รหัสบุคลากรทั้งหมดที่ตรงกับตัวกรองปัจจุบัน (ใช้สำหรับ Checkbox เลือกทั้งหมดแบบ 3 สถานะ)
+  const assignFilteredPersonIds = useMemo(
+    () => assignFilteredPersonnel.map((p) => String(p.person_id).trim()).filter(Boolean),
+    [assignFilteredPersonnel]
+  );
+
+  const filteredPersonSelectionMeta = useMemo(
+    () => computeFilteredSelectionState(assignFilteredPersonIds, selectedPersonIds),
+    [assignFilteredPersonIds, selectedPersonIds]
+  );
+
+  // ซิงค์สถานะ indeterminate ของ Checkbox เลือกทั้งหมดที่หัวรายการบุคลากร
+  useEffect(() => {
+    if (selectAllFilteredCheckboxRef.current) {
+      selectAllFilteredCheckboxRef.current.indeterminate =
+        filteredPersonSelectionMeta.state === 'indeterminate';
+    }
+  }, [filteredPersonSelectionMeta.state, assignMethod, activeTab]);
+
   // จำกัดจำนวนแถวที่ Render ในกล่องเลือกบุคลากรเพื่อป้องกันหน้าจอกระตุกเมื่อมีบุคลากรหลายร้อยคน
   const visibleAssignPersonnel = useMemo(
     () => assignFilteredPersonnel.slice(0, assignPersonnelRenderLimit),
     [assignFilteredPersonnel, assignPersonnelRenderLimit]
   );
 
-  // รายชื่อบุคลากรที่ถูกเลือกไว้แล้วสำหรับแสดงในส่วนสรุป
+  // รายชื่อบุคลากรที่ถูกเลือกไว้แล้วสำหรับแสดงในส่วนสรุป (ไม่ซ้ำตาม Personnel ID)
   const selectedPersonnelObjects = useMemo(() => {
-    return selectedPersonIds.map((pid) => {
+    const uniqueIds = Array.from(
+      new Set(selectedPersonIds.map((pid) => String(pid).trim()).filter(Boolean))
+    );
+    return uniqueIds.map((pid) => {
       const found = personnelByIdMap.get(pid);
       return (
         found || {
@@ -1403,6 +1450,10 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
     );
   }
 
+  function selectAllAssignShifts() {
+    setSelectedShiftIds(selectableShiftTemplates.map((s) => Number(s.id)));
+  }
+
   function clearSelectedShifts() {
     setSelectedShiftIds([]);
   }
@@ -1423,6 +1474,8 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
     setPreviewError(null);
     setPreviewFilterTab('ALL');
     setConfirmBulkModalOpen(false);
+    setConfirmClearPersonsOpen(false);
+    setShowAllSelectedPersonChips(false);
     setBulkOperationMode(preset?.operationMode || 'ADD_SHIFTS');
     setBulkActionReason('');
 
@@ -1485,28 +1538,38 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
 
   function handleSelectPerson(personId: string) {
     const pid = String(personId).trim();
+    if (!pid) return;
     if (assignMethod === 'SINGLE_PERSON') {
       setSelectedPersonIds((prev) => (prev.includes(pid) ? [] : [pid]));
       return;
     }
     setSelectedPersonIds((prev) =>
-      prev.includes(pid) ? prev.filter((id) => id !== pid) : [...prev, pid]
+      prev.includes(pid) ? prev.filter((id) => id !== pid) : Array.from(new Set([...prev, pid]))
     );
   }
 
-  function selectAllFilteredPersons() {
-    const filteredIds = assignFilteredPersonnel.map((p) => String(p.person_id).trim());
-    if (assignMethod === 'SINGLE_PERSON') {
-      if (filteredIds.length > 0) {
-        setSelectedPersonIds([filteredIds[0]]);
-      }
+  function handleToggleSelectAllFilteredPersons() {
+    if (assignMethod !== 'MULTI_PERSON' || assignFilteredPersonIds.length === 0) {
       return;
     }
-    setSelectedPersonIds((prev) => Array.from(new Set([...prev, ...filteredIds])));
+    setSelectedPersonIds((prev) => toggleSelectAllFiltered(assignFilteredPersonIds, prev));
   }
 
-  function clearSelectedPersons() {
+  function handleRequestClearSelectedPersons() {
+    if (selectedPersonIds.length === 0) return;
+    // ป้องกันการกดล้างรายชื่อผิดพลาดเมื่อเลือกบุคลากรไว้จำนวนมาก
+    if (selectedPersonIds.length >= 10) {
+      setConfirmClearPersonsOpen(true);
+      return;
+    }
     setSelectedPersonIds([]);
+    setShowAllSelectedPersonChips(false);
+  }
+
+  function confirmClearAllSelectedPersons() {
+    setSelectedPersonIds([]);
+    setConfirmClearPersonsOpen(false);
+    setShowAllSelectedPersonChips(false);
   }
 
   function toggleMultiPickedDate(dateStr: string) {
@@ -3151,19 +3214,22 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
           แยกเป็น 2 วิธีชัดเจน: 1. เพิ่มเวรให้บุคลากรหนึ่งคน | 2. เพิ่มเวรหลายคนพร้อมกัน
          ===================================================================== */}
       {activeTab === 'ASSIGN_WORKSPACE' && (
-        <div className="space-y-5">
-          {/* ส่วนหัว: เลือกรูปแบบ (1 คน / หลายคน) และแยกประเภทการดำเนินการชัดเจน */}
-          <div className="bg-white border border-[#E7E2F0] rounded-xl p-5 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div>
-                <h2 className="text-[17px] font-bold text-[#273244]">
+        <div className="space-y-6">
+          {/* =================================================================
+              ส่วนเลือกประเภทการดำเนินการ (พื้นหลังขาว #FFFFFF)
+              Card ที่เลือกใช้พื้นหลังม่วงอ่อน (#F3EEFA) และขอบม่วง (#8064B0)
+             ================================================================= */}
+          <section className="bg-white border border-[#DED3EE] rounded-2xl shadow-xs p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="min-w-0">
+                <h2 className="text-[17px] font-bold text-[#343044]">
                   จัดตารางเวรหลายคน / หลายวัน และเลือกได้หลายกะพร้อมกัน
                 </h2>
-                <p className="text-[13px] text-slate-600">
-                  เลือกบุคลากรและแม่แบบกะในขั้นตอนที่ 1 → เลือกวันที่ในขั้นตอนที่ 2 → ตรวจสอบ Preview และยืนยันในขั้นตอนที่ 3
+                <p className="text-[13px] text-[#746D82] mt-0.5">
+                  เลือกประเภทการดำเนินการ → ① เลือกบุคลากรและแม่แบบกะ → ② เลือกวันที่ปฏิบัติงาน → ③ ตรวจสอบและยืนยัน
                 </p>
               </div>
-              <span className="text-[13px] font-semibold text-[#5B41A1] bg-[#F3EEFC] border border-[#D8CDF2] px-3 py-1.5 rounded-lg self-start sm:self-auto">
+              <span className="text-[13px] font-semibold text-[#8064B0] bg-[#F3EEFA] border border-[#DED3EE] px-3 py-1.5 rounded-lg self-start sm:self-auto whitespace-nowrap">
                 เดือนที่กำลังจัดเวร: {formatThaiMonthTitle(selectedMonth)}
               </span>
             </div>
@@ -3175,22 +3241,24 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                 onClick={() => handleSwitchAssignMethod('SINGLE_PERSON')}
                 className={`p-3.5 rounded-xl border text-left transition-colors flex items-start gap-3 ${
                   assignMethod === 'SINGLE_PERSON'
-                    ? 'bg-[#F3EEFC] border-[#8B73C7] text-[#273244]'
-                    : 'bg-white border-[#E7E2F0] text-slate-700 hover:border-[#8B73C7]/60'
+                    ? 'bg-[#F3EEFA] border-[#8064B0] text-[#343044] shadow-2xs'
+                    : 'bg-white border-[#DED3EE] text-[#343044] hover:border-[#8064B0]/60'
                 }`}
               >
                 <div
                   className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
                     assignMethod === 'SINGLE_PERSON'
-                      ? 'bg-[#7359B4] text-white'
-                      : 'bg-slate-100 text-slate-600'
+                      ? 'bg-[#8064B0] text-white'
+                      : 'bg-[#F8F5FC] text-[#746D82] border border-[#DED3EE]'
                   }`}
                 >
                   <User className="w-4.5 h-4.5" />
                 </div>
-                <div>
-                  <div className="font-bold text-[14.5px]">จัดเวรรายบุคคล (1 คน)</div>
-                  <p className="text-[12.5px] text-slate-600">
+                <div className="min-w-0">
+                  <div className="font-bold text-[14.5px] text-[#343044]">
+                    จัดเวรรายบุคคล (1 คน)
+                  </div>
+                  <p className="text-[12.5px] text-[#746D82]">
                     เลือก 1 คน พร้อมเลือกได้หลายกะและหลายวัน
                   </p>
                 </div>
@@ -3201,22 +3269,24 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                 onClick={() => handleSwitchAssignMethod('MULTI_PERSON')}
                 className={`p-3.5 rounded-xl border text-left transition-colors flex items-start gap-3 ${
                   assignMethod === 'MULTI_PERSON'
-                    ? 'bg-[#F3EEFC] border-[#8B73C7] text-[#273244]'
-                    : 'bg-white border-[#E7E2F0] text-slate-700 hover:border-[#8B73C7]/60'
+                    ? 'bg-[#F3EEFA] border-[#8064B0] text-[#343044] shadow-2xs'
+                    : 'bg-white border-[#DED3EE] text-[#343044] hover:border-[#8064B0]/60'
                 }`}
               >
                 <div
                   className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
                     assignMethod === 'MULTI_PERSON'
-                      ? 'bg-[#7359B4] text-white'
-                      : 'bg-slate-100 text-slate-600'
+                      ? 'bg-[#8064B0] text-white'
+                      : 'bg-[#F8F5FC] text-[#746D82] border border-[#DED3EE]'
                   }`}
                 >
                   <Users className="w-4.5 h-4.5" />
                 </div>
-                <div>
-                  <div className="font-bold text-[14.5px]">จัดเวรหลายคนพร้อมกัน (รายกลุ่มงาน/แผนก)</div>
-                  <p className="text-[12.5px] text-slate-600">
+                <div className="min-w-0">
+                  <div className="font-bold text-[14.5px] text-[#343044]">
+                    จัดเวรหลายคนพร้อมกัน (รายกลุ่มงาน/แผนก)
+                  </div>
+                  <p className="text-[12.5px] text-[#746D82]">
                     เลือกบุคลากรหลายคน เลือกหลายกะ และกำหนดหลายวันพร้อมกัน
                   </p>
                 </div>
@@ -3224,25 +3294,28 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
             </div>
 
             {/* 2. แยกประเภทการดำเนินการชัดเจน: เพิ่มกะ / แทนที่กะเดิม / ลบกะที่เลือก / ลบกะทั้งหมด */}
-            <div className="pt-3 border-t border-[#E7E2F0] space-y-2">
-              <div className="text-[13px] font-bold text-[#273244]">
-                ประเภทการดำเนินการกับตารางเวร (ระบบจะไม่แก้หรือลบกะเดิมหากไม่เลือกและยืนยันชัดเจน):
+            <div className="pt-3.5 border-t border-[#DED3EE] space-y-2.5">
+              <div className="text-[13px] font-bold text-[#343044]">
+                ประเภทการดำเนินการกับตารางเวร{' '}
+                <span className="font-normal text-[#746D82]">
+                  (ระบบจะไม่แก้หรือลบกะเดิมหากไม่เลือกและยืนยันชัดเจน)
+                </span>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
                 <button
                   type="button"
                   onClick={() => setBulkOperationMode('ADD_SHIFTS')}
-                  className={`p-3 rounded-xl border text-left transition-colors ${
+                  className={`p-3.5 rounded-xl border text-left transition-colors ${
                     bulkOperationMode === 'ADD_SHIFTS'
-                      ? 'bg-[#F3EEFC] border-[#7359B4] text-[#273244]'
-                      : 'bg-white border-[#E7E2F0] text-slate-700 hover:border-[#8B73C7]/60'
+                      ? 'bg-[#F3EEFA] border-[#8064B0] text-[#343044] shadow-2xs'
+                      : 'bg-white border-[#DED3EE] text-[#343044] hover:border-[#8064B0]/60'
                   }`}
                 >
-                  <div className="flex items-center gap-2 font-bold text-[13.5px]">
-                    <Plus className="w-4 h-4 text-[#7359B4]" />
+                  <div className="flex items-center gap-2 font-bold text-[13.5px] text-[#343044]">
+                    <Plus className="w-4 h-4 text-[#8064B0] shrink-0" />
                     <span>เพิ่มกะใหม่</span>
                   </div>
-                  <p className="text-[11.5px] text-slate-600 mt-1">
+                  <p className="text-[12px] text-[#746D82] mt-1 leading-snug">
                     เพิ่มเฉพาะกะที่เลือก ไม่ลบหรือทับกะเดิมที่มีอยู่แล้ว
                   </p>
                 </button>
@@ -3250,17 +3323,17 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                 <button
                   type="button"
                   onClick={() => setBulkOperationMode('REPLACE_SHIFTS')}
-                  className={`p-3 rounded-xl border text-left transition-colors ${
+                  className={`p-3.5 rounded-xl border text-left transition-colors ${
                     bulkOperationMode === 'REPLACE_SHIFTS'
-                      ? 'bg-amber-50 border-amber-500 text-amber-950'
-                      : 'bg-white border-[#E7E2F0] text-slate-700 hover:border-amber-300'
+                      ? 'bg-[#F3EEFA] border-[#8064B0] text-[#343044] shadow-2xs'
+                      : 'bg-white border-[#DED3EE] text-[#343044] hover:border-[#8064B0]/60'
                   }`}
                 >
-                  <div className="flex items-center gap-2 font-bold text-[13.5px]">
-                    <RefreshCw className="w-4 h-4 text-amber-700" />
+                  <div className="flex items-center gap-2 font-bold text-[13.5px] text-[#343044]">
+                    <RefreshCw className="w-4 h-4 text-amber-600 shrink-0" />
                     <span>แทนที่กะเดิมทั้งหมดในวันนั้น</span>
                   </div>
-                  <p className="text-[11.5px] text-slate-600 mt-1">
+                  <p className="text-[12px] text-[#746D82] mt-1 leading-snug">
                     ยกเลิกกะเดิมของวันที่เลือกแล้วบันทึกกะใหม่แทน (ต้องยืนยัน)
                   </p>
                 </button>
@@ -3268,17 +3341,17 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                 <button
                   type="button"
                   onClick={() => setBulkOperationMode('REMOVE_SELECTED_SHIFTS')}
-                  className={`p-3 rounded-xl border text-left transition-colors ${
+                  className={`p-3.5 rounded-xl border text-left transition-colors ${
                     bulkOperationMode === 'REMOVE_SELECTED_SHIFTS'
-                      ? 'bg-red-50 border-red-400 text-red-950'
-                      : 'bg-white border-[#E7E2F0] text-slate-700 hover:border-red-300'
+                      ? 'bg-[#F3EEFA] border-[#8064B0] text-[#343044] shadow-2xs'
+                      : 'bg-white border-[#DED3EE] text-[#343044] hover:border-[#8064B0]/60'
                   }`}
                 >
-                  <div className="flex items-center gap-2 font-bold text-[13.5px]">
-                    <Trash2 className="w-4 h-4 text-red-600" />
+                  <div className="flex items-center gap-2 font-bold text-[13.5px] text-[#343044]">
+                    <Trash2 className="w-4 h-4 text-red-600 shrink-0" />
                     <span>ลบเฉพาะกะที่เลือก</span>
                   </div>
-                  <p className="text-[11.5px] text-slate-600 mt-1">
+                  <p className="text-[12px] text-[#746D82] mt-1 leading-snug">
                     ลบเฉพาะกะที่ติ๊กเลือก คงกะอื่นในวันเดียวกันไว้ (ต้องยืนยัน)
                   </p>
                 </button>
@@ -3286,57 +3359,91 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                 <button
                   type="button"
                   onClick={() => setBulkOperationMode('CLEAR_ALL_SHIFTS')}
-                  className={`p-3 rounded-xl border text-left transition-colors ${
+                  className={`p-3.5 rounded-xl border text-left transition-colors ${
                     bulkOperationMode === 'CLEAR_ALL_SHIFTS'
-                      ? 'bg-red-50 border-red-500 text-red-950'
-                      : 'bg-white border-[#E7E2F0] text-slate-700 hover:border-red-300'
+                      ? 'bg-[#F3EEFA] border-[#8064B0] text-[#343044] shadow-2xs'
+                      : 'bg-white border-[#DED3EE] text-[#343044] hover:border-[#8064B0]/60'
                   }`}
                 >
-                  <div className="flex items-center gap-2 font-bold text-[13.5px]">
-                    <X className="w-4 h-4 text-red-700" />
+                  <div className="flex items-center gap-2 font-bold text-[13.5px] text-[#343044]">
+                    <X className="w-4 h-4 text-red-600 shrink-0" />
                     <span>ลบกะทั้งหมด (ตั้งเป็นไม่มีเวร)</span>
                   </div>
-                  <p className="text-[11.5px] text-slate-600 mt-1">
+                  <p className="text-[12px] text-[#746D82] mt-1 leading-snug">
                     ยกเลิกทุกกะในวันที่เลือก และคงสถานะ “ไม่มีเวร” ไว้ถาวร
                   </p>
                 </button>
               </div>
             </div>
-          </div>
+          </section>
 
           {/* =================================================================
-              ขั้นตอนที่ 1: เลือกบุคลากร และ เลือกแม่แบบกะทำงาน (Multi-Select)
+              ขั้นตอนที่ ①: เลือกบุคลากรและแม่แบบกะทำงาน
+              พื้นหลังม่วงอ่อนมาก (#F8F5FC) | Header แถบม่วงอ่อน (#F3EEFA)
+              ภายในส่วนรายชื่อบุคลากรและ Card กะใช้พื้นหลังขาว (#FFFFFF)
              ================================================================= */}
-          <div className="bg-white border border-[#E7E2F0] rounded-xl p-5 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#E7E2F0] pb-3">
-              <div>
-                <h3 className="text-[16px] font-bold text-[#273244]">
-                  ขั้นตอนที่ 1: เลือกบุคลากร และ แม่แบบกะทำงาน (เลือกได้มากกว่า 1 กะพร้อมกัน){' '}
-                  <RequiredMark />
-                </h3>
-                <p className="text-[12.5px] text-slate-600 mt-0.5">
-                  เลือกบุคลากรทางซ้าย และติ๊กเลือกแม่แบบกะทางขวาได้หลายกะพร้อมกัน (เช่น กะเช้า + กะบ่าย)
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 shrink-0">
-                <span className="font-mono text-[12.5px] font-bold text-[#5B41A1] bg-[#F3EEFC] border border-[#D8CDF2] px-2.5 py-1 rounded-md tabular-nums">
-                  บุคลากร {selectedPersonIds.length} คน
+          <section className="bg-[#F8F5FC] border border-[#DED3EE] rounded-2xl shadow-xs overflow-hidden">
+            <div className="bg-[#F3EEFA] border-b border-[#DED3EE] px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="flex items-start gap-3 min-w-0">
+                <span
+                  aria-hidden="true"
+                  className="w-7 h-7 rounded-full bg-[#8064B0] text-white font-bold text-[13.5px] flex items-center justify-center shrink-0 mt-0.5 shadow-2xs"
+                >
+                  1
                 </span>
-                <span className="font-mono text-[12.5px] font-bold text-[#5B41A1] bg-[#F3EEFC] border border-[#D8CDF2] px-2.5 py-1 rounded-md tabular-nums">
+                <div className="min-w-0">
+                  <h3 className="text-[15.5px] font-bold text-[#343044] leading-snug">
+                    เลือกบุคลากรและแม่แบบกะทำงาน <RequiredMark />
+                  </h3>
+                  <p className="text-[12.5px] text-[#746D82] mt-0.5">
+                    เลือกบุคลากรทางซ้าย (รักษาการเลือกข้ามแผนก/คำค้นหา) และเลือกแม่แบบกะทางขวาได้หลายกะพร้อมกัน
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0 pl-10 sm:pl-0">
+                <span className="font-mono text-[12.5px] font-bold text-[#8064B0] bg-white border border-[#DED3EE] px-2.5 py-1 rounded-lg tabular-nums">
+                  เลือกแล้ว {filteredPersonSelectionMeta.uniqueSelectedTotalCount} คน
+                </span>
+                <span className="font-mono text-[12.5px] font-bold text-[#8064B0] bg-white border border-[#DED3EE] px-2.5 py-1 rounded-lg tabular-nums">
                   {bulkOperationMode === 'CLEAR_ALL_SHIFTS'
-                    ? 'ล้างทุกกะ (ไม่มีเวร)'
-                    : `กะที่เลือก ${selectedShiftIds.length} กะ`}
+                    ? 'ล้างทุกกะ (ไม่ต้องเลือกกะ)'
+                    : `เลือกแล้ว ${selectedShiftIds.length} กะ`}
                 </span>
               </div>
             </div>
 
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-              {/* ซ้าย: เลือกบุคลากร (6 คอลัมน์) */}
-              <div className="lg:col-span-6 space-y-3.5 flex flex-col justify-between">
-                <div className="space-y-3">
+            <div className="p-4 sm:p-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
+              {/* ซ้าย: เลือกบุคลากร (พื้นหลังขาว #FFFFFF) */}
+              <div className="lg:col-span-6 min-w-0 bg-white border border-[#DED3EE] rounded-xl p-4 flex flex-col justify-between gap-3.5 shadow-2xs">
+                <div className="space-y-3 min-w-0">
+                  {/* หัวแผงเลือกบุคลากร + Badge จำนวน + ปุ่มล้างรายชื่อ */}
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#DED3EE]/80">
+                    <div className="flex flex-wrap items-center gap-2 min-w-0">
+                      <span className="text-[14px] font-bold text-[#343044]">
+                        เลือกบุคลากร
+                      </span>
+                      <span
+                        data-testid="selected-personnel-count-badge"
+                        className="inline-flex items-center px-2.5 py-0.5 rounded-md bg-[#F3EEFA] border border-[#DED3EE] text-[#8064B0] text-[12px] font-bold font-mono tabular-nums"
+                      >
+                        เลือกแล้ว {filteredPersonSelectionMeta.uniqueSelectedTotalCount} คน
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      disabled={filteredPersonSelectionMeta.uniqueSelectedTotalCount === 0}
+                      onClick={handleRequestClearSelectedPersons}
+                      className="h-8 px-3 rounded-lg border border-[#DED3EE] bg-white hover:bg-[#F8F5FC] hover:border-[#8064B0] disabled:opacity-40 disabled:pointer-events-none text-[#343044] text-[12px] font-semibold transition-colors whitespace-nowrap"
+                    >
+                      ล้างรายชื่อ
+                    </button>
+                  </div>
+
+                  {/* ตัวกรองกลุ่มงาน + ค้นหาชื่อ/รหัส (ไม่ล้างรายการที่เลือกเมื่อเปลี่ยนตัวกรอง) */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <div>
-                      <label className="block text-[12px] font-semibold text-slate-700 mb-1">
+                    <div className="min-w-0">
+                      <label className="block text-[12px] font-semibold text-[#343044] mb-1">
                         กลุ่มงาน / แผนก
                       </label>
                       <select
@@ -3346,7 +3453,7 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                           setAssignPersonDeptFilter(e.target.value);
                           setAssignPersonnelRenderLimit(80);
                         }}
-                        className="w-full h-9.5 px-3 rounded-lg border border-slate-300 bg-white text-[13px] text-slate-800 focus:outline-none focus:border-[#7359B4]"
+                        className="w-full h-9.5 px-3 rounded-lg border border-[#DED3EE] bg-white text-[13px] text-[#343044] focus:outline-none focus:border-[#8064B0]"
                       >
                         <option value="ALL">ทุกกลุ่มงาน/แผนก ({personnel.length} คน)</option>
                         {departments.map((dept) => (
@@ -3357,12 +3464,12 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                       </select>
                     </div>
 
-                    <div>
-                      <label className="block text-[12px] font-semibold text-slate-700 mb-1">
-                        ค้นหาชื่อ หรือ รหัสบุคลากร
+                    <div className="min-w-0">
+                      <label className="block text-[12px] font-semibold text-[#343044] mb-1">
+                        ค้นหาชื่อ รหัส หรือกลุ่มงาน
                       </label>
                       <div className="relative">
-                        <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <Search className="w-3.5 h-3.5 text-[#746D82] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                         <input
                           type="text"
                           value={assignPersonSearch}
@@ -3370,116 +3477,169 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                             setAssignPersonSearch(e.target.value);
                             setAssignPersonnelRenderLimit(80);
                           }}
-                          placeholder="พิมพ์ชื่อ, รหัส, สแกนนิ้ว..."
-                          className="w-full h-9.5 pl-8 pr-2.5 rounded-lg border border-slate-300 bg-white text-[13px] text-slate-800 focus:outline-none focus:border-[#7359B4]"
+                          placeholder="พิมพ์ชื่อ, รหัสบุคลากร, กลุ่มงาน..."
+                          className="w-full h-9.5 pl-8 pr-8 rounded-lg border border-[#DED3EE] bg-white text-[13px] text-[#343044] placeholder:text-[#746D82]/70 focus:outline-none focus:border-[#8064B0]"
                         />
+                        {assignPersonSearch && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAssignPersonSearch('');
+                              setAssignPersonnelRenderLimit(80);
+                            }}
+                            aria-label="ล้างคำค้นหาบุคลากร"
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#746D82] hover:text-[#343044]"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-[12.5px] text-slate-600">
-                      พบผลลัพธ์{' '}
-                      <strong className="text-slate-900 font-mono tabular-nums">
-                        {assignFilteredPersonnel.length}
-                      </strong>{' '}
-                      คน
-                    </span>
-
-                    <div className="inline-flex items-center gap-2">
-                      {assignMethod === 'MULTI_PERSON' && (
-                        <button
-                          type="button"
-                          disabled={assignFilteredPersonnel.length === 0}
-                          onClick={selectAllFilteredPersons}
-                          className="h-8 px-2.5 rounded-md border border-[#D8CDF2] bg-[#F3EEFC] hover:bg-[#E7DDF8] disabled:opacity-40 text-[#5B41A1] text-[12px] font-semibold transition-colors"
+                  {/* กล่องรายชื่อบุคลากร พร้อมหัวรายการ Checkbox เลือกทั้งหมดแบบ 3 สถานะ (Tri-state) */}
+                  <div className="border border-[#DED3EE] rounded-xl overflow-hidden bg-white">
+                    {assignMethod === 'MULTI_PERSON' ? (
+                      <div className="px-3.5 py-2.5 bg-[#F8F5FC] border-b border-[#DED3EE] flex flex-wrap items-center justify-between gap-2">
+                        <label
+                          className={`inline-flex items-center gap-2.5 text-[13px] font-bold select-none min-w-0 ${
+                            filteredPersonSelectionMeta.disabled
+                              ? 'text-[#746D82]/60 cursor-not-allowed'
+                              : 'text-[#343044] cursor-pointer'
+                          }`}
                         >
-                          เลือกทั้งหมดที่กรอง ({assignFilteredPersonnel.length})
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        disabled={selectedPersonIds.length === 0}
-                        onClick={clearSelectedPersons}
-                        className="h-8 px-2.5 rounded-md border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-40 text-slate-700 text-[12px] font-medium transition-colors"
-                      >
-                        ล้างรายชื่อ
-                      </button>
-                    </div>
-                  </div>
+                          <input
+                            ref={selectAllFilteredCheckboxRef}
+                            type="checkbox"
+                            checked={filteredPersonSelectionMeta.state === 'checked'}
+                            disabled={filteredPersonSelectionMeta.disabled}
+                            onChange={handleToggleSelectAllFilteredPersons}
+                            aria-label={`เลือกทั้งหมดในรายการที่แสดง (${filteredPersonSelectionMeta.totalFilteredCount} คน)`}
+                            className="w-4 h-4 rounded border-[#8064B0]/60 accent-[#8064B0] text-[#8064B0] focus:ring-[#8064B0] shrink-0"
+                          />
+                          <span className="truncate">
+                            เลือกทั้งหมดในรายการที่แสดง (
+                            <span className="font-mono tabular-nums text-[#8064B0]">
+                              {filteredPersonSelectionMeta.totalFilteredCount}
+                            </span>{' '}
+                            คน)
+                          </span>
+                        </label>
 
-                  <div className="border border-[#E7E2F0] rounded-lg divide-y divide-[#E7E2F0]/80 max-h-72 overflow-y-auto bg-[#FAF9FD]/50">
-                    {visibleAssignPersonnel.length === 0 ? (
-                      <div className="py-10 px-4 text-center text-[13px] text-slate-500">
-                        ไม่พบบุคลากรตามคำค้นหาหรือกลุ่มงานที่เลือก
+                        {filteredPersonSelectionMeta.totalFilteredCount > 0 && (
+                          <span className="text-[11.5px] font-medium text-[#746D82] font-mono tabular-nums shrink-0">
+                            {filteredPersonSelectionMeta.state === 'indeterminate'
+                              ? `เลือกบางส่วน ${filteredPersonSelectionMeta.selectedInFilteredCount}/${filteredPersonSelectionMeta.totalFilteredCount}`
+                              : filteredPersonSelectionMeta.state === 'checked'
+                                ? 'เลือกครบรายการที่กรอง'
+                                : `ทั้งหมด ${filteredPersonSelectionMeta.totalFilteredCount} คน`}
+                          </span>
+                        )}
                       </div>
                     ) : (
-                      visibleAssignPersonnel.map((p) => {
-                        const pid = String(p.person_id).trim();
-                        const checked = selectedPersonIds.includes(pid);
-                        return (
-                          <label
-                            key={pid}
-                            onClick={() => handleSelectPerson(pid)}
-                            className={`flex items-start gap-3 px-3.5 py-2.5 cursor-pointer text-[13px] transition-colors ${
-                              checked ? 'bg-[#F3EEFC]' : 'hover:bg-white'
-                            }`}
-                          >
-                            <input
-                              type={assignMethod === 'SINGLE_PERSON' ? 'radio' : 'checkbox'}
-                              name="assign-person-selector"
-                              checked={checked}
-                              onChange={() => {}}
-                              className="mt-1 rounded border-slate-300 text-[#7359B4] focus:ring-[#7359B4]"
-                            />
-                            <div className="min-w-0 flex-1">
-                              <div className="font-bold text-[#273244] truncate">{p.full_name}</div>
-                              <div className="text-[12px] text-slate-500 truncate">
-                                รหัส <span className="font-mono">{pid}</span> · {p.department_name}
-                                {p.position_name && p.position_name !== '-'
-                                  ? ` · ${p.position_name}`
-                                  : ''}
-                              </div>
-                            </div>
-                          </label>
-                        );
-                      })
-                    )}
-
-                    {assignFilteredPersonnel.length > visibleAssignPersonnel.length && (
-                      <div className="p-2.5 text-center bg-white">
-                        <button
-                          type="button"
-                          onClick={() => setAssignPersonnelRenderLimit((lim) => lim + 100)}
-                          className="text-[12.5px] font-semibold text-[#7359B4] hover:underline"
-                        >
-                          แสดงรายชื่อเพิ่มเติมอีก (เหลืออีก{' '}
-                          {assignFilteredPersonnel.length - visibleAssignPersonnel.length} คน)
-                        </button>
+                      <div className="px-3.5 py-2 bg-[#F8F5FC] border-b border-[#DED3EE] flex items-center justify-between gap-2 text-[12.5px] text-[#746D82]">
+                        <span>
+                          พบผลลัพธ์{' '}
+                          <strong className="font-mono tabular-nums text-[#343044]">
+                            {assignFilteredPersonnel.length}
+                          </strong>{' '}
+                          คน
+                        </span>
+                        <span className="text-[11.5px]">โหมดรายบุคคล (เลือกได้ 1 คน)</span>
                       </div>
                     )}
+
+                    <div className="divide-y divide-[#DED3EE]/60 max-h-72 overflow-y-auto bg-white">
+                      {visibleAssignPersonnel.length === 0 ? (
+                        <div className="py-10 px-4 text-center text-[13px] text-[#746D82]">
+                          ไม่พบบุคลากรตามคำค้นหาหรือกลุ่มงานที่เลือก
+                        </div>
+                      ) : (
+                        visibleAssignPersonnel.map((p) => {
+                          const pid = String(p.person_id).trim();
+                          const checked = selectedPersonIds.includes(pid);
+                          return (
+                            <label
+                              key={pid}
+                              className={`flex items-start gap-3 px-3.5 py-2.5 cursor-pointer text-[13px] transition-colors ${
+                                checked ? 'bg-[#F3EEFA]/85' : 'bg-white hover:bg-[#F8F5FC]'
+                              }`}
+                            >
+                              <input
+                                type={assignMethod === 'SINGLE_PERSON' ? 'radio' : 'checkbox'}
+                                name="assign-person-selector"
+                                checked={checked}
+                                onChange={() => handleSelectPerson(pid)}
+                                className="mt-1 w-4 h-4 rounded border-slate-300 accent-[#8064B0] text-[#8064B0] focus:ring-[#8064B0] shrink-0"
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className="font-bold text-[#343044] truncate">
+                                  {p.full_name}
+                                </div>
+                                <div className="text-[12px] text-[#746D82] truncate">
+                                  รหัส <span className="font-mono">{pid}</span> ·{' '}
+                                  {p.department_name}
+                                  {p.position_name && p.position_name !== '-'
+                                    ? ` · ${p.position_name}`
+                                    : ''}
+                                </div>
+                              </div>
+                            </label>
+                          );
+                        })
+                      )}
+
+                      {assignFilteredPersonnel.length > visibleAssignPersonnel.length && (
+                        <div className="p-2.5 text-center bg-[#F8F5FC]">
+                          <button
+                            type="button"
+                            onClick={() => setAssignPersonnelRenderLimit((lim) => lim + 100)}
+                            className="text-[12.5px] font-semibold text-[#8064B0] hover:underline"
+                          >
+                            แสดงรายชื่อเพิ่มเติมอีก (เหลืออีก{' '}
+                            {assignFilteredPersonnel.length - visibleAssignPersonnel.length} คน)
+                          </button>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
 
-                {/* สรุปรายชื่อบุคลากรที่เลือกไว้ */}
-                <div className="pt-2 border-t border-[#E7E2F0] space-y-1.5">
-                  <div className="text-[12px] font-semibold text-slate-700">
-                    รายชื่อบุคลากรที่เลือก ({selectedPersonnelObjects.length} คน):
+                {/* พื้นที่สรุปรายชื่อบุคลากรที่เลือกไว้ (เอาออกทีละคนได้) */}
+                <div className="pt-2.5 border-t border-[#DED3EE]/80 space-y-1.5 min-w-0">
+                  <div className="flex items-center justify-between gap-2 text-[12px] font-semibold text-[#343044]">
+                    <span>
+                      รายชื่อบุคลากรที่เลือก ({selectedPersonnelObjects.length} คน):
+                    </span>
+                    {selectedPersonnelObjects.length > 24 && (
+                      <button
+                        type="button"
+                        onClick={() => setShowAllSelectedPersonChips((v) => !v)}
+                        className="text-[11.5px] font-semibold text-[#8064B0] hover:underline"
+                      >
+                        {showAllSelectedPersonChips
+                          ? 'ย่อรายการ'
+                          : `ดูทั้งหมด (${selectedPersonnelObjects.length})`}
+                      </button>
+                    )}
                   </div>
                   {selectedPersonnelObjects.length === 0 ? (
-                    <div className="p-2.5 rounded-lg bg-[#FAF9FD] border border-dashed border-[#D8CDF2] text-[12px] text-slate-500 text-center">
-                      ยังไม่ได้เลือกบุคลากร กรุณาคลิกเลือกรายชื่อด้านบน
+                    <div className="p-2.5 rounded-lg bg-[#F8F5FC] border border-dashed border-[#DED3EE] text-[12px] text-[#746D82] text-center">
+                      ยังไม่ได้เลือกบุคลากร กรุณาติ๊กเลือกจากรายการด้านบน
                     </div>
                   ) : (
-                    <div className="max-h-24 overflow-y-auto p-2 rounded-lg bg-[#FAF9FD] border border-[#E7E2F0] flex flex-wrap gap-1.5">
-                      {selectedPersonnelObjects.slice(0, 24).map((p) => {
+                    <div className="max-h-28 overflow-y-auto p-2 rounded-lg bg-[#F8F5FC] border border-[#DED3EE] flex flex-wrap gap-1.5">
+                      {(showAllSelectedPersonChips
+                        ? selectedPersonnelObjects
+                        : selectedPersonnelObjects.slice(0, 24)
+                      ).map((p) => {
                         const pid = String(p.person_id).trim();
                         return (
                           <span
                             key={pid}
-                            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white border border-[#D8CDF2] text-[12px] text-[#273244]"
+                            className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-white border border-[#DED3EE] text-[12px] text-[#343044] max-w-full"
                           >
-                            <span className="font-semibold truncate max-w-[140px]">
+                            <span className="font-semibold truncate max-w-[150px]">
                               {p.full_name}
                             </span>
                             <button
@@ -3487,40 +3647,78 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                               onClick={() =>
                                 setSelectedPersonIds((prev) => prev.filter((id) => id !== pid))
                               }
-                              className="text-slate-400 hover:text-red-600"
-                              title="นำรายชื่อนี้ออก"
+                              className="text-[#746D82] hover:text-red-600 shrink-0"
+                              title={`นำ ${p.full_name} ออก`}
+                              aria-label={`นำ ${p.full_name} ออกจากรายการที่เลือก`}
                             >
                               <X className="w-3.5 h-3.5" />
                             </button>
                           </span>
                         );
                       })}
-                      {selectedPersonnelObjects.length > 24 && (
-                        <span className="text-[12px] font-semibold text-[#7359B4] px-2 py-0.5">
+                      {!showAllSelectedPersonChips && selectedPersonnelObjects.length > 24 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowAllSelectedPersonChips(true)}
+                          className="text-[12px] font-semibold text-[#8064B0] hover:underline px-2 py-0.5"
+                        >
                           และอีก {selectedPersonnelObjects.length - 24} คน
-                        </span>
+                        </button>
                       )}
                     </div>
                   )}
                 </div>
               </div>
 
-              {/* ขวา: เลือกแม่แบบกะทำงานแบบ Multi-select Checkbox (6 คอลัมน์) */}
-              <div className="lg:col-span-6 space-y-3 flex flex-col justify-between">
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[13px] font-bold text-[#273244]">
-                      เลือกแม่แบบกะทำงาน (ติ๊กเลือกได้มากกว่า 1 กะ)
-                    </span>
+              {/* ขวา: เลือกแม่แบบกะทำงานแบบ Multi-select Checkbox (พื้นหลังขาว #FFFFFF) */}
+              <div className="lg:col-span-6 min-w-0 bg-white border border-[#DED3EE] rounded-xl p-4 flex flex-col justify-between gap-3.5 shadow-2xs">
+                <div className="space-y-3 min-w-0">
+                  {/* หัวแผงเลือกแม่แบบกะ + Badge จำนวน + ปุ่มเลือกทุกกะ (N) + ปุ่มล้างการเลือก */}
+                  <div className="space-y-2 pb-2.5 border-b border-[#DED3EE]/80">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2 min-w-0">
+                        <span className="text-[14px] font-bold text-[#343044]">
+                          เลือกแม่แบบกะทำงาน (เลือกได้มากกว่า 1 กะ)
+                        </span>
+                        <span
+                          data-testid="selected-shifts-count-badge"
+                          className="inline-flex items-center px-2.5 py-0.5 rounded-md bg-[#F3EEFA] border border-[#DED3EE] text-[#8064B0] text-[12px] font-bold font-mono tabular-nums"
+                        >
+                          {bulkOperationMode === 'CLEAR_ALL_SHIFTS'
+                            ? 'ไม่ต้องเลือกกะ'
+                            : `เลือกแล้ว ${selectedShiftIds.length} กะ`}
+                        </span>
+                      </div>
+
+                      {bulkOperationMode !== 'CLEAR_ALL_SHIFTS' && (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={
+                              selectableShiftTemplates.length === 0 ||
+                              selectedShiftIds.length === selectableShiftTemplates.length
+                            }
+                            onClick={selectAllAssignShifts}
+                            className="h-8 px-2.5 rounded-lg border border-[#DED3EE] bg-[#F3EEFA] hover:bg-[#E8DEF6] hover:border-[#8064B0] disabled:opacity-40 disabled:pointer-events-none text-[#8064B0] text-[12px] font-bold transition-colors whitespace-nowrap"
+                          >
+                            เลือกทุกกะ ({selectableShiftTemplates.length})
+                          </button>
+                          <button
+                            type="button"
+                            disabled={selectedShiftIds.length === 0}
+                            onClick={clearSelectedShifts}
+                            className="h-8 px-2.5 rounded-lg border border-[#DED3EE] bg-white hover:bg-[#F8F5FC] hover:border-[#8064B0] disabled:opacity-40 disabled:pointer-events-none text-[#343044] text-[12px] font-semibold transition-colors whitespace-nowrap"
+                          >
+                            ล้างการเลือก
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
                     {bulkOperationMode !== 'CLEAR_ALL_SHIFTS' && (
-                      <button
-                        type="button"
-                        disabled={selectedShiftIds.length === 0}
-                        onClick={clearSelectedShifts}
-                        className="h-8 px-2.5 rounded-md border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-40 text-slate-700 text-[12px] font-medium"
-                      >
-                        ล้างกะที่เลือก
-                      </button>
+                      <p className="text-[12px] text-[#746D82] leading-snug">
+                        Checkbox ด้านล่างคือกะที่เลือกเพื่อใช้กับการดำเนินการแบบกลุ่ม ไม่ใช่สถานะกะเดิมของบุคลากรแต่ละคน
+                      </p>
                     )}
                   </div>
 
@@ -3538,17 +3736,38 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                     </div>
                   ) : (
                     <>
-                      {clientShiftOverlapWarning && (
-                        <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 text-[12.5px] flex items-start gap-2">
-                          <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                          <span>{clientShiftOverlapWarning.message}</span>
+                      {/* แจ้งเตือนทันทีเมื่อพบแม่แบบกะที่มีช่วงเวลาทับซ้อนกัน (รวมกะข้ามวันตามหลักการ [start, end)) */}
+                      {clientShiftOverlaps.length > 0 && (
+                        <div
+                          role="alert"
+                          className="p-3.5 rounded-xl bg-red-50 border border-red-300 text-red-950 text-[12.5px] space-y-2"
+                        >
+                          <div className="flex items-start gap-2 font-bold text-red-900">
+                            <AlertTriangle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                            <span>
+                              พบแม่แบบกะที่มีเวลาทับซ้อนกัน กรุณาตรวจสอบก่อนบันทึก (
+                              {clientShiftOverlaps.length} คู่)
+                            </span>
+                          </div>
+                          <ul className="list-disc pl-6 space-y-1 text-[12px] text-red-900 max-h-28 overflow-y-auto pr-1">
+                            {clientShiftOverlaps.map((ov, idx) => (
+                              <li key={`${ov.kind}-${ov.shiftAId}-${ov.shiftBId}-${idx}`}>
+                                {ov.message}
+                              </li>
+                            ))}
+                          </ul>
+                          <p className="text-[11.5px] text-red-800/90 pl-6">
+                            ระบบจะไม่อนุญาตให้บันทึกกะที่มีช่วงเวลาทับซ้อนกัน กรุณานำกะที่ทับซ้อนออกก่อนดำเนินการ (กะที่สิ้นสุดเวลาเดียวกับอีกกะเริ่มต้นถือว่าไม่ทับซ้อน)
+                          </p>
                         </div>
                       )}
 
+                      {/* การ์ดแม่แบบกะแบบ 2 คอลัมน์บน Desktop */}
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[340px] overflow-y-auto pr-0.5">
-                        {shifts.map((s) => {
+                        {selectableShiftTemplates.map((s) => {
                           const sid = Number(s.id);
                           const isSelected = selectedShiftIds.includes(sid);
+                          const isConflicting = isSelected && overlappingShiftIdSet.has(sid);
                           const isCross = Number(s.is_cross_midnight) === 1;
                           const cleanName = formatCleanShiftName(s.shift_name);
                           const iconKind = classifyShiftIconKind({
@@ -3562,23 +3781,32 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                           return (
                             <label
                               key={sid}
-                              className={`p-3 rounded-xl border cursor-pointer transition-colors flex flex-col justify-between gap-2 select-none ${
+                              className={`p-3 rounded-xl border cursor-pointer transition-colors flex flex-col justify-between gap-2 select-none min-w-0 ${
                                 isSelected
-                                  ? 'bg-[#F3EEFC] border-[#7359B4]'
-                                  : 'bg-white border-[#E7E2F0] hover:border-[#8B73C7]/70'
+                                  ? isConflicting
+                                    ? 'bg-[#F3EEFA] border-red-400 ring-1 ring-red-200'
+                                    : 'bg-[#F3EEFA] border-[#8064B0] ring-1 ring-[#8064B0]/15'
+                                  : 'bg-white border-slate-200 hover:border-[#8064B0]/60'
                               }`}
                             >
-                              <div className="flex items-start justify-between gap-2">
+                              <div className="flex items-start justify-between gap-2 min-w-0">
                                 <div className="flex items-start gap-2 min-w-0">
-                                  <div className="w-7 h-7 rounded-lg bg-white border border-[#E7E2F0] flex items-center justify-center shrink-0 mt-0.5">
+                                  <div className="w-7 h-7 rounded-lg bg-white border border-[#DED3EE] flex items-center justify-center shrink-0 mt-0.5">
                                     {renderShiftIcon(iconKind, 'w-4 h-4')}
                                   </div>
                                   <div className="min-w-0">
-                                    <div className="font-bold text-[13.5px] text-[#273244] leading-snug truncate">
+                                    <div className="font-bold text-[13.5px] text-[#343044] leading-snug truncate">
                                       {cleanName}
                                     </div>
-                                    <div className="font-mono font-bold text-[13px] text-[#7359B4] tabular-nums mt-0.5">
-                                      {s.start_time}–{s.end_time} น.
+                                    <div className="font-mono font-bold text-[13px] text-[#8064B0] tabular-nums mt-0.5 flex flex-wrap items-center gap-1">
+                                      <span>
+                                        {s.start_time}–{s.end_time} น.
+                                      </span>
+                                      {isCross && (
+                                        <span className="text-[10.5px] font-semibold px-1.5 py-0.2 rounded bg-white border border-[#DED3EE] text-[#8064B0]">
+                                          +1 วัน
+                                        </span>
+                                      )}
                                     </div>
                                   </div>
                                 </div>
@@ -3586,13 +3814,17 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                                   type="checkbox"
                                   checked={isSelected}
                                   onChange={() => toggleAssignShiftId(sid)}
-                                  className="mt-1 w-4 h-4 rounded border-slate-300 text-[#7359B4] focus:ring-[#7359B4] shrink-0"
+                                  className="mt-1 w-4 h-4 rounded border-slate-300 accent-[#8064B0] text-[#8064B0] focus:ring-[#8064B0] shrink-0"
                                 />
                               </div>
 
-                              <div className="pt-1.5 border-t border-[#E7E2F0]/80 text-[11.5px] text-slate-600 flex items-center justify-between gap-1">
-                                <span>ผ่อนผัน {s.grace_minutes} นาที</span>
-                                <span className="font-mono text-[11px] text-slate-500">
+                              <div className="pt-1.5 border-t border-[#DED3EE]/70 text-[11.5px] text-[#746D82] flex items-center justify-between gap-1.5">
+                                <span className="truncate">
+                                  {s.grace_minutes !== undefined && s.grace_minutes !== null
+                                    ? `ผ่อนผัน ${s.grace_minutes} นาที`
+                                    : 'ตามเวลามาตรฐาน'}
+                                </span>
+                                <span className="font-mono text-[11px] text-[#746D82] shrink-0">
                                   {s.shift_code}
                                   {isCross ? ' (+1 วัน)' : ''}
                                 </span>
@@ -3605,44 +3837,51 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                   )}
                 </div>
 
-                {/* สรุปกะที่เลือกไว้ */}
+                {/* สรุปกะที่เลือกไว้ในรูปแบบ Chip พร้อมปุ่ม X เอาออกทีละกะ */}
                 {bulkOperationMode !== 'CLEAR_ALL_SHIFTS' && (
-                  <div className="pt-2 border-t border-[#E7E2F0] space-y-1.5">
-                    <div className="text-[12px] font-semibold text-slate-700">
+                  <div className="pt-2.5 border-t border-[#DED3EE]/80 space-y-1.5 min-w-0">
+                    <div className="text-[12px] font-semibold text-[#343044]">
                       แม่แบบกะที่เลือก ({selectedShiftTemplates.length} กะ):
                     </div>
                     {selectedShiftTemplates.length === 0 ? (
-                      <div className="p-2.5 rounded-lg bg-[#FAF9FD] border border-dashed border-[#D8CDF2] text-[12px] text-slate-500 text-center">
+                      <div className="p-2.5 rounded-lg bg-[#F8F5FC] border border-dashed border-[#DED3EE] text-[12px] text-[#746D82] text-center">
                         ยังไม่ได้เลือกแม่แบบกะ กรุณาติ๊กเลือกอย่างน้อย 1 กะ
                       </div>
                     ) : (
-                      <div className="p-2 rounded-lg bg-[#FAF9FD] border border-[#E7E2F0] flex flex-wrap gap-1.5">
+                      <div className="max-h-28 overflow-y-auto p-2 rounded-lg bg-[#F8F5FC] border border-[#DED3EE] flex flex-wrap gap-1.5">
                         {selectedShiftTemplates.map((s) => {
+                          const sid = Number(s.id);
+                          const isCross = Number(s.is_cross_midnight) === 1;
+                          const isConflicting = overlappingShiftIdSet.has(sid);
                           const iconKind = classifyShiftIconKind({
                             shiftCode: s.shift_code,
                             shiftName: s.shift_name,
                             shiftCategory: s.shift_category,
                             startTime: s.start_time,
                             endTime: s.end_time,
-                            isCrossMidnight: s.is_cross_midnight,
+                            isCrossMidnight: isCross,
                           });
                           return (
                             <span
-                              key={s.id}
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white border border-[#D8CDF2] text-[12px] text-[#273244]"
+                              key={sid}
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white border text-[12px] text-[#343044] max-w-full ${
+                                isConflicting ? 'border-red-300' : 'border-[#DED3EE]'
+                              }`}
                             >
                               {renderShiftIcon(iconKind, 'w-3.5 h-3.5')}
-                              <span className="font-semibold">
+                              <span className="font-semibold truncate">
                                 {formatCleanShiftName(s.shift_name)}
                               </span>
-                              <span className="font-mono text-[11.5px] text-[#7359B4]">
+                              <span className="font-mono text-[11.5px] text-[#8064B0] shrink-0">
                                 {s.start_time}–{s.end_time}
+                                {isCross ? ' (+1 วัน)' : ''}
                               </span>
                               <button
                                 type="button"
-                                onClick={() => toggleAssignShiftId(Number(s.id))}
-                                className="text-slate-400 hover:text-red-600"
-                                title="นำกะนี้ออก"
+                                onClick={() => toggleAssignShiftId(sid)}
+                                className="text-[#746D82] hover:text-red-600 shrink-0"
+                                title={`นำกะ ${formatCleanShiftName(s.shift_name)} ออก`}
+                                aria-label={`นำกะ ${formatCleanShiftName(s.shift_name)} ออก`}
                               >
                                 <X className="w-3.5 h-3.5" />
                               </button>
@@ -3655,279 +3894,300 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                 )}
               </div>
             </div>
-          </div>
+          </section>
 
           {/* =================================================================
-              ขั้นตอนที่ 2: เลือกวันที่ปฏิบัติงาน (คง Workflow เดิมครบทุกโหมด)
+              ขั้นตอนที่ ②: เลือกวันที่ปฏิบัติงาน
+              พื้นหลังขาว (#FFFFFF) | Header แถบม่วงอ่อน (#F3EEFA)
              ================================================================= */}
-          <div className="bg-white border border-[#E7E2F0] rounded-xl p-5 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#E7E2F0] pb-3">
-              <div>
-                <h3 className="text-[15.5px] font-bold text-[#273244]">
-                  ขั้นตอนที่ 2: เลือกวันที่ปฏิบัติงาน <RequiredMark />
-                </h3>
-                <p className="text-[12.5px] text-slate-600 mt-0.5">
-                  เลือกวันเดียว เลือกหลายวันจากปฏิทิน หรือเลือกช่วงวันที่พร้อมกรองเฉพาะวันจันทร์–ศุกร์ได้
-                </p>
+          <section className="bg-white border border-[#DED3EE] rounded-2xl shadow-xs overflow-hidden">
+            <div className="bg-[#F3EEFA] border-b border-[#DED3EE] px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+              <div className="flex items-start gap-3 min-w-0">
+                <span
+                  aria-hidden="true"
+                  className="w-7 h-7 rounded-full bg-[#8064B0] text-white font-bold text-[13.5px] flex items-center justify-center shrink-0 mt-0.5 shadow-2xs"
+                >
+                  2
+                </span>
+                <div className="min-w-0">
+                  <h3 className="text-[15.5px] font-bold text-[#343044] leading-snug">
+                    เลือกวันที่ปฏิบัติงาน <RequiredMark />
+                  </h3>
+                  <p className="text-[12.5px] text-[#746D82] mt-0.5">
+                    เลือกวันเดียว เลือกหลายวันจากปฏิทิน หรือเลือกช่วงวันที่พร้อมกรองเฉพาะวันจันทร์–ศุกร์ได้
+                  </p>
+                </div>
               </div>
-              <span className="font-mono text-[13px] font-bold text-[#5B41A1] bg-[#F3EEFC] border border-[#D8CDF2] px-2.5 py-1 rounded-md shrink-0 tabular-nums">
+              <span className="font-mono text-[13px] font-bold text-[#8064B0] bg-white border border-[#DED3EE] px-3 py-1 rounded-lg shrink-0 tabular-nums self-start sm:self-auto ml-10 sm:ml-0">
                 เลือกแล้ว {effectiveSelectedDates.length} วัน
               </span>
             </div>
 
-            <div className="inline-flex flex-wrap items-center p-1 bg-slate-100 border border-slate-200 rounded-lg gap-1">
-              <button
-                type="button"
-                onClick={() => setDatePickStrategy('SINGLE_DAY')}
-                className={`px-3.5 py-1.5 rounded-md text-[13px] font-semibold transition-colors ${
-                  datePickStrategy === 'SINGLE_DAY'
-                    ? 'bg-white text-[#5B41A1] shadow-2xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                เลือกวันเดียว
-              </button>
-              <button
-                type="button"
-                onClick={() => setDatePickStrategy('MULTI_PICK')}
-                className={`px-3.5 py-1.5 rounded-md text-[13px] font-semibold transition-colors ${
-                  datePickStrategy === 'MULTI_PICK'
-                    ? 'bg-white text-[#5B41A1] shadow-2xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                เลือกหลายวันจากปฏิทิน
-              </button>
-              <button
-                type="button"
-                onClick={() => setDatePickStrategy('DATE_RANGE')}
-                className={`px-3.5 py-1.5 rounded-md text-[13px] font-semibold transition-colors ${
-                  datePickStrategy === 'DATE_RANGE'
-                    ? 'bg-white text-[#5B41A1] shadow-2xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                เลือกช่วงวันที่ (จันทร์–ศุกร์ / ทุกวัน)
-              </button>
-            </div>
-
-            {datePickStrategy === 'SINGLE_DAY' && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-end">
-                <div>
-                  <label className="block text-[13px] font-semibold text-slate-700 mb-1.5">
-                    ระบุวันที่ต้องการจัดเวร
-                  </label>
-                  <input
-                    type="date"
-                    value={singleWorkDate}
-                    onChange={(e) => setSingleWorkDate(e.target.value)}
-                    className="w-full h-10 px-3 rounded-lg border border-slate-300 font-mono text-[13.5px] text-slate-800 focus:outline-none focus:border-[#7359B4]"
-                  />
-                </div>
-                <div className="p-2.5 rounded-lg bg-[#FAF9FD] border border-[#E7E2F0] text-[13px] text-[#273244]">
-                  วันที่เลือก:{' '}
-                  <strong className="font-semibold">
-                    {singleWorkDate ? formatThaiDate(singleWorkDate) : '-'}
-                  </strong>
-                </div>
-              </div>
-            )}
-
-            {datePickStrategy === 'MULTI_PICK' && (
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="text-[13px] font-semibold text-slate-800">
-                    ปฏิทินเดือน {formatThaiMonthTitle(selectedMonth)}
-                  </span>
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => quickPickMonthDates('WEEKDAYS_MONTH')}
-                      className="h-7 px-2.5 rounded border border-[#D8CDF2] bg-[#F3EEFC] hover:bg-[#E7DDF8] text-[#5B41A1] text-[12px] font-semibold"
-                    >
-                      เฉพาะจันทร์–ศุกร์ทั้งเดือน
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => quickPickMonthDates('ALL_MONTH')}
-                      className="h-7 px-2.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-[12px] font-medium"
-                    >
-                      ทุกวันทั้งเดือน
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => quickPickMonthDates('FIRST_HALF')}
-                      className="h-7 px-2.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-[12px] font-medium"
-                    >
-                      วันที่ 1–15
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => quickPickMonthDates('SECOND_HALF')}
-                      className="h-7 px-2.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-[12px] font-medium"
-                    >
-                      วันที่ 16–{monthBounds.daysInMonth}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => quickPickMonthDates('CLEAR')}
-                      className="h-7 px-2.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-red-700 text-[12px] font-medium"
-                    >
-                      ล้างวันที่
-                    </button>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-7 gap-1.5 p-3 bg-[#FAF9FD] border border-[#E7E2F0] rounded-xl">
-                  {monthBounds.allDates.map((d) => {
-                    const active = multiPickedDates.includes(d.dateStr);
-                    return (
-                      <button
-                        key={d.dateStr}
-                        type="button"
-                        onClick={() => toggleMultiPickedDate(d.dateStr)}
-                        className={`h-11 rounded-lg font-mono text-[12.5px] flex flex-col items-center justify-center border transition-colors ${
-                          active
-                            ? 'bg-[#7359B4] border-[#7359B4] text-white font-bold'
-                            : d.isWeekend
-                              ? 'bg-amber-50/70 border-amber-200 text-amber-950 hover:border-[#8B73C7]'
-                              : 'bg-white border-slate-200 text-slate-800 hover:border-[#8B73C7]'
-                        }`}
-                      >
-                        <span
-                          className={`text-[10px] leading-none ${
-                            active
-                              ? 'text-violet-100'
-                              : d.isWeekend
-                                ? 'text-amber-700 font-semibold'
-                                : 'text-slate-500'
-                          }`}
-                        >
-                          {d.weekdayShort}
-                        </span>
-                        <span className="leading-tight mt-0.5">{d.dayNum}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {datePickStrategy === 'DATE_RANGE' && (
-              <div className="space-y-3.5">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                  <div>
-                    <label className="block text-[12.5px] font-semibold text-slate-700 mb-1">
-                      ตั้งแต่วันที่
-                    </label>
-                    <input
-                      type="date"
-                      value={rangeStartDate}
-                      onChange={(e) => setRangeStartDate(e.target.value)}
-                      className="w-full h-10 px-3 rounded-lg border border-slate-300 font-mono text-[13px] text-slate-800"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-[12.5px] font-semibold text-slate-700 mb-1">
-                      ถึงวันที่
-                    </label>
-                    <input
-                      type="date"
-                      value={rangeEndDate}
-                      onChange={(e) => setRangeEndDate(e.target.value)}
-                      className="w-full h-10 px-3 rounded-lg border border-slate-300 font-mono text-[13px] text-slate-800"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-[12.5px] font-semibold text-slate-700 mb-1">
-                      เงื่อนไขวันในสัปดาห์
-                    </label>
-                    <select
-                      value={weekdayFilter}
-                      onChange={(e) => setWeekdayFilter(e.target.value as WeekdayFilterMode)}
-                      className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-[13px] text-slate-800"
-                    >
-                      <option value="ALL_DAYS">เลือกทุกวันในช่วง</option>
-                      <option value="WEEKDAYS_ONLY">เฉพาะวันจันทร์ – ศุกร์</option>
-                      <option value="WEEKENDS_ONLY">เฉพาะวันเสาร์ – อาทิตย์</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[12px] text-slate-500">ตั้งช่วงวันที่ด่วน:</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRangeStartDate(monthBounds.dateFrom);
-                      setRangeEndDate(monthBounds.dateTo);
-                      setWeekdayFilter('WEEKDAYS_ONLY');
-                    }}
-                    className="h-7 px-2.5 rounded border border-[#D8CDF2] bg-[#F3EEFC] hover:bg-[#E7DDF8] text-[#5B41A1] text-[12px] font-semibold"
-                  >
-                    จันทร์–ศุกร์ ตลอดเดือน{THAI_FULL_MONTHS[monthBounds.month - 1]}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRangeStartDate(monthBounds.dateFrom);
-                      setRangeEndDate(monthBounds.dateTo);
-                      setWeekdayFilter('ALL_DAYS');
-                    }}
-                    className="h-7 px-2.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-[12px] font-medium"
-                  >
-                    ทุกวัน ตลอดเดือน{THAI_FULL_MONTHS[monthBounds.month - 1]}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {outOfMonthDatesWarning && (
-              <div className="p-3 rounded-lg bg-amber-50 border border-amber-300 text-amber-950 text-[12.5px] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div className="flex items-start gap-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-                  <span>{outOfMonthDatesWarning}</span>
-                </div>
+            <div className="p-5 bg-white space-y-4">
+              <div className="inline-flex flex-wrap items-center p-1 bg-[#F8F5FC] border border-[#DED3EE] rounded-lg gap-1">
                 <button
                   type="button"
-                  onClick={() => {
-                    setSingleWorkDate(monthBounds.dateFrom);
-                    setRangeStartDate(monthBounds.dateFrom);
-                    setRangeEndDate(monthBounds.dateTo);
-                    setMultiPickedDates([monthBounds.dateFrom]);
-                  }}
-                  className="h-7 px-2.5 rounded bg-white border border-amber-300 text-amber-900 font-semibold text-[12px] shrink-0"
+                  onClick={() => setDatePickStrategy('SINGLE_DAY')}
+                  className={`px-3.5 py-1.5 rounded-md text-[13px] font-semibold transition-colors ${
+                    datePickStrategy === 'SINGLE_DAY'
+                      ? 'bg-white text-[#8064B0] shadow-2xs border border-[#DED3EE]'
+                      : 'text-[#746D82] hover:text-[#343044]'
+                  }`}
                 >
-                  ตั้งเป็นเดือน{THAI_FULL_MONTHS[monthBounds.month - 1]}
+                  เลือกวันเดียว
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDatePickStrategy('MULTI_PICK')}
+                  className={`px-3.5 py-1.5 rounded-md text-[13px] font-semibold transition-colors ${
+                    datePickStrategy === 'MULTI_PICK'
+                      ? 'bg-white text-[#8064B0] shadow-2xs border border-[#DED3EE]'
+                      : 'text-[#746D82] hover:text-[#343044]'
+                  }`}
+                >
+                  เลือกหลายวันจากปฏิทิน
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDatePickStrategy('DATE_RANGE')}
+                  className={`px-3.5 py-1.5 rounded-md text-[13px] font-semibold transition-colors ${
+                    datePickStrategy === 'DATE_RANGE'
+                      ? 'bg-white text-[#8064B0] shadow-2xs border border-[#DED3EE]'
+                      : 'text-[#746D82] hover:text-[#343044]'
+                  }`}
+                >
+                  เลือกช่วงวันที่ (จันทร์–ศุกร์ / ทุกวัน)
                 </button>
               </div>
-            )}
-          </div>
+
+              {datePickStrategy === 'SINGLE_DAY' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-end">
+                  <div>
+                    <label className="block text-[13px] font-semibold text-[#343044] mb-1.5">
+                      ระบุวันที่ต้องการจัดเวร
+                    </label>
+                    <input
+                      type="date"
+                      value={singleWorkDate}
+                      onChange={(e) => setSingleWorkDate(e.target.value)}
+                      className="w-full h-10 px-3 rounded-lg border border-[#DED3EE] bg-white font-mono text-[13.5px] text-[#343044] focus:outline-none focus:border-[#8064B0]"
+                    />
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-[#F8F5FC] border border-[#DED3EE] text-[13px] text-[#343044]">
+                    วันที่เลือก:{' '}
+                    <strong className="font-semibold">
+                      {singleWorkDate ? formatThaiDate(singleWorkDate) : '-'}
+                    </strong>
+                  </div>
+                </div>
+              )}
+
+              {datePickStrategy === 'MULTI_PICK' && (
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[13px] font-semibold text-[#343044]">
+                      ปฏิทินเดือน {formatThaiMonthTitle(selectedMonth)}
+                    </span>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => quickPickMonthDates('WEEKDAYS_MONTH')}
+                        className="h-7 px-2.5 rounded-md border border-[#DED3EE] bg-[#F3EEFA] hover:bg-[#E8DEF6] text-[#8064B0] text-[12px] font-semibold"
+                      >
+                        เฉพาะจันทร์–ศุกร์ทั้งเดือน
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => quickPickMonthDates('ALL_MONTH')}
+                        className="h-7 px-2.5 rounded-md border border-[#DED3EE] bg-white hover:bg-[#F8F5FC] text-[#343044] text-[12px] font-medium"
+                      >
+                        ทุกวันทั้งเดือน
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => quickPickMonthDates('FIRST_HALF')}
+                        className="h-7 px-2.5 rounded-md border border-[#DED3EE] bg-white hover:bg-[#F8F5FC] text-[#343044] text-[12px] font-medium"
+                      >
+                        วันที่ 1–15
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => quickPickMonthDates('SECOND_HALF')}
+                        className="h-7 px-2.5 rounded-md border border-[#DED3EE] bg-white hover:bg-[#F8F5FC] text-[#343044] text-[12px] font-medium"
+                      >
+                        วันที่ 16–{monthBounds.daysInMonth}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => quickPickMonthDates('CLEAR')}
+                        className="h-7 px-2.5 rounded-md border border-[#DED3EE] bg-white hover:bg-red-50 text-red-700 text-[12px] font-medium"
+                      >
+                        ล้างวันที่
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-7 gap-1.5 p-3 bg-[#F8F5FC] border border-[#DED3EE] rounded-xl">
+                    {monthBounds.allDates.map((d) => {
+                      const active = multiPickedDates.includes(d.dateStr);
+                      return (
+                        <button
+                          key={d.dateStr}
+                          type="button"
+                          onClick={() => toggleMultiPickedDate(d.dateStr)}
+                          className={`h-11 rounded-lg font-mono text-[12.5px] flex flex-col items-center justify-center border transition-colors ${
+                            active
+                              ? 'bg-[#8064B0] border-[#8064B0] text-white font-bold'
+                              : d.isWeekend
+                                ? 'bg-amber-50/70 border-amber-200 text-amber-950 hover:border-[#8064B0]'
+                                : 'bg-white border-slate-200 text-[#343044] hover:border-[#8064B0]'
+                          }`}
+                        >
+                          <span
+                            className={`text-[10px] leading-none ${
+                              active
+                                ? 'text-violet-100'
+                                : d.isWeekend
+                                  ? 'text-amber-700 font-semibold'
+                                  : 'text-[#746D82]'
+                            }`}
+                          >
+                            {d.weekdayShort}
+                          </span>
+                          <span className="leading-tight mt-0.5">{d.dayNum}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {datePickStrategy === 'DATE_RANGE' && (
+                <div className="space-y-3.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-[12.5px] font-semibold text-[#343044] mb-1">
+                        ตั้งแต่วันที่
+                      </label>
+                      <input
+                        type="date"
+                        value={rangeStartDate}
+                        onChange={(e) => setRangeStartDate(e.target.value)}
+                        className="w-full h-10 px-3 rounded-lg border border-[#DED3EE] bg-white font-mono text-[13px] text-[#343044] focus:outline-none focus:border-[#8064B0]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[12.5px] font-semibold text-[#343044] mb-1">
+                        ถึงวันที่
+                      </label>
+                      <input
+                        type="date"
+                        value={rangeEndDate}
+                        onChange={(e) => setRangeEndDate(e.target.value)}
+                        className="w-full h-10 px-3 rounded-lg border border-[#DED3EE] bg-white font-mono text-[13px] text-[#343044] focus:outline-none focus:border-[#8064B0]"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[12.5px] font-semibold text-[#343044] mb-1">
+                        เงื่อนไขวันในสัปดาห์
+                      </label>
+                      <select
+                        value={weekdayFilter}
+                        onChange={(e) => setWeekdayFilter(e.target.value as WeekdayFilterMode)}
+                        className="w-full h-10 px-3 rounded-lg border border-[#DED3EE] bg-white text-[13px] text-[#343044] focus:outline-none focus:border-[#8064B0]"
+                      >
+                        <option value="ALL_DAYS">เลือกทุกวันในช่วง</option>
+                        <option value="WEEKDAYS_ONLY">เฉพาะวันจันทร์ – ศุกร์</option>
+                        <option value="WEEKENDS_ONLY">เฉพาะวันเสาร์ – อาทิตย์</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[12px] text-[#746D82]">ตั้งช่วงวันที่ด่วน:</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRangeStartDate(monthBounds.dateFrom);
+                        setRangeEndDate(monthBounds.dateTo);
+                        setWeekdayFilter('WEEKDAYS_ONLY');
+                      }}
+                      className="h-7 px-2.5 rounded-md border border-[#DED3EE] bg-[#F3EEFA] hover:bg-[#E8DEF6] text-[#8064B0] text-[12px] font-semibold"
+                    >
+                      จันทร์–ศุกร์ ตลอดเดือน{THAI_FULL_MONTHS[monthBounds.month - 1]}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRangeStartDate(monthBounds.dateFrom);
+                        setRangeEndDate(monthBounds.dateTo);
+                        setWeekdayFilter('ALL_DAYS');
+                      }}
+                      className="h-7 px-2.5 rounded-md border border-[#DED3EE] bg-white hover:bg-[#F8F5FC] text-[#343044] text-[12px] font-medium"
+                    >
+                      ทุกวัน ตลอดเดือน{THAI_FULL_MONTHS[monthBounds.month - 1]}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {outOfMonthDatesWarning && (
+                <div className="p-3 rounded-lg bg-amber-50 border border-amber-300 text-amber-950 text-[12.5px] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                    <span>{outOfMonthDatesWarning}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSingleWorkDate(monthBounds.dateFrom);
+                      setRangeStartDate(monthBounds.dateFrom);
+                      setRangeEndDate(monthBounds.dateTo);
+                      setMultiPickedDates([monthBounds.dateFrom]);
+                    }}
+                    className="h-7 px-2.5 rounded bg-white border border-amber-300 text-amber-900 font-semibold text-[12px] shrink-0"
+                  >
+                    ตั้งเป็นเดือน{THAI_FULL_MONTHS[monthBounds.month - 1]}
+                  </button>
+                </div>
+              )}
+            </div>
+          </section>
 
           {/* =================================================================
-              ขั้นตอนที่ 3: ตรวจสอบ Preview ความขัดแย้ง และยืนยันบันทึก
+              ขั้นตอนที่ ③: ตรวจสอบและยืนยัน
+              พื้นหลังม่วงอ่อนมาก (#F8F5FC) | Header แถบม่วงอ่อน (#F3EEFA)
+              Summary Cards และตารางผล Preview ใช้พื้นหลังขาว (#FFFFFF)
              ================================================================= */}
-          <div className="bg-white border border-[#D8CDF2] rounded-xl p-5 space-y-4">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-              <div>
-                <h3 className="text-[16px] font-bold text-[#273244]">
-                  ขั้นตอนที่ 3: ตรวจสอบ Preview ก่อนบันทึก และยืนยันการดำเนินการ
-                </h3>
-                <p className="text-[13px] text-slate-600">
-                  ตรวจสอบกะทับซ้อน กะข้ามวัน และรายการที่จะได้รับผลกระทบก่อนบันทึกลงระบบจริง
-                </p>
+          <section className="bg-[#F8F5FC] border border-[#DED3EE] rounded-2xl shadow-xs overflow-hidden">
+            <div className="bg-[#F3EEFA] border-b border-[#DED3EE] px-5 py-3.5 flex flex-col md:flex-row md:items-center justify-between gap-3">
+              <div className="flex items-start gap-3 min-w-0">
+                <span
+                  aria-hidden="true"
+                  className="w-7 h-7 rounded-full bg-[#8064B0] text-white font-bold text-[13.5px] flex items-center justify-center shrink-0 mt-0.5 shadow-2xs"
+                >
+                  3
+                </span>
+                <div className="min-w-0">
+                  <h3 className="text-[15.5px] font-bold text-[#343044] leading-snug">
+                    ตรวจสอบและยืนยัน
+                  </h3>
+                  <p className="text-[12.5px] text-[#746D82] mt-0.5">
+                    ตรวจสอบกะทับซ้อน กะข้ามวัน และรายการที่จะได้รับผลกระทบก่อนบันทึกลงระบบจริง
+                  </p>
+                </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2.5">
+              <div className="flex flex-wrap items-center gap-2.5 pl-10 md:pl-0">
                 <button
                   type="button"
                   onClick={handleRunConflictPreview}
                   disabled={previewLoading || submittingBulk}
-                  className="h-10 px-4 rounded-lg border border-[#D8CDF2] bg-[#F3EEFC] hover:bg-[#E7DDF8] disabled:opacity-50 text-[#5B41A1] text-[13.5px] font-semibold inline-flex items-center justify-center gap-2 transition-colors whitespace-nowrap"
+                  className="h-10 px-4 rounded-lg border border-[#DED3EE] bg-white hover:bg-[#F8F5FC] hover:border-[#8064B0] disabled:opacity-50 text-[#8064B0] text-[13.5px] font-semibold inline-flex items-center justify-center gap-2 transition-colors whitespace-nowrap shadow-2xs"
                 >
-                  <FileCheck2 className="w-4 h-4 text-[#7359B4]" />
+                  <FileCheck2 className="w-4 h-4 text-[#8064B0]" />
                   <span>
                     {previewLoading ? 'กำลังตรวจสอบ Preview...' : '1. ตรวจสอบ Preview ก่อนบันทึก'}
                   </span>
@@ -3939,6 +4199,7 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                   disabled={
                     submittingBulk ||
                     previewLoading ||
+                    hasSameDayClientShiftOverlap ||
                     Boolean(previewError) ||
                     !previewData ||
                     previewData.summary.readyCount === 0 ||
@@ -3947,13 +4208,13 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
                       conflictStrategy === 'ABORT_ON_CONFLICT' &&
                       previewData.summary.conflictCount > 0)
                   }
-                  className={`h-10 px-5 rounded-lg disabled:opacity-40 text-white text-[13.5px] font-semibold inline-flex items-center justify-center gap-2 transition-colors whitespace-nowrap ${
+                  className={`h-10 px-5 rounded-lg disabled:opacity-40 text-white text-[13.5px] font-semibold inline-flex items-center justify-center gap-2 transition-colors whitespace-nowrap shadow-2xs ${
                     bulkOperationMode === 'CLEAR_ALL_SHIFTS' ||
                     bulkOperationMode === 'REMOVE_SELECTED_SHIFTS'
                       ? 'bg-red-700 hover:bg-red-800'
                       : bulkOperationMode === 'REPLACE_SHIFTS'
                         ? 'bg-amber-700 hover:bg-amber-800'
-                        : 'bg-[#7359B4] hover:bg-[#5F479C]'
+                        : 'bg-[#8064B0] hover:bg-[#6E529E]'
                   }`}
                 >
                   <CheckCircle2 className="w-4 h-4" />
@@ -3974,299 +4235,321 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
               </div>
             </div>
 
-            {/* นโยบายจัดการความขัดแย้ง (สำหรับเพิ่มกะ/แทนที่กะ) และหมายเหตุเหตุผล (สำหรับแทนที่/ลบกะ) */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2 border-t border-[#E7E2F0]">
-              {(bulkOperationMode === 'ADD_SHIFTS' || bulkOperationMode === 'REPLACE_SHIFTS') && (
-                <div>
-                  <label className="block text-[12.5px] font-semibold text-slate-700 mb-1">
-                    นโยบายเมื่อพบรายการซ้ำหรือเวลาทับซ้อน:
-                  </label>
-                  <select
-                    value={conflictStrategy}
-                    onChange={(e) => setConflictStrategy(e.target.value as ConflictStrategyMode)}
-                    className="w-full h-9.5 px-3 rounded-lg border border-slate-300 bg-[#FAF9FD] text-[13px] text-slate-800"
-                  >
-                    <option value="SKIP_CONFLICTS">
-                      ข้ามเฉพาะรายการที่ซ้ำ/เวลาทับซ้อน และบันทึกเฉพาะรายการที่พร้อม (แนะนำ)
-                    </option>
-                    <option value="ABORT_ON_CONFLICT">
-                      ยกเลิกทั้งหมดหากพบรายการขัดแย้งแม้แต่รายการเดียว
-                    </option>
-                  </select>
+            <div className="p-4 sm:p-5 space-y-4">
+              {/* นโยบายจัดการความขัดแย้ง และหมายเหตุเหตุผล (การ์ดพื้นหลังขาว) */}
+              <div className="bg-white border border-[#DED3EE] rounded-xl p-4 grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                {(bulkOperationMode === 'ADD_SHIFTS' || bulkOperationMode === 'REPLACE_SHIFTS') && (
+                  <div>
+                    <label className="block text-[12.5px] font-semibold text-[#343044] mb-1">
+                      นโยบายเมื่อพบรายการซ้ำหรือเวลาทับซ้อน:
+                    </label>
+                    <select
+                      value={conflictStrategy}
+                      onChange={(e) => setConflictStrategy(e.target.value as ConflictStrategyMode)}
+                      className="w-full h-9.5 px-3 rounded-lg border border-[#DED3EE] bg-white text-[13px] text-[#343044] focus:outline-none focus:border-[#8064B0]"
+                    >
+                      <option value="SKIP_CONFLICTS">
+                        ข้ามเฉพาะรายการที่ซ้ำ/เวลาทับซ้อน และบันทึกเฉพาะรายการที่พร้อม (แนะนำ)
+                      </option>
+                      <option value="ABORT_ON_CONFLICT">
+                        ยกเลิกทั้งหมดหากพบรายการขัดแย้งแม้แต่รายการเดียว
+                      </option>
+                    </select>
+                  </div>
+                )}
+
+                {bulkOperationMode !== 'ADD_SHIFTS' && (
+                  <div>
+                    <label className="block text-[12.5px] font-semibold text-[#343044] mb-1">
+                      หมายเหตุ / เหตุผลการแก้ไขหรือลบกะ (บันทึกประวัติตรวจสอบ):
+                    </label>
+                    <input
+                      type="text"
+                      value={bulkActionReason}
+                      onChange={(e) => setBulkActionReason(e.target.value)}
+                      placeholder="เช่น ปรับตารางเวรประจำเดือนตามคำสั่งหัวหน้ากลุ่มงาน"
+                      className="w-full h-9.5 px-3 rounded-lg border border-[#DED3EE] bg-white text-[13px] text-[#343044] focus:outline-none focus:border-[#8064B0]"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* แจ้งเตือนซ้ำในขั้นตอนที่ 3 หากยังมีกะที่ทับซ้อนกันอยู่ */}
+              {clientShiftOverlaps.length > 0 && !previewError && (
+                <div
+                  role="alert"
+                  className="p-3.5 rounded-xl bg-red-50 border border-red-300 text-red-950 text-[13px] flex items-start gap-2.5"
+                >
+                  <AlertTriangle className="w-4.5 h-4.5 text-red-600 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <div className="font-bold text-red-900">
+                      พบแม่แบบกะที่มีเวลาทับซ้อนกัน ({clientShiftOverlaps.length} คู่)
+                    </div>
+                    <p className="text-[12.5px] text-red-900">
+                      กรุณาตรวจสอบและปรับการเลือกแม่แบบกะในขั้นตอนที่ 1 ก่อนบันทึก (Backend จะตรวจสอบซ้ำอีกครั้งก่อนบันทึกเสมอ)
+                    </p>
+                  </div>
                 </div>
               )}
 
-              {bulkOperationMode !== 'ADD_SHIFTS' && (
-                <div>
-                  <label className="block text-[12.5px] font-semibold text-slate-700 mb-1">
-                    หมายเหตุ / เหตุผลการแก้ไขหรือลบกะ (บันทึกประวัติตรวจสอบ):
-                  </label>
-                  <input
-                    type="text"
-                    value={bulkActionReason}
-                    onChange={(e) => setBulkActionReason(e.target.value)}
-                    placeholder="เช่น ปรับตารางเวรประจำเดือนตามคำสั่งหัวหน้ากลุ่มงาน"
-                    className="w-full h-9.5 px-3 rounded-lg border border-slate-300 bg-white text-[13px] text-slate-800"
-                  />
+              {/* แสดงข้อผิดพลาดจากการตรวจสอบ Preview พร้อม Request ID */}
+              {previewError && (
+                <div
+                  role="alert"
+                  className="p-4 rounded-xl bg-red-50 border border-red-300 text-red-950 text-[13.5px] flex items-start gap-3"
+                >
+                  <AlertTriangle className="w-5 h-5 text-red-700 shrink-0 mt-0.5" />
+                  <div className="space-y-1 min-w-0">
+                    <div className="font-bold text-red-900 flex flex-wrap items-center gap-2">
+                      <span>ไม่สามารถดำเนินการได้</span>
+                      {previewError.code && (
+                        <span className="font-mono text-[12px] bg-red-100 text-red-900 px-2 py-0.5 rounded">
+                          รหัส: {previewError.code}
+                        </span>
+                      )}
+                      {previewError.requestId && (
+                        <span className="font-mono text-[12px] bg-red-100 text-red-900 px-2 py-0.5 rounded">
+                          Request ID: {previewError.requestId}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-red-900 break-words">{previewError.message}</p>
+                  </div>
+                </div>
+              )}
+
+              {/* ตารางสรุปผลการตรวจสอบ Preview (Summary Cards พื้นหลังขาว #FFFFFF) */}
+              {previewData ? (
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                    <div className="p-3.5 rounded-xl bg-white border border-[#DED3EE] shadow-2xs">
+                      <div className="text-[12px] text-[#746D82] font-medium">
+                        รายการที่ตรวจสอบทั้งหมด
+                      </div>
+                      <div className="text-[20px] font-bold font-mono tabular-nums text-[#343044] mt-0.5">
+                        {previewData.summary.totalRequested} รายการ
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 rounded-xl bg-white border border-emerald-200 shadow-2xs">
+                      <div className="text-[12px] text-emerald-800 font-semibold">
+                        พร้อมดำเนินการ
+                      </div>
+                      <div className="text-[20px] font-bold font-mono tabular-nums text-emerald-700 mt-0.5">
+                        {previewData.summary.readyCount} รายการ
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 rounded-xl bg-white border border-amber-200 shadow-2xs">
+                      <div className="text-[12px] text-amber-800 font-semibold">
+                        กะซ้ำที่มีอยู่แล้ว
+                      </div>
+                      <div className="text-[20px] font-bold font-mono tabular-nums text-amber-800 mt-0.5">
+                        {previewData.summary.duplicateCount} รายการ
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 rounded-xl bg-white border border-amber-200 shadow-2xs">
+                      <div className="text-[12px] text-amber-800 font-semibold">
+                        เวลาทับซ้อน / ข้ามวัน
+                      </div>
+                      <div className="text-[20px] font-bold font-mono tabular-nums text-amber-800 mt-0.5">
+                        {previewData.summary.overlapCount} รายการ
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 rounded-xl bg-white border border-[#DED3EE] shadow-2xs">
+                      <div className="text-[12px] text-[#8064B0] font-semibold">
+                        {bulkOperationMode === 'REPLACE_SHIFTS'
+                          ? 'ช่องที่จะถูกแทนที่กะเดิม'
+                          : bulkOperationMode === 'CLEAR_ALL_SHIFTS'
+                            ? 'ช่องที่จะตั้งเป็นไม่มีเวร'
+                            : bulkOperationMode === 'REMOVE_SELECTED_SHIFTS'
+                              ? 'ไม่พบกะเดิมให้ลบ'
+                              : 'ขัดแย้ง / ถูกข้าม'}
+                      </div>
+                      <div className="text-[20px] font-bold font-mono tabular-nums text-[#8064B0] mt-0.5">
+                        {bulkOperationMode === 'REPLACE_SHIFTS'
+                          ? `${previewData.summary.replaceAffectedCells || 0} วัน-คน`
+                          : bulkOperationMode === 'CLEAR_ALL_SHIFTS'
+                            ? `${previewData.summary.clearAffectedCells || 0} วัน-คน`
+                            : bulkOperationMode === 'REMOVE_SELECTED_SHIFTS'
+                              ? `${previewData.summary.notAssignedCount || 0} รายการ`
+                              : `${previewData.summary.conflictCount} รายการ`}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div className="inline-flex flex-wrap items-center p-1 bg-white border border-[#DED3EE] rounded-lg self-start gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setPreviewFilterTab('ALL')}
+                        className={`px-3 py-1 rounded-md text-[12.5px] font-semibold ${
+                          previewFilterTab === 'ALL'
+                            ? 'bg-[#F3EEFA] text-[#8064B0]'
+                            : 'text-[#746D82] hover:text-[#343044]'
+                        }`}
+                      >
+                        ทั้งหมด ({previewData.items.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPreviewFilterTab('READY')}
+                        className={`px-3 py-1 rounded-md text-[12.5px] font-semibold ${
+                          previewFilterTab === 'READY'
+                            ? 'bg-emerald-50 text-emerald-800'
+                            : 'text-[#746D82] hover:text-[#343044]'
+                        }`}
+                      >
+                        พร้อมดำเนินการ ({previewData.summary.readyCount})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPreviewFilterTab('CONFLICT')}
+                        className={`px-3 py-1 rounded-md text-[12.5px] font-semibold ${
+                          previewFilterTab === 'CONFLICT'
+                            ? 'bg-amber-50 text-amber-900'
+                            : 'text-[#746D82] hover:text-[#343044]'
+                        }`}
+                      >
+                        ขัดแย้ง / ข้าม (
+                        {previewData.items.length - previewData.summary.readyCount})
+                      </button>
+                    </div>
+
+                    <div className="text-[12.5px] text-[#746D82]">
+                      {bulkOperationMode === 'CLEAR_ALL_SHIFTS' ? (
+                        <strong className="text-red-700">โหมด: ลบกะทั้งหมด (ตั้งเป็นไม่มีเวร)</strong>
+                      ) : (
+                        <>
+                          กะที่เลือก ({(previewData.shiftSnapshots || []).length || 1} กะ):{' '}
+                          <strong className="text-[#8064B0]">
+                            {(previewData.shiftSnapshots && previewData.shiftSnapshots.length > 0
+                              ? previewData.shiftSnapshots
+                              : previewData.shiftSnapshot
+                                ? [previewData.shiftSnapshot]
+                                : []
+                            )
+                              .map(
+                                (sn: any) =>
+                                  `${formatCleanShiftName(sn.shiftName)} (${sn.startTime}–${sn.endTime})`
+                              )
+                              .join(', ')}
+                          </strong>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="bg-white border border-[#DED3EE] rounded-xl overflow-hidden shadow-2xs">
+                    <div className="max-h-72 overflow-y-auto overflow-x-auto">
+                      <table className="w-full min-w-[640px] text-left border-collapse text-[13px]">
+                        <thead className="sticky top-0 bg-[#F3EEFA] border-b border-[#DED3EE] text-[#343044]">
+                          <tr>
+                            <th className="py-2.5 px-3.5 font-semibold">วันที่ปฏิบัติงาน</th>
+                            <th className="py-2.5 px-3.5 font-semibold">บุคลากร · กลุ่มงาน</th>
+                            <th className="py-2.5 px-3.5 font-semibold">กะที่ดำเนินการ</th>
+                            <th className="py-2.5 px-3.5 font-semibold">สถานะและเหตุผล</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-[#DED3EE]/70">
+                          {filteredPreviewItems.map((item, idx) => {
+                            const displayShiftName =
+                              item.shiftName || previewData.shiftSnapshot?.shiftName;
+                            const displayStart =
+                              item.startTime || previewData.shiftSnapshot?.startTime;
+                            const displayEnd = item.endTime || previewData.shiftSnapshot?.endTime;
+                            const iconKind = displayShiftName
+                              ? classifyShiftIconKind({
+                                  shiftCode: item.shiftCode || previewData.shiftSnapshot?.shiftCode,
+                                  shiftName: displayShiftName,
+                                  startTime: displayStart,
+                                  endTime: displayEnd,
+                                  isCrossMidnight: item.isCrossMidnight,
+                                })
+                              : null;
+
+                            return (
+                              <tr
+                                key={`${item.personId}-${item.workDate}-${item.shiftId ?? 'clear'}-${idx}`}
+                                className={item.status === 'READY' ? 'bg-white' : 'bg-amber-50/40'}
+                              >
+                                <td className="py-2.5 px-3.5 font-mono tabular-nums font-semibold text-[#343044] whitespace-nowrap">
+                                  {formatThaiDate(item.workDate)}
+                                </td>
+                                <td className="py-2.5 px-3.5">
+                                  <span className="font-bold text-[#343044]">{item.fullName}</span>{' '}
+                                  <span className="text-[12px] font-mono text-[#746D82]">
+                                    ({item.personId}) · {item.departmentName}
+                                  </span>
+                                </td>
+                                <td className="py-2.5 px-3.5 text-[#343044] whitespace-nowrap">
+                                  {bulkOperationMode === 'CLEAR_ALL_SHIFTS' ? (
+                                    <span className="font-semibold text-red-700">
+                                      ลบทุกกะ (ตั้งเป็นไม่มีเวร)
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex items-center gap-1.5">
+                                      {iconKind && renderShiftIcon(iconKind, 'w-3.5 h-3.5')}
+                                      <span className="font-semibold">
+                                        {formatCleanShiftName(displayShiftName)}
+                                      </span>
+                                      <span className="font-mono text-[12px] text-[#746D82]">
+                                        ({displayStart}–{displayEnd} น.)
+                                      </span>
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-2.5 px-3.5">
+                                  {item.status === 'READY' ? (
+                                    <span className="text-emerald-700 font-semibold">
+                                      {bulkOperationMode === 'CLEAR_ALL_SHIFTS'
+                                        ? item.existingOnDateCount && item.existingOnDateCount > 0
+                                          ? `พร้อมลบกะเดิม ${item.existingOnDateCount} กะ และตั้งเป็นไม่มีเวร`
+                                          : 'พร้อมตั้งเป็นไม่มีเวร (คงสถานะไม่สร้างกะอัตโนมัติ)'
+                                        : bulkOperationMode === 'REMOVE_SELECTED_SHIFTS'
+                                          ? 'พบกะนี้ในระบบ พร้อมลบออก'
+                                          : bulkOperationMode === 'REPLACE_SHIFTS' &&
+                                              item.existingOnDateCount &&
+                                              item.existingOnDateCount > 0
+                                            ? `พร้อมบันทึก (จะแทนที่กะเดิม ${item.existingOnDateCount} กะในวันนี้)`
+                                            : 'พร้อมบันทึก (ไม่มีเวรซ้ำหรือเวลาทับซ้อน)'}
+                                    </span>
+                                  ) : (
+                                    <div className="text-amber-900 font-semibold">
+                                      <span>
+                                        {item.status === 'DUPLICATE_SAME_SHIFT'
+                                          ? 'มีเวรนี้อยู่แล้ว: '
+                                          : item.status === 'NOT_ASSIGNED'
+                                            ? 'ไม่พบกะเดิม: '
+                                            : 'เวลาทับซ้อน: '}
+                                        {item.conflictMessage}
+                                      </span>
+                                    </div>
+                                  )}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-4 rounded-xl bg-white border border-dashed border-[#DED3EE] text-center text-[13.5px] text-[#746D82]">
+                  เลือกบุคลากร ({filteredPersonSelectionMeta.uniqueSelectedTotalCount} คน) ·{' '}
+                  {bulkOperationMode === 'CLEAR_ALL_SHIFTS'
+                    ? 'ล้างทุกกะ'
+                    : `กะที่เลือก (${selectedShiftIds.length} กะ)`}{' '}
+                  · วันที่ ({effectiveSelectedDates.length} วัน) แล้วกดปุ่ม{' '}
+                  <strong className="text-[#8064B0]">“1. ตรวจสอบ Preview ก่อนบันทึก”</strong>{' '}
+                  เพื่อดูผลกระทบและความซ้ำซ้อนก่อนยืนยัน
                 </div>
               )}
             </div>
-
-            {/* แสดงข้อผิดพลาดจากการตรวจสอบ Preview พร้อม Request ID */}
-            {previewError && (
-              <div
-                role="alert"
-                className="p-4 rounded-xl bg-red-50 border border-red-300 text-red-950 text-[13.5px] flex items-start gap-3"
-              >
-                <AlertTriangle className="w-5 h-5 text-red-700 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <div className="font-bold text-red-900 flex flex-wrap items-center gap-2">
-                    <span>ไม่สามารถดำเนินการได้</span>
-                    {previewError.code && (
-                      <span className="font-mono text-[12px] bg-red-100 text-red-900 px-2 py-0.5 rounded">
-                        รหัส: {previewError.code}
-                      </span>
-                    )}
-                    {previewError.requestId && (
-                      <span className="font-mono text-[12px] bg-red-100 text-red-900 px-2 py-0.5 rounded">
-                        Request ID: {previewError.requestId}
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-red-900">{previewError.message}</p>
-                </div>
-              </div>
-            )}
-
-            {/* ตารางสรุปผลการตรวจสอบ Preview */}
-            {previewData ? (
-              <div className="space-y-4 pt-2">
-                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-                  <div className="p-3.5 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0]">
-                    <div className="text-[12px] text-slate-600">รายการที่ตรวจสอบทั้งหมด</div>
-                    <div className="text-[20px] font-bold font-mono tabular-nums text-[#273244] mt-0.5">
-                      {previewData.summary.totalRequested} รายการ
-                    </div>
-                  </div>
-
-                  <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200">
-                    <div className="text-[12px] text-emerald-800 font-semibold">
-                      พร้อมดำเนินการ
-                    </div>
-                    <div className="text-[20px] font-bold font-mono tabular-nums text-emerald-800 mt-0.5">
-                      {previewData.summary.readyCount} รายการ
-                    </div>
-                  </div>
-
-                  <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200">
-                    <div className="text-[12px] text-amber-900 font-semibold">
-                      กะซ้ำที่มีอยู่แล้ว
-                    </div>
-                    <div className="text-[20px] font-bold font-mono tabular-nums text-amber-900 mt-0.5">
-                      {previewData.summary.duplicateCount} รายการ
-                    </div>
-                  </div>
-
-                  <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200">
-                    <div className="text-[12px] text-amber-900 font-semibold">
-                      เวลาทับซ้อน / ข้ามวัน
-                    </div>
-                    <div className="text-[20px] font-bold font-mono tabular-nums text-amber-900 mt-0.5">
-                      {previewData.summary.overlapCount} รายการ
-                    </div>
-                  </div>
-
-                  <div className="p-3.5 rounded-xl bg-[#F3EEFC] border border-[#D8CDF2]">
-                    <div className="text-[12px] text-[#5B41A1] font-semibold">
-                      {bulkOperationMode === 'REPLACE_SHIFTS'
-                        ? 'ช่องที่จะถูกแทนที่กะเดิม'
-                        : bulkOperationMode === 'CLEAR_ALL_SHIFTS'
-                          ? 'ช่องที่จะตั้งเป็นไม่มีเวร'
-                          : bulkOperationMode === 'REMOVE_SELECTED_SHIFTS'
-                            ? 'ไม่พบกะเดิมให้ลบ'
-                            : 'ขัดแย้ง / ถูกข้าม'}
-                    </div>
-                    <div className="text-[20px] font-bold font-mono tabular-nums text-[#5B41A1] mt-0.5">
-                      {bulkOperationMode === 'REPLACE_SHIFTS'
-                        ? `${previewData.summary.replaceAffectedCells || 0} วัน-คน`
-                        : bulkOperationMode === 'CLEAR_ALL_SHIFTS'
-                          ? `${previewData.summary.clearAffectedCells || 0} วัน-คน`
-                          : bulkOperationMode === 'REMOVE_SELECTED_SHIFTS'
-                            ? `${previewData.summary.notAssignedCount || 0} รายการ`
-                            : `${previewData.summary.conflictCount} รายการ`}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <div className="inline-flex items-center p-1 bg-slate-100 border border-slate-200 rounded-lg self-start">
-                    <button
-                      type="button"
-                      onClick={() => setPreviewFilterTab('ALL')}
-                      className={`px-3 py-1 rounded-md text-[12.5px] font-semibold ${
-                        previewFilterTab === 'ALL'
-                          ? 'bg-white text-[#5B41A1] shadow-2xs'
-                          : 'text-slate-600'
-                      }`}
-                    >
-                      ทั้งหมด ({previewData.items.length})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPreviewFilterTab('READY')}
-                      className={`px-3 py-1 rounded-md text-[12.5px] font-semibold ${
-                        previewFilterTab === 'READY'
-                          ? 'bg-white text-emerald-800 shadow-2xs'
-                          : 'text-slate-600'
-                      }`}
-                    >
-                      พร้อมดำเนินการ ({previewData.summary.readyCount})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setPreviewFilterTab('CONFLICT')}
-                      className={`px-3 py-1 rounded-md text-[12.5px] font-semibold ${
-                        previewFilterTab === 'CONFLICT'
-                          ? 'bg-white text-amber-900 shadow-2xs'
-                          : 'text-slate-600'
-                      }`}
-                    >
-                      ขัดแย้ง / ข้าม (
-                      {previewData.items.length - previewData.summary.readyCount})
-                    </button>
-                  </div>
-
-                  <div className="text-[12.5px] text-slate-600">
-                    {bulkOperationMode === 'CLEAR_ALL_SHIFTS' ? (
-                      <strong className="text-red-700">โหมด: ลบกะทั้งหมด (ตั้งเป็นไม่มีเวร)</strong>
-                    ) : (
-                      <>
-                        กะที่เลือก ({(previewData.shiftSnapshots || []).length || 1} กะ):{' '}
-                        <strong className="text-[#5B41A1]">
-                          {(previewData.shiftSnapshots && previewData.shiftSnapshots.length > 0
-                            ? previewData.shiftSnapshots
-                            : previewData.shiftSnapshot
-                              ? [previewData.shiftSnapshot]
-                              : []
-                          )
-                            .map(
-                              (sn: any) =>
-                                `${formatCleanShiftName(sn.shiftName)} (${sn.startTime}–${sn.endTime})`
-                            )
-                            .join(', ')}
-                        </strong>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                <div className="border border-[#E7E2F0] rounded-xl overflow-hidden">
-                  <div className="max-h-72 overflow-y-auto">
-                    <table className="w-full text-left border-collapse text-[13px]">
-                      <thead className="sticky top-0 bg-[#FAF9FD] border-b border-[#E7E2F0] text-[#273244]">
-                        <tr>
-                          <th className="py-2.5 px-3.5 font-semibold">วันที่ปฏิบัติงาน</th>
-                          <th className="py-2.5 px-3.5 font-semibold">บุคลากร · กลุ่มงาน</th>
-                          <th className="py-2.5 px-3.5 font-semibold">กะที่ดำเนินการ</th>
-                          <th className="py-2.5 px-3.5 font-semibold">สถานะและเหตุผล</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#E7E2F0]/80">
-                        {filteredPreviewItems.map((item, idx) => {
-                          const displayShiftName =
-                            item.shiftName || previewData.shiftSnapshot?.shiftName;
-                          const displayStart =
-                            item.startTime || previewData.shiftSnapshot?.startTime;
-                          const displayEnd = item.endTime || previewData.shiftSnapshot?.endTime;
-                          const iconKind = displayShiftName
-                            ? classifyShiftIconKind({
-                                shiftCode: item.shiftCode || previewData.shiftSnapshot?.shiftCode,
-                                shiftName: displayShiftName,
-                                startTime: displayStart,
-                                endTime: displayEnd,
-                                isCrossMidnight: item.isCrossMidnight,
-                              })
-                            : null;
-
-                          return (
-                            <tr
-                              key={`${item.personId}-${item.workDate}-${item.shiftId ?? 'clear'}-${idx}`}
-                              className={item.status === 'READY' ? 'bg-white' : 'bg-amber-50/40'}
-                            >
-                              <td className="py-2.5 px-3.5 font-mono tabular-nums font-semibold text-slate-800 whitespace-nowrap">
-                                {formatThaiDate(item.workDate)}
-                              </td>
-                              <td className="py-2.5 px-3.5">
-                                <span className="font-bold text-[#273244]">{item.fullName}</span>{' '}
-                                <span className="text-[12px] font-mono text-slate-500">
-                                  ({item.personId}) · {item.departmentName}
-                                </span>
-                              </td>
-                              <td className="py-2.5 px-3.5 text-slate-800 whitespace-nowrap">
-                                {bulkOperationMode === 'CLEAR_ALL_SHIFTS' ? (
-                                  <span className="font-semibold text-red-700">
-                                    ลบทุกกะ (ตั้งเป็นไม่มีเวร)
-                                  </span>
-                                ) : (
-                                  <span className="inline-flex items-center gap-1.5">
-                                    {iconKind && renderShiftIcon(iconKind, 'w-3.5 h-3.5')}
-                                    <span className="font-semibold">
-                                      {formatCleanShiftName(displayShiftName)}
-                                    </span>
-                                    <span className="font-mono text-[12px] text-slate-600">
-                                      ({displayStart}–{displayEnd} น.)
-                                    </span>
-                                  </span>
-                                )}
-                              </td>
-                              <td className="py-2.5 px-3.5">
-                                {item.status === 'READY' ? (
-                                  <span className="text-emerald-700 font-semibold">
-                                    {bulkOperationMode === 'CLEAR_ALL_SHIFTS'
-                                      ? item.existingOnDateCount && item.existingOnDateCount > 0
-                                        ? `พร้อมลบกะเดิม ${item.existingOnDateCount} กะ และตั้งเป็นไม่มีเวร`
-                                        : 'พร้อมตั้งเป็นไม่มีเวร (คงสถานะไม่สร้างกะอัตโนมัติ)'
-                                      : bulkOperationMode === 'REMOVE_SELECTED_SHIFTS'
-                                        ? 'พบกะนี้ในระบบ พร้อมลบออก'
-                                        : bulkOperationMode === 'REPLACE_SHIFTS' &&
-                                            item.existingOnDateCount &&
-                                            item.existingOnDateCount > 0
-                                          ? `พร้อมบันทึก (จะแทนที่กะเดิม ${item.existingOnDateCount} กะในวันนี้)`
-                                          : 'พร้อมบันทึก (ไม่มีเวรซ้ำหรือเวลาทับซ้อน)'}
-                                  </span>
-                                ) : (
-                                  <div className="text-amber-900 font-semibold">
-                                    <span>
-                                      {item.status === 'DUPLICATE_SAME_SHIFT'
-                                        ? 'มีเวรนี้อยู่แล้ว: '
-                                        : item.status === 'NOT_ASSIGNED'
-                                          ? 'ไม่พบกะเดิม: '
-                                          : 'เวลาทับซ้อน: '}
-                                      {item.conflictMessage}
-                                    </span>
-                                  </div>
-                                )}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="p-4 rounded-xl bg-[#FAF9FD] border border-dashed border-[#D8CDF2] text-center text-[13.5px] text-slate-600">
-                เลือกบุคลากร ({selectedPersonIds.length} คน) ·{' '}
-                {bulkOperationMode === 'CLEAR_ALL_SHIFTS'
-                  ? 'ล้างทุกกะ'
-                  : `กะที่เลือก (${selectedShiftIds.length} กะ)`}{' '}
-                · วันที่ ({effectiveSelectedDates.length} วัน) แล้วกดปุ่ม{' '}
-                <strong className="text-[#5B41A1]">“1. ตรวจสอบ Preview ก่อนบันทึก”</strong>{' '}
-                เพื่อดูผลกระทบและความซ้ำซ้อนก่อนยืนยัน
-              </div>
-            )}
-          </div>
+          </section>
         </div>
       )}
 
@@ -5755,6 +6038,17 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
           )}
         </div>
       </ConfirmDialog>
+
+      {/* หน้าต่างยืนยันก่อนล้างรายชื่อบุคลากรทั้งหมด (เมื่อเลือกบุคลากรจำนวนมากเพื่อป้องกันการกดผิด) */}
+      <ConfirmDialog
+        open={confirmClearPersonsOpen}
+        onCancel={() => setConfirmClearPersonsOpen(false)}
+        onConfirm={confirmClearAllSelectedPersons}
+        variant="warning"
+        title="ยืนยันล้างรายชื่อบุคลากรที่เลือกทั้งหมด"
+        description={`คุณกำลังเลือกบุคลากรไว้ทั้งหมด ${filteredPersonSelectionMeta.uniqueSelectedTotalCount} คน การกดล้างรายชื่อจะยกเลิกการเลือกทั้งหมด (รวมถึงบุคลากรที่เลือกไว้จากกลุ่มงานอื่น)`}
+        confirmLabel={`ล้างทั้งหมด (${filteredPersonSelectionMeta.uniqueSelectedTotalCount} คน)`}
+      />
     </div>
   );
 }
