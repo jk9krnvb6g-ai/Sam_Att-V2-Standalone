@@ -223,11 +223,15 @@ export function verifyJwt(token: string, secret: string): { valid: boolean; payl
  */
 export function normalizeBangkokScanDateTime(rawDateTime: string): string {
   const trimmed = String(rawDateTime || '').trim();
-  const match = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-]\d{2}:?\d{2}))?$/.exec(trimmed);
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(Z|([+-])(\d{2}):?(\d{2}))?$/.exec(
+      trimmed
+    );
   if (!match) {
     throw new Error(`INVALID_SCAN_DATETIME_FORMAT: ${rawDateTime}`);
   }
-  const [, yyyy, mm, dd, hh, min, ss] = match;
+  const [, yyyy, mm, dd, hh, min, ss, tzToken, tzSign, tzHourStr, tzMinStr] = match;
+  const year = Number(yyyy);
   const month = Number(mm);
   const day = Number(dd);
   const hour = Number(hh);
@@ -237,6 +241,41 @@ export function normalizeBangkokScanDateTime(rawDateTime: string): string {
   if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) {
     throw new Error(`OUT_OF_RANGE_SCAN_DATETIME: ${rawDateTime}`);
   }
+
+  // ตรวจสอบว่าเป็นวันที่จริงตามปฏิทิน (ปฏิเสธเช่น 2026-02-30)
+  const checkCal = new Date(Date.UTC(year, month - 1, day));
+  if (
+    checkCal.getUTCFullYear() !== year ||
+    checkCal.getUTCMonth() + 1 !== month ||
+    checkCal.getUTCDate() !== day
+  ) {
+    throw new Error(`OUT_OF_RANGE_SCAN_DATETIME: ${rawDateTime}`);
+  }
+
+  // หากระบุ Offset ที่ไม่ใช่ +07:00 (เช่น 'Z' หรือ '+00:00') ให้แปลงเป็นเวลา Asia/Bangkok (UTC+07:00)
+  if (tzToken) {
+    let offsetMinutes = 0;
+    if (tzToken !== 'Z') {
+      const tzH = Number(tzHourStr || 0);
+      const tzM = Number(tzMinStr || 0);
+      if (tzH > 14 || tzM > 59) {
+        throw new Error(`INVALID_SCAN_DATETIME_FORMAT: ${rawDateTime}`);
+      }
+      offsetMinutes = (tzSign === '-' ? -1 : 1) * (tzH * 60 + tzM);
+    }
+    if (offsetMinutes !== 420) {
+      const utcMs = Date.UTC(year, month - 1, day, hour, minute, second) - offsetMinutes * 60_000;
+      const bkkDt = new Date(utcMs + 420 * 60_000);
+      const bY = String(bkkDt.getUTCFullYear()).padStart(4, '0');
+      const bM = String(bkkDt.getUTCMonth() + 1).padStart(2, '0');
+      const bD = String(bkkDt.getUTCDate()).padStart(2, '0');
+      const bH = String(bkkDt.getUTCHours()).padStart(2, '0');
+      const bMin = String(bkkDt.getUTCMinutes()).padStart(2, '0');
+      const bS = String(bkkDt.getUTCSeconds()).padStart(2, '0');
+      return `${bY}-${bM}-${bD} ${bH}:${bMin}:${bS}`;
+    }
+  }
+
   return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
 }
 

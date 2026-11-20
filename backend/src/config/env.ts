@@ -78,6 +78,7 @@ export interface AppConfig {
     readerExePath: string;
     timeoutMs: number;
     syncDays: number;
+    maxRangeDays: number;
     previewMode: boolean;
     mysqlConnectionString: string;
     ingestSharedToken: string;
@@ -300,6 +301,7 @@ export function loadConfig(): AppConfig {
         readerExePath: resolvedReaderExePath,
         timeoutMs: Number(process.env.SCANNER_READER_TIMEOUT_MS || 30000),
         syncDays: Number(process.env.SCANNER_SYNC_DAYS || 3),
+        maxRangeDays: Math.max(1, Math.min(365, Number(process.env.SCANNER_SYNC_MAX_RANGE_DAYS || 90))),
         previewMode: process.env.SCANNER_CLI_PREVIEW_MODE !== 'false',
         mysqlConnectionString:
           process.env.SCANNER_MYSQL_CONNECTION_STRING?.trim() || fallbackScannerMysqlConn,

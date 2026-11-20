@@ -257,7 +257,7 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
     return (
       <div className="space-y-6">
         <PageHeader
-          category="ตั้งค่าระบบและส่วนกลาง"
+          category="ระบบและผู้ดูแลส่วนกลาง"
           title="ส่งข้อมูลสรุปเวลาปฏิบัติงานกลับ HOSOffice"
           subtitle="ตรวจสอบความสมบูรณ์ของข้อมูลด้วยโหมดจำลอง (Dry-Run Preview) ก่อนส่งข้อมูลจริง โดยระบบล็อกการเขียนข้อมูลจริงไว้จนกว่าจะได้รับการอนุมัติโครงสร้างตารางปลายทาง"
           actions={

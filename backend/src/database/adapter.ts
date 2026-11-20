@@ -499,6 +499,13 @@ export async function ensureBaselineSystemCatalog(): Promise<void> {
     "ALTER TABLE personnel_type_rules ADD COLUMN default_cutoff_time VARCHAR(5) NOT NULL DEFAULT '11:00'",
     "ALTER TABLE personnel_type_rules ADD COLUMN effective_from DATE NOT NULL DEFAULT '2026-01-01'",
     'ALTER TABLE personnel_type_rules ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1',
+    "ALTER TABLE sync_runs ADD COLUMN sync_scope_mode VARCHAR(32) NOT NULL DEFAULT 'ALL'",
+    'ALTER TABLE sync_runs ADD COLUMN filter_from_bkk VARCHAR(32) NULL',
+    'ALTER TABLE sync_runs ADD COLUMN filter_to_bkk VARCHAR(32) NULL',
+    'ALTER TABLE sync_runs ADD COLUMN filter_strategy VARCHAR(48) NULL',
+    'ALTER TABLE sync_runs ADD COLUMN matched_in_range_count INT NOT NULL DEFAULT 0',
+    'ALTER TABLE sync_runs ADD COLUMN filtered_out_count INT NOT NULL DEFAULT 0',
+    'ALTER TABLE sync_runs ADD COLUMN failed_events_count INT NOT NULL DEFAULT 0',
   ];
   for (const alterSql of additiveAlterStatements) {
     try {

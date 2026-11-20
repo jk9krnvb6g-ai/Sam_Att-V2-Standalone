@@ -32,7 +32,12 @@ import {
   type AuthUser,
 } from './services/api.ts';
 import { RoleLabel } from './components/StatusText.tsx';
-import { Sidebar, getNavBreadcrumb, type NavViewKey } from './components/layout/Sidebar.tsx';
+import {
+  Sidebar,
+  getNavBreadcrumb,
+  resolveSafeNavView,
+  type NavViewKey,
+} from './components/layout/Sidebar.tsx';
 import { LoginView } from './pages/LoginView.tsx';
 import { DashboardView } from './pages/DashboardView.tsx';
 import { MyAttendanceView } from './pages/MyAttendanceView.tsx';
@@ -49,6 +54,19 @@ export default function App() {
   const [activeView, setActiveView] = useState<NavViewKey>('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [initializing, setInitializing] = useState(true);
+
+  // ปิดการเข้าถึงเส้นทางหน้าตั้งค่าระบบหรือตรวจสอบสถานะการเชื่อมต่อเดิมหากผู้ใช้พิมพ์ URL/Hash โดยตรง
+  useEffect(() => {
+    const rawPath = window.location.pathname || '';
+    const rawHash = window.location.hash || '';
+    const isBlockedSettingsUrl =
+      /(?:^|\/)(settings|connection-status|connections)(?:\/|$)/i.test(rawPath) ||
+      /^#\/?(settings|connection-status|connections)(?:\/|$)/i.test(rawHash);
+    if (isBlockedSettingsUrl) {
+      const basePath = rawPath.startsWith('/Sam_Att') ? '/Sam_Att/' : '/';
+      window.history.replaceState(null, '', basePath);
+    }
+  }, []);
 
   useEffect(() => {
     async function restoreSession() {
@@ -72,7 +90,7 @@ export default function App() {
           setDataMode(res.dataMode);
         }
         setUser(res.user);
-        setActiveView(res.user.role === 'GENERAL_USER' ? 'myAttendance' : 'dashboard');
+        setActiveView(resolveSafeNavView(res.user.role === 'GENERAL_USER' ? 'myAttendance' : 'dashboard', res.user.role));
       } catch {
         setStoredToken(null);
       } finally {
@@ -202,7 +220,7 @@ export default function App() {
         <Sidebar
           user={user}
           activeView={activeView}
-          onSelectView={(v) => setActiveView(v)}
+          onSelectView={(v) => setActiveView(resolveSafeNavView(v, user.role))}
           mobileOpen={mobileMenuOpen}
           onCloseMobile={() => setMobileMenuOpen(false)}
         />
@@ -211,7 +229,7 @@ export default function App() {
           {activeView === 'dashboard' && (
             <DashboardView
               user={user}
-              onNavigate={(view) => setActiveView(view as NavViewKey)}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
             />
           )}
           {activeView === 'myAttendance' && <MyAttendanceView user={user} />}
@@ -225,7 +243,6 @@ export default function App() {
           {activeView === 'hosofficePush' && <ReportsView mode="hosofficePush" />}
           {activeView === 'adminUsers' && <AdminViews mode="users" />}
           {activeView === 'systemLogs' && <AdminViews mode="auditLogs" />}
-          {activeView === 'settings' && <AdminViews mode="settings" />}
           {activeView === 'deployment' && <AdminViews mode="deployment" />}
         </main>
       </div>

@@ -22,6 +22,8 @@ import {
   Radio,
   Search,
   Eye,
+  CalendarClock,
+  Info,
 } from 'lucide-react';
 import { apiRequest, ApiClientError, type AuthUser } from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
@@ -38,9 +40,62 @@ import {
   ProgressDialog,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
-import { formatThaiDateTime, getCurrentBangkokDateParts } from '../utils/thaiFormat.ts';
+import {
+  formatThaiDate,
+  formatThaiDateTime,
+  getCurrentBangkokDateParts,
+} from '../utils/thaiFormat.ts';
 
 type SyncHistoryPeriod = 'TODAY' | '7D' | '30D' | 'CUSTOM' | 'ALL';
+type ScannerSyncMode = 'TODAY' | 'CUSTOM_RANGE' | 'ALL';
+
+function shiftYmdDays(baseYmd: string, deltaDays: number): string {
+  const [y, m, d] = baseYmd.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + deltaDays));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(
+    dt.getUTCDate()
+  ).padStart(2, '0')}`;
+}
+
+function diffYmdDays(startYmd: string, endYmd: string): number {
+  const [sy, sm, sd] = startYmd.split('-').map(Number);
+  const [ey, em, ed] = endYmd.split('-').map(Number);
+  return Math.round((Date.UTC(ey, em - 1, ed) - Date.UTC(sy, sm - 1, sd)) / 86_400_000);
+}
+
+function isValidCalendarYmd(ymd: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(ymd);
+  if (!m) return false;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  return (
+    dt.getUTCFullYear() === year &&
+    dt.getUTCMonth() + 1 === month &&
+    dt.getUTCDate() === day
+  );
+}
+
+function formatSyncScopeLabel(scopeMode?: string | null): string {
+  const mode = String(scopeMode || 'ALL').toUpperCase();
+  if (mode === 'TODAY') return 'ดึงข้อมูลวันนี้';
+  if (mode === 'CUSTOM_RANGE') return 'กำหนดช่วงวันที่และเวลา';
+  return 'ดึงข้อมูลทั้งหมดที่รองรับ';
+}
+
+function formatFilterStrategyLabel(strategy?: string | null): string {
+  if (strategy === 'BACKEND_POST_READ_FILTER') {
+    return 'อ่านจากโปรแกรมเครื่องสแกน แล้วคัดกรองช่วงเวลาบน Backend ก่อนบันทึก';
+  }
+  if (strategy === 'EXE_DAYS_WINDOW_NO_POST_FILTER') {
+    return 'อ่านจากโปรแกรม ScannerSyncCli.exe ตามจำนวนวันสูงสุดโดยไม่ตัดช่วงเวลาย่อย';
+  }
+  if (strategy === 'ALL_DEVICE_EVENTS_NO_POST_FILTER') {
+    return 'อ่านข้อมูลทั้งหมดจากโปรแกรมเครื่องสแกนโดยไม่ตัดช่วงเวลาย่อย';
+  }
+  return 'ดึงข้อมูลตามรอบปกติ';
+}
 
 export function RawScansView({
   mode,
@@ -73,7 +128,14 @@ export function RawScansView({
   const [historyPageSize, setHistoryPageSize] = useState<PageSizeOption>(10);
   const [selectedSyncRunDetail, setSelectedSyncRunDetail] = useState<any | null>(null);
 
-  // Immediate Scanner Sync Confirm & Progress Dialog (Section 7.2)
+  // Immediate Scanner Sync Date/Time Range Controls + Confirm & Progress Dialog (Section 7.2)
+  const [syncMode, setSyncMode] = useState<ScannerSyncMode>('TODAY');
+  const [syncDateFrom, setSyncDateFrom] = useState(initialBkk.todayYmd);
+  const [syncTimeFrom, setSyncTimeFrom] = useState('00:00');
+  const [syncDateTo, setSyncDateTo] = useState(initialBkk.todayYmd);
+  const [syncTimeTo, setSyncTimeTo] = useState('23:59');
+  const [syncMachineNo, setSyncMachineNo] = useState('');
+  const [lastSyncResult, setLastSyncResult] = useState<any | null>(null);
   const [confirmSyncOpen, setConfirmSyncOpen] = useState(false);
   const [syncingHardware, setSyncingHardware] = useState(false);
   const [syncProgressOpen, setSyncProgressOpen] = useState(false);
@@ -269,7 +331,99 @@ export function RawScansView({
     return filteredAndSortedScans.slice(start, start + pageSize);
   }, [filteredAndSortedScans, page, pageSize]);
 
+  const maxSyncRangeDays = Number(scannerData?.syncRangeCapabilities?.maxRangeDays || 90);
+
+  const syncRangeValidation = useMemo(() => {
+    if (syncMode !== 'CUSTOM_RANGE') {
+      return { valid: true, message: null as string | null, spanDays: syncMode === 'TODAY' ? 1 : null };
+    }
+    if (!syncDateFrom || !syncDateTo) {
+      return {
+        valid: false,
+        message: 'กรุณาระบุทั้ง "ตั้งแต่วันที่" และ "ถึงวันที่"',
+        spanDays: null,
+      };
+    }
+    if (!isValidCalendarYmd(syncDateFrom) || !isValidCalendarYmd(syncDateTo)) {
+      return {
+        valid: false,
+        message: 'รูปแบบวันที่ไม่ถูกต้องตามปฏิทิน กรุณาเลือกวันที่ใหม่',
+        spanDays: null,
+      };
+    }
+    if (!/^\d{2}:\d{2}(:\d{2})?$/.test(syncTimeFrom) || !/^\d{2}:\d{2}(:\d{2})?$/.test(syncTimeTo)) {
+      return {
+        valid: false,
+        message: 'รูปแบบเวลาเริ่มต้นหรือเวลาสิ้นสุดไม่ถูกต้อง (ต้องเป็น HH:mm)',
+        spanDays: null,
+      };
+    }
+    const startKey = `${syncDateFrom} ${syncTimeFrom.slice(0, 5)}:00`;
+    const endKey = `${syncDateTo} ${syncTimeTo.slice(0, 5)}:00`;
+    if (startKey > endKey) {
+      return {
+        valid: false,
+        message: `วันและเวลาเริ่มต้น (${formatThaiDate(syncDateFrom)} ${syncTimeFrom} น.) ต้องไม่มากกว่าวันและเวลาสิ้นสุด (${formatThaiDate(syncDateTo)} ${syncTimeTo} น.)`,
+        spanDays: null,
+      };
+    }
+    const spanDays = diffYmdDays(syncDateFrom, syncDateTo) + 1;
+    if (spanDays > maxSyncRangeDays) {
+      return {
+        valid: false,
+        message: `ช่วงวันที่ที่เลือก (${spanDays} วัน) เกินขีดจำกัดสูงสุดของระบบ (${maxSyncRangeDays} วันต่อรอบ) กรุณาลดช่วงวันที่ลง`,
+        spanDays,
+      };
+    }
+    return { valid: true, message: null as string | null, spanDays };
+  }, [syncMode, syncDateFrom, syncTimeFrom, syncDateTo, syncTimeTo, maxSyncRangeDays]);
+
+  const syncScopeDescription = useMemo(() => {
+    const machineText = syncMachineNo
+      ? `เครื่องสแกนหมายเลข #${syncMachineNo}`
+      : 'ทุกเครื่องสแกนที่เปิดใช้งาน';
+    if (syncMode === 'TODAY') {
+      return `โหมดดึงข้อมูลวันนี้ (${formatThaiDate(initialBkk.todayYmd)} เวลา 00:00 – 23:59 น. เวลาประเทศไทย) · เป้าหมาย: ${machineText}`;
+    }
+    if (syncMode === 'CUSTOM_RANGE') {
+      return `โหมดเลือกช่วงวันที่และเวลา: ${formatThaiDate(syncDateFrom)} ${syncTimeFrom} น. ถึง ${formatThaiDate(syncDateTo)} ${syncTimeTo} น. (${syncRangeValidation.spanDays || 1} วัน · เขตเวลา Asia/Bangkok) · เป้าหมาย: ${machineText}`;
+    }
+    return `โหมดดึงข้อมูลทั้งหมดที่เครื่องรองรับ (สูงสุด ${maxSyncRangeDays} วันย้อนหลังตามข้อจำกัดของโปรแกรมอ่านเครื่องสแกน) · เป้าหมาย: ${machineText}`;
+  }, [
+    syncMode,
+    syncMachineNo,
+    initialBkk.todayYmd,
+    syncDateFrom,
+    syncTimeFrom,
+    syncDateTo,
+    syncTimeTo,
+    syncRangeValidation.spanDays,
+    maxSyncRangeDays,
+  ]);
+
+  function handleRequestOpenSyncConfirm() {
+    if (syncingHardware) return;
+    if (!syncRangeValidation.valid) {
+      setError({
+        code: 'INVALID_DATE_TIME_RANGE',
+        message: syncRangeValidation.message || 'ช่วงวันที่และเวลาที่เลือกไม่ถูกต้อง',
+      });
+      return;
+    }
+    setError(null);
+    setConfirmSyncOpen(true);
+  }
+
   async function handleConfirmTriggerHardwareSync() {
+    if (!syncRangeValidation.valid) {
+      setConfirmSyncOpen(false);
+      setError({
+        code: 'INVALID_DATE_TIME_RANGE',
+        message: syncRangeValidation.message || 'ช่วงวันที่และเวลาที่เลือกไม่ถูกต้อง',
+      });
+      return;
+    }
+
     setConfirmSyncOpen(false);
     setError(null);
     setNotice(null);
@@ -282,14 +436,40 @@ export function RawScansView({
     setSyncErrorText(null);
 
     try {
+      const payload: Record<string, unknown> = {
+        syncMode,
+      };
+      if (syncMachineNo) {
+        payload.machineNo = Number(syncMachineNo);
+      }
+      if (syncMode === 'CUSTOM_RANGE') {
+        payload.dateFrom = syncDateFrom;
+        payload.timeFrom = syncTimeFrom;
+        payload.dateTo = syncDateTo;
+        payload.timeTo = syncTimeTo;
+      }
+
       const res = await apiRequest('/scanners/sync', {
         method: 'POST',
-        body: JSON.stringify({}),
+        body: JSON.stringify(payload),
       });
-      const summary = `ดึงข้อมูลจากเครื่องสแกนสำเร็จ: อ่านทั้งหมด ${res.totalRead} รายการ · บันทึกใหม่ ${res.newInserted} รายการ · ข้ามรายการซ้ำ ${res.duplicatesSkipped} รายการ`;
+
+      const readDevice = Number(res.totalReadFromDevice ?? res.totalRead ?? 0);
+      const matchedInRange = Number(res.matchedInRange ?? readDevice);
+      const filteredOut = Number(res.filteredOutCount ?? 0);
+      const newInserted = Number(res.newInserted ?? 0);
+      const dupSkipped = Number(res.duplicatesSkipped ?? 0);
+      const failedCount = Number(res.failedCount ?? 0);
+
+      const summary =
+        syncMode === 'ALL'
+          ? `ดึงข้อมูลสำเร็จ: อ่านจากเครื่อง ${readDevice} รายการ · บันทึกใหม่ ${newInserted} รายการ · ข้ามรายการซ้ำ ${dupSkipped} รายการ${failedCount > 0 ? ` · นำเข้าไม่สำเร็จ ${failedCount} รายการ` : ''}`
+          : `ดึงข้อมูลสำเร็จ: อ่านจากเครื่อง ${readDevice} รายการ · ตรงช่วงที่เลือก ${matchedInRange} รายการ (กรองนอกช่วงออก ${filteredOut} รายการ) · บันทึกใหม่ ${newInserted} รายการ · ข้ามซ้ำ ${dupSkipped} รายการ${failedCount > 0 ? ` · ไม่สำเร็จ ${failedCount} รายการ` : ''}`;
+
+      setLastSyncResult(res);
       setSyncPercent(100);
       setSyncStatus('SUCCESS');
-      setSyncStepLabel('ดึงข้อมูลจากเครื่องสแกนเสร็จสมบูรณ์');
+      setSyncStepLabel('ดึงข้อมูลจากเครื่องสแกนและคำนวณเวลาเสร็จสมบูรณ์');
       setSyncSummaryText(summary);
       setNotice(summary);
       await loadData(false);
@@ -438,8 +618,8 @@ export function RawScansView({
         actions={
           <button
             type="button"
-            disabled={syncingHardware}
-            onClick={() => setConfirmSyncOpen(true)}
+            disabled={syncingHardware || (mode === 'scanners' && !syncRangeValidation.valid)}
+            onClick={handleRequestOpenSyncConfirm}
             className="ent-btn-primary disabled:opacity-60"
           >
             <RefreshCw className={`w-4 h-4 ${syncingHardware ? 'animate-spin' : ''}`} />
@@ -519,6 +699,343 @@ export function RawScansView({
                 </div>
               );
             })}
+          </div>
+
+          {/* =================================================================
+              แผงควบคุมการดึงข้อมูลจากเครื่องสแกนแบบเลือกช่วงวันที่และเวลา (Asia/Bangkok)
+             ================================================================= */}
+          <div className="ent-card p-5 sm:p-6 space-y-5 border-[#DDD3F2] bg-white">
+            <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-3 border-b border-[#E7E2F0] pb-4">
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-xl bg-[#F3EEFC] text-[#7359B4] flex items-center justify-center shrink-0">
+                  <CalendarClock className="w-5 h-5" />
+                </div>
+                <div>
+                  <h2 className="text-[18px] font-bold text-[#273244]">
+                    ดึงข้อมูลจากเครื่องสแกนลายนิ้วมือ (เลือกช่วงวันที่และเวลา)
+                  </h2>
+                  <p className="text-[13.5px] text-[#596579] mt-0.5">
+                    เลือกโหมดการดึงข้อมูลและกำหนดช่วงวันที่/เวลาตามเวลาประเทศไทย (Asia/Bangkok) พร้อมตรวจสอบรายการซ้ำและคำนวณเวลาปฏิบัติงานอัตโนมัติ
+                  </p>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-[12.5px] font-semibold">
+                <span className="px-2.5 py-1 rounded-md bg-[#FAF9FD] border border-[#E7E2F0] text-[#596579] font-mono">
+                  เขตเวลา: Asia/Bangkok (UTC+07:00)
+                </span>
+                <span className="px-2.5 py-1 rounded-md bg-[#F3EEFC] border border-[#DDD3F2] text-[#7359B4]">
+                  สูงสุด {maxSyncRangeDays} วัน/รอบ
+                </span>
+              </div>
+            </div>
+
+            {/* โหมดการดึงข้อมูล 3 รูปแบบ */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              {(
+                [
+                  {
+                    key: 'TODAY',
+                    title: 'ดึงข้อมูลวันนี้',
+                    desc: `เฉพาะวันนี้ (${formatThaiDate(initialBkk.todayYmd)} 00:00 – 23:59 น.)`,
+                  },
+                  {
+                    key: 'CUSTOM_RANGE',
+                    title: 'เลือกช่วงวันที่และเวลา',
+                    desc: 'กำหนดวัน-เวลาเริ่มต้นและสิ้นสุดเอง (รองรับข้ามวัน/ข้ามเดือน)',
+                  },
+                  {
+                    key: 'ALL',
+                    title: 'ดึงข้อมูลทั้งหมดที่เครื่องรองรับ',
+                    desc: `ดึงทั้งหมดตามกรอบสูงสุดที่โปรแกรมอ่านสแกนรองรับ (สูงสุด ${maxSyncRangeDays} วัน)`,
+                  },
+                ] as Array<{ key: ScannerSyncMode; title: string; desc: string }>
+              ).map((opt) => {
+                const selected = syncMode === opt.key;
+                return (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    disabled={syncingHardware}
+                    onClick={() => {
+                      setSyncMode(opt.key);
+                      setError(null);
+                    }}
+                    className={`p-4 rounded-xl border text-left transition-colors disabled:opacity-60 ${
+                      selected
+                        ? 'bg-[#F3EEFC] border-[#8B73C7] ring-1 ring-[#8B73C7]/30'
+                        : 'bg-[#FAF9FD] border-[#E7E2F0] hover:border-[#C7B9E6]'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={`text-[15px] font-bold ${
+                          selected ? 'text-[#7359B4]' : 'text-[#273244]'
+                        }`}
+                      >
+                        {opt.title}
+                      </span>
+                      <span
+                        className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${
+                          selected ? 'border-[#7359B4] bg-[#7359B4]' : 'border-[#B9B0CF] bg-white'
+                        }`}
+                      >
+                        {selected && <span className="w-1.5 h-1.5 rounded-full bg-white" />}
+                      </span>
+                    </div>
+                    <p className="text-[13px] text-[#596579] mt-1 leading-snug">{opt.desc}</p>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* ฟอร์มเลือกช่วงวันที่และเวลา (CUSTOM_RANGE) */}
+            {syncMode === 'CUSTOM_RANGE' && (
+              <div className="p-4 sm:p-5 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0] space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[14px] font-bold text-[#273244]">
+                    กำหนดช่วงวันที่และเวลา (Asia/Bangkok)
+                  </span>
+                  <div className="flex flex-wrap items-center gap-1.5 text-[12.5px]">
+                    <span className="text-[#596579] mr-1">เลือกด่วน:</span>
+                    <button
+                      type="button"
+                      disabled={syncingHardware}
+                      onClick={() => {
+                        setSyncDateFrom(initialBkk.todayYmd);
+                        setSyncTimeFrom('00:00');
+                        setSyncDateTo(initialBkk.todayYmd);
+                        setSyncTimeTo('23:59');
+                      }}
+                      className="px-2.5 py-1 rounded-md bg-white border border-[#D5CEE6] hover:bg-[#F3EEFC] text-[#273244] font-medium"
+                    >
+                      วันนี้
+                    </button>
+                    <button
+                      type="button"
+                      disabled={syncingHardware}
+                      onClick={() => {
+                        setSyncDateFrom(initialBkk.yesterdayYmd);
+                        setSyncTimeFrom('00:00');
+                        setSyncDateTo(initialBkk.yesterdayYmd);
+                        setSyncTimeTo('23:59');
+                      }}
+                      className="px-2.5 py-1 rounded-md bg-white border border-[#D5CEE6] hover:bg-[#F3EEFC] text-[#273244] font-medium"
+                    >
+                      เมื่อวาน
+                    </button>
+                    <button
+                      type="button"
+                      disabled={syncingHardware}
+                      onClick={() => {
+                        setSyncDateFrom(shiftYmdDays(initialBkk.todayYmd, -6));
+                        setSyncTimeFrom('00:00');
+                        setSyncDateTo(initialBkk.todayYmd);
+                        setSyncTimeTo('23:59');
+                      }}
+                      className="px-2.5 py-1 rounded-md bg-white border border-[#D5CEE6] hover:bg-[#F3EEFC] text-[#273244] font-medium"
+                    >
+                      ย้อนหลัง 7 วัน
+                    </button>
+                    <button
+                      type="button"
+                      disabled={syncingHardware}
+                      onClick={() => {
+                        setSyncDateFrom(initialBkk.monthStartYmd);
+                        setSyncTimeFrom('00:00');
+                        setSyncDateTo(initialBkk.todayYmd);
+                        setSyncTimeTo('23:59');
+                      }}
+                      className="px-2.5 py-1 rounded-md bg-white border border-[#D5CEE6] hover:bg-[#F3EEFC] text-[#273244] font-medium"
+                    >
+                      ทั้งเดือนนี้
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                  <div>
+                    <label htmlFor="sync-date-from" className="ent-label">
+                      ตั้งแต่วันที่ <RequiredMark />
+                    </label>
+                    <input
+                      id="sync-date-from"
+                      type="date"
+                      disabled={syncingHardware}
+                      value={syncDateFrom}
+                      onChange={(e) => setSyncDateFrom(e.target.value)}
+                      className="ent-input w-full font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="sync-time-from" className="ent-label">
+                      เวลาเริ่มต้น <RequiredMark />
+                    </label>
+                    <input
+                      id="sync-time-from"
+                      type="time"
+                      disabled={syncingHardware}
+                      value={syncTimeFrom}
+                      onChange={(e) => setSyncTimeFrom(e.target.value)}
+                      className="ent-input w-full font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="sync-date-to" className="ent-label">
+                      ถึงวันที่ <RequiredMark />
+                    </label>
+                    <input
+                      id="sync-date-to"
+                      type="date"
+                      disabled={syncingHardware}
+                      value={syncDateTo}
+                      onChange={(e) => setSyncDateTo(e.target.value)}
+                      className="ent-input w-full font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="sync-time-to" className="ent-label">
+                      เวลาสิ้นสุด <RequiredMark />
+                    </label>
+                    <input
+                      id="sync-time-to"
+                      type="time"
+                      disabled={syncingHardware}
+                      value={syncTimeTo}
+                      onChange={(e) => setSyncTimeTo(e.target.value)}
+                      className="ent-input w-full font-mono"
+                    />
+                  </div>
+                </div>
+
+                {!syncRangeValidation.valid && syncRangeValidation.message && (
+                  <div
+                    role="alert"
+                    className="p-3 rounded-lg bg-red-50 border border-red-200 text-[#B91C1C] text-[13.5px] font-medium flex items-start gap-2"
+                  >
+                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{syncRangeValidation.message}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* เลือกเครื่องสแกนเป้าหมาย + ปุ่มสั่งดึงข้อมูล */}
+            <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
+              <div className="w-full md:w-80">
+                <label htmlFor="sync-target-machine" className="ent-label">
+                  เครื่องสแกนเป้าหมาย
+                </label>
+                <select
+                  id="sync-target-machine"
+                  disabled={syncingHardware}
+                  value={syncMachineNo}
+                  onChange={(e) => setSyncMachineNo(e.target.value)}
+                  className="ent-input w-full"
+                >
+                  <option value="">ทุกเครื่องสแกนที่เปิดใช้งาน</option>
+                  {scannerData?.devices?.map((d: any) => (
+                    <option key={d.id} value={String(d.machine_no)}>
+                      เครื่อง #{d.machine_no} — {d.device_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <button
+                type="button"
+                disabled={syncingHardware || !syncRangeValidation.valid}
+                onClick={handleRequestOpenSyncConfirm}
+                className="ent-btn-primary w-full md:w-auto disabled:opacity-60"
+              >
+                <RefreshCw className={`w-4 h-4 ${syncingHardware ? 'animate-spin' : ''}`} />
+                <span>
+                  {syncingHardware
+                    ? 'กำลังดึงข้อมูลจากเครื่องสแกน...'
+                    : syncMode === 'TODAY'
+                      ? 'ดึงข้อมูลวันนี้จากเครื่องสแกน'
+                      : syncMode === 'CUSTOM_RANGE'
+                        ? 'ดึงข้อมูลตามช่วงวันที่และเวลาที่เลือก'
+                        : 'ดึงข้อมูลทั้งหมดที่เครื่องรองรับ'}
+                </span>
+              </button>
+            </div>
+
+            {/* คำอธิบายกลไกการทำงานจริงของโปรแกรมอ่านเครื่องสแกน (Transparent Capability Info) */}
+            <div className="p-3.5 rounded-xl bg-[#F7F4FC] border border-[#DDD3F2] text-[13px] text-[#45396B] flex items-start gap-2.5 leading-relaxed">
+              <Info className="w-4 h-4 text-[#7359B4] shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold">กลไกการคัดกรองข้อมูลจริงของระบบ: </span>
+                {scannerData?.syncRangeCapabilities?.explanationTh ||
+                  `ระบบอ่านข้อมูลจากโปรแกรมเครื่องสแกนเดิมของโรงพยาบาล แล้วคัดกรองเฉพาะรายการสแกนที่มีเวลา (scanDateTime เขตเวลา Asia/Bangkok) อยู่ในช่วงวันที่และเวลาที่เลือกบน Backend ก่อนบันทึกลงฐานข้อมูล รายการนอกช่วงจะไม่ถูกบันทึก และเลือกช่วงได้สูงสุด ${maxSyncRangeDays} วันต่อรอบ`}
+              </div>
+            </div>
+
+            {/* สรุปผลลัพธ์จริงของการดึงข้อมูลรอบล่าสุด */}
+            {lastSyncResult && (
+              <div className="p-4 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="inline-flex items-center gap-2 text-[#047857] font-bold text-[14.5px]">
+                    <CheckCircle2 className="w-4.5 h-4.5" />
+                    <span>
+                      สรุปผลการดึงข้อมูลรอบล่าสุด (#{lastSyncResult.syncRunId} ·{' '}
+                      {formatSyncScopeLabel(lastSyncResult.syncMode)})
+                    </span>
+                  </div>
+                  {lastSyncResult.filterFromBkk && lastSyncResult.filterToBkk && (
+                    <span className="font-mono text-[12.5px] text-[#273244] bg-white px-2.5 py-0.5 rounded-md border border-emerald-200">
+                      {lastSyncResult.filterFromBkk} ถึง {lastSyncResult.filterToBkk}
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 text-[13px]">
+                  <div className="p-2.5 rounded-lg bg-white border border-emerald-100">
+                    <div className="text-[#596579]">อ่านจากเครื่อง</div>
+                    <div className="font-mono font-bold text-[17px] text-[#273244] mt-0.5">
+                      {lastSyncResult.totalReadFromDevice ?? lastSyncResult.totalRead ?? 0}
+                    </div>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-white border border-emerald-100">
+                    <div className="text-[#596579]">ตรงช่วงที่เลือก</div>
+                    <div className="font-mono font-bold text-[17px] text-[#7359B4] mt-0.5">
+                      {lastSyncResult.matchedInRange ?? lastSyncResult.totalRead ?? 0}
+                    </div>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-white border border-emerald-100">
+                    <div className="text-[#596579]">กรองนอกช่วงออก</div>
+                    <div className="font-mono font-bold text-[17px] text-[#596579] mt-0.5">
+                      {lastSyncResult.filteredOutCount ?? 0}
+                    </div>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-white border border-emerald-100">
+                    <div className="text-[#596579]">บันทึกสแกนใหม่</div>
+                    <div className="font-mono font-bold text-[17px] text-[#047857] mt-0.5">
+                      {lastSyncResult.newInserted ?? 0}
+                    </div>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-white border border-emerald-100">
+                    <div className="text-[#596579]">ข้ามรายการซ้ำ</div>
+                    <div className="font-mono font-bold text-[17px] text-[#596579] mt-0.5">
+                      {lastSyncResult.duplicatesSkipped ?? 0}
+                    </div>
+                  </div>
+                  <div className="p-2.5 rounded-lg bg-white border border-emerald-100">
+                    <div className="text-[#596579]">นำเข้าไม่สำเร็จ</div>
+                    <div
+                      className={`font-mono font-bold text-[17px] mt-0.5 ${
+                        Number(lastSyncResult.failedCount ?? 0) > 0
+                          ? 'text-[#B91C1C]'
+                          : 'text-[#596579]'
+                      }`}
+                    >
+                      {lastSyncResult.failedCount ?? 0}
+                    </div>
+                  </div>
+                </div>
+                {lastSyncResult.filterModeNotice && (
+                  <p className="text-[12.5px] text-[#273244]">{lastSyncResult.filterModeNotice}</p>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -804,11 +1321,11 @@ export function RawScansView({
                 <thead>
                   <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
                     <th className="py-3.5 px-5 font-semibold">รหัสรอบ · วันและเวลา</th>
-                    <th className="py-3.5 px-5 font-semibold">ช่องทางการดึงข้อมูล</th>
+                    <th className="py-3.5 px-5 font-semibold">ช่องทาง · ช่วงเวลาที่เลือก</th>
                     <th className="py-3.5 px-5 font-semibold">สถานะ</th>
-                    <th className="py-3.5 px-5 font-semibold text-right">อ่านทั้งหมด</th>
+                    <th className="py-3.5 px-5 font-semibold text-right">อ่าน / ตรงช่วง</th>
                     <th className="py-3.5 px-5 font-semibold text-right">บันทึกใหม่</th>
-                    <th className="py-3.5 px-5 font-semibold text-right">ข้ามรายการซ้ำ</th>
+                    <th className="py-3.5 px-5 font-semibold text-right">ข้ามซ้ำ / ไม่สำเร็จ</th>
                     <th className="py-3.5 px-5 font-semibold">หมายเหตุ / ข้อผิดพลาด</th>
                     <th className="py-3.5 px-5 font-semibold text-right">รายละเอียด</th>
                   </tr>
@@ -826,11 +1343,24 @@ export function RawScansView({
                         onClick={() => handleInspectSyncRun(r)}
                         className="hover:bg-[#FAF9FD] cursor-pointer transition-colors"
                       >
-                        <td className="py-4 px-5 font-mono tabular-nums text-[#273244]">
+                        <td className="py-4 px-5 font-mono tabular-nums text-[#273244] whitespace-nowrap">
                           #{r.id} · {formatThaiDateTime(r.started_at)}
                         </td>
-                        <td className="py-4 px-5 font-mono text-[#596579]">{r.trigger_mode}</td>
-                        <td className="py-4 px-5 font-semibold">
+                        <td className="py-4 px-5">
+                          <div className="font-mono text-[13px] text-[#273244] font-semibold">
+                            {r.trigger_mode} · {formatSyncScopeLabel(r.sync_scope_mode)}
+                          </div>
+                          {r.filter_from_bkk && r.filter_to_bkk ? (
+                            <div className="font-mono text-[12px] text-[#7359B4] mt-0.5">
+                              {r.filter_from_bkk} – {r.filter_to_bkk}
+                            </div>
+                          ) : (
+                            <div className="text-[12px] text-[#596579] mt-0.5">
+                              ไม่จำกัดช่วงเวลาย่อย
+                            </div>
+                          )}
+                        </td>
+                        <td className="py-4 px-5 font-semibold whitespace-nowrap">
                           <span
                             className={
                               r.status === 'SUCCESS' ? 'text-[#047857]' : 'text-[#B91C1C]'
@@ -839,14 +1369,25 @@ export function RawScansView({
                             {r.status === 'SUCCESS' ? 'สำเร็จ' : 'ขัดข้อง'}
                           </span>
                         </td>
-                        <td className="py-4 px-5 text-right font-mono tabular-nums">
-                          {r.total_events_read}
+                        <td className="py-4 px-5 text-right font-mono tabular-nums whitespace-nowrap">
+                          <span className="font-semibold text-[#273244]">{r.total_events_read}</span>
+                          {Number(r.filtered_out_count || 0) > 0 && (
+                            <div className="text-[11.5px] text-[#7359B4]">
+                              ตรงช่วง {r.matched_in_range_count ?? r.total_events_read}
+                            </div>
+                          )}
                         </td>
                         <td className="py-4 px-5 text-right font-mono tabular-nums font-bold text-[#047857]">
                           {r.new_scans_inserted}
                         </td>
-                        <td className="py-4 px-5 text-right font-mono tabular-nums text-[#596579]">
-                          {r.duplicate_scans_skipped}
+                        <td className="py-4 px-5 text-right font-mono tabular-nums text-[#596579] whitespace-nowrap">
+                          <span>{r.duplicate_scans_skipped}</span>
+                          {Number(r.failed_events_count || 0) > 0 && (
+                            <span className="text-[#B91C1C] font-semibold">
+                              {' '}
+                              / {r.failed_events_count}
+                            </span>
+                          )}
                         </td>
                         <td className="py-4 px-5 text-[#596579]">
                           {r.error_code ? `${r.error_code}: ${r.error_message}` : 'ทำงานปกติ'}
@@ -858,7 +1399,7 @@ export function RawScansView({
                               e.stopPropagation();
                               handleInspectSyncRun(r);
                             }}
-                            className="h-8 px-3 rounded-lg border border-[#D5CEE6] bg-white hover:bg-[#F3EEFC] text-[12.5px] font-semibold text-[#7359B4] inline-flex items-center gap-1"
+                            className="h-8 px-3 rounded-lg border border-[#D5CEE6] bg-white hover:bg-[#F3EEFC] text-[12.5px] font-semibold text-[#7359B4] inline-flex items-center gap-1 whitespace-nowrap"
                           >
                             <Eye className="w-3.5 h-3.5" />
                             <span>ดูรายละเอียด</span>
@@ -1200,17 +1741,38 @@ export function RawScansView({
         {selectedSyncRunDetail && (
           <div className="space-y-3 text-[14px]">
             <div className="p-4 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0] space-y-2">
-              <div className="flex justify-between">
+              <div className="flex justify-between gap-3">
                 <span className="text-[#596579]">วันและเวลาที่เริ่ม:</span>
                 <span className="font-mono font-bold text-[#273244]">
                   {formatThaiDateTime(selectedSyncRunDetail.started_at)}
                 </span>
               </div>
-              <div className="flex justify-between">
+              <div className="flex justify-between gap-3">
                 <span className="text-[#596579]">ช่องทางการสั่งซิงก์:</span>
                 <span className="font-mono text-[#273244]">{selectedSyncRunDetail.trigger_mode}</span>
               </div>
-              <div className="flex justify-between">
+              <div className="flex justify-between gap-3">
+                <span className="text-[#596579]">โหมดการดึงข้อมูล:</span>
+                <span className="font-semibold text-[#7359B4]">
+                  {formatSyncScopeLabel(selectedSyncRunDetail.sync_scope_mode)}
+                </span>
+              </div>
+              {selectedSyncRunDetail.filter_from_bkk && selectedSyncRunDetail.filter_to_bkk && (
+                <div className="flex justify-between gap-3">
+                  <span className="text-[#596579]">ช่วงเวลาที่เลือก (Asia/Bangkok):</span>
+                  <span className="font-mono font-semibold text-[#273244] text-right">
+                    {selectedSyncRunDetail.filter_from_bkk} ถึง{' '}
+                    {selectedSyncRunDetail.filter_to_bkk}
+                  </span>
+                </div>
+              )}
+              <div className="flex justify-between gap-3">
+                <span className="text-[#596579]">กลไกการคัดกรอง:</span>
+                <span className="text-[#273244] text-right text-[13px]">
+                  {formatFilterStrategyLabel(selectedSyncRunDetail.filter_strategy)}
+                </span>
+              </div>
+              <div className="flex justify-between gap-3">
                 <span className="text-[#596579]">สถานะ:</span>
                 <span
                   className={`font-bold ${
@@ -1222,23 +1784,50 @@ export function RawScansView({
                   {selectedSyncRunDetail.status === 'SUCCESS' ? 'สำเร็จ (SUCCESS)' : 'ขัดข้อง (FAILED)'}
                 </span>
               </div>
-              <div className="flex justify-between">
-                <span className="text-[#596579]">จำนวนข้อมูลที่อ่านทั้งหมด:</span>
-                <span className="font-mono font-bold text-[#273244]">
-                  {selectedSyncRunDetail.total_events_read} รายการ
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-[#596579]">บันทึกสแกนใหม่สำเร็จ:</span>
-                <span className="font-mono font-bold text-[#047857]">
-                  {selectedSyncRunDetail.new_scans_inserted} รายการ
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-[#596579]">ข้ามรายการซ้ำ:</span>
-                <span className="font-mono text-[#596579]">
-                  {selectedSyncRunDetail.duplicate_scans_skipped} รายการ
-                </span>
+              <div className="pt-2 border-t border-[#E7E2F0] space-y-1.5">
+                <div className="flex justify-between">
+                  <span className="text-[#596579]">จำนวนข้อมูลที่อ่านจากเครื่องทั้งหมด:</span>
+                  <span className="font-mono font-bold text-[#273244]">
+                    {selectedSyncRunDetail.total_events_read} รายการ
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#596579]">รายการที่ตรงช่วงเวลาที่เลือก:</span>
+                  <span className="font-mono font-bold text-[#7359B4]">
+                    {selectedSyncRunDetail.matched_in_range_count ?? selectedSyncRunDetail.total_events_read}{' '}
+                    รายการ
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#596579]">รายการนอกช่วงที่กรองออก (ไม่บันทึก):</span>
+                  <span className="font-mono text-[#596579]">
+                    {selectedSyncRunDetail.filtered_out_count ?? 0} รายการ
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#596579]">บันทึกสแกนใหม่สำเร็จ:</span>
+                  <span className="font-mono font-bold text-[#047857]">
+                    {selectedSyncRunDetail.new_scans_inserted} รายการ
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#596579]">ข้ามรายการซ้ำ:</span>
+                  <span className="font-mono text-[#596579]">
+                    {selectedSyncRunDetail.duplicate_scans_skipped} รายการ
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-[#596579]">นำเข้าไม่สำเร็จ / ข้อมูลผิดรูปแบบ:</span>
+                  <span
+                    className={`font-mono font-semibold ${
+                      Number(selectedSyncRunDetail.failed_events_count || 0) > 0
+                        ? 'text-[#B91C1C]'
+                        : 'text-[#596579]'
+                    }`}
+                  >
+                    {selectedSyncRunDetail.failed_events_count ?? 0} รายการ
+                  </span>
+                </div>
               </div>
               <div className="pt-2 border-t border-[#E7E2F0]">
                 <div className="text-[#596579] mb-1">หมายเหตุ / ข้อผิดพลาด:</div>
@@ -1256,8 +1845,8 @@ export function RawScansView({
       {/* ConfirmDialog ก่อนสั่งดึงข้อมูลจากเครื่องสแกนทันที (Section 7.2) */}
       <ConfirmDialog
         open={confirmSyncOpen}
-        title="ยืนยันการสั่งดึงข้อมูลจากเครื่องสแกนทันที"
-        description="ระบบจะเชื่อมต่อโปรแกรมอ่านเครื่องสแกนนิ้ว นำเข้าข้อมูลสแกนใหม่ คัดกรองข้อมูลซ้ำ และคำนวณเวลาปฏิบัติงานให้อัตโนมัติ"
+        title="ยืนยันการดึงข้อมูลจากเครื่องสแกนลายนิ้วมือ"
+        description={`${syncScopeDescription} — ระบบจะเชื่อมต่อโปรแกรมอ่านเครื่องสแกนเดิม คัดกรองตามช่วงเวลาที่เลือกบน Backend ป้องกันรายการซ้ำ และคำนวณเวลาปฏิบัติงานให้อัตโนมัติ`}
         confirmLabel="เริ่มดึงข้อมูลจากเครื่องสแกน"
         loading={syncingHardware}
         onConfirm={handleConfirmTriggerHardwareSync}

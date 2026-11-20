@@ -12,7 +12,6 @@ import {
   Send,
   UserCog,
   Server,
-  Sliders,
   Rocket,
   ChevronDown,
   ChevronRight,
@@ -34,7 +33,6 @@ export type NavViewKey =
   | 'hosofficePush'
   | 'adminUsers'
   | 'systemLogs'
-  | 'settings'
   | 'deployment';
 
 interface SidebarNavItem {
@@ -135,7 +133,7 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
   },
   {
     id: 'group_system',
-    title: 'ตั้งค่าระบบและส่วนกลาง',
+    title: 'ระบบและผู้ดูแลส่วนกลาง',
     items: [
       {
         key: 'hosofficePush',
@@ -159,13 +157,6 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
         icon: Server,
       },
       {
-        key: 'settings',
-        label: 'ตั้งค่าและการเชื่อมต่อ',
-        subLabel: 'สถานะฐานข้อมูลและโปรแกรมอ่านสแกน',
-        roles: ['ADMIN'],
-        icon: Sliders,
-      },
-      {
         key: 'deployment',
         label: 'อัปเดตระบบ Sam_Att',
         subLabel: 'อัปเดตระบบอัตโนมัติด้วยปุ่มเดียว',
@@ -175,6 +166,30 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
     ],
   },
 ];
+
+export const ALLOWED_NAV_VIEWS: readonly NavViewKey[] = SIDEBAR_GROUPS.flatMap((g) =>
+  g.items.map((item) => item.key)
+);
+
+/**
+ * ตรวจสอบสิทธิ์และปิดกั้นเส้นทางที่ถูกนำออกแล้ว (เช่น 'settings' หรือ 'connection-status')
+ * หากไม่ถูกต้องหรือไม่ตรงสิทธิ์ จะคืนค่าหน้าจอเริ่มต้นที่ปลอดภัยตามบทบาทผู้ใช้
+ */
+export function resolveSafeNavView(requestedView: unknown, role: UserRole): NavViewKey {
+  const defaultView: NavViewKey = role === 'GENERAL_USER' ? 'myAttendance' : 'dashboard';
+  if (typeof requestedView !== 'string') {
+    return defaultView;
+  }
+  const normalized = requestedView.trim();
+  for (const group of SIDEBAR_GROUPS) {
+    for (const item of group.items) {
+      if (item.key === normalized && item.roles.includes(role)) {
+        return item.key;
+      }
+    }
+  }
+  return defaultView;
+}
 
 export function getNavBreadcrumb(view: NavViewKey): {
   groupTitle: string;

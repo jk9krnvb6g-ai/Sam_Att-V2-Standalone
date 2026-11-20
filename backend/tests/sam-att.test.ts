@@ -52,6 +52,11 @@ import {
   setScannerSyncLockForTests,
 } from '../src/modules/scanners/routes.ts';
 import {
+  validateAndNormalizeScannerSyncRange,
+  isCanonicalBkkTimeInRange,
+  ScannerSyncRangeError,
+} from '../src/modules/scanners/syncRange.ts';
+import {
   resetSchedulerHistoryForTests,
   stopAutomaticScannerScheduler,
 } from '../src/modules/scanners/scheduler.ts';
@@ -4022,6 +4027,498 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       },
     });
     assert.equal(rbacBulkRes.status, 403, 'GENERAL_USER must be forbidden from bulk save');
+  });
+
+  test('Test 29 — Settings & Connection Status Menu/Route Removal + Scanner Sync Date/Time Range Selection (Asia/Bangkok)', async () => {
+    // =========================================================================
+    // PART A: TASK 1 — Settings & Connection Status Menu/Route Removal
+    // =========================================================================
+    const sidebarSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'frontend/src/components/layout/Sidebar.tsx'),
+      'utf8'
+    );
+    const appSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'frontend/src/App.tsx'),
+      'utf8'
+    );
+    const adminViewsSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'frontend/src/pages/AdminViews.tsx'),
+      'utf8'
+    );
+
+    // 1. Settings & connection status menu removed from Navigation
+    assert.ok(
+      !sidebarSource.includes("key: 'settings'"),
+      'Sidebar must not contain settings navigation item'
+    );
+    assert.ok(
+      !sidebarSource.includes("| 'settings'"),
+      'NavViewKey union must not expose settings'
+    );
+    assert.ok(
+      !sidebarSource.includes('ตั้งค่าและการเชื่อมต่อ'),
+      'Sidebar must not show ตั้งค่าและการเชื่อมต่อ label'
+    );
+    assert.ok(
+      !sidebarSource.includes('ตรวจสอบสถานะการเชื่อมต่อ'),
+      'Sidebar must not show ตรวจสอบสถานะการเชื่อมต่อ label'
+    );
+
+    // 2. Removed route cannot open old settings page in Frontend
+    assert.ok(
+      !appSource.includes('<AdminViews mode="settings"'),
+      'App.tsx must not render AdminViews settings mode'
+    );
+    assert.ok(
+      appSource.includes('resolveSafeNavView'),
+      'App.tsx must guard view switching with resolveSafeNavView'
+    );
+    assert.ok(
+      !adminViewsSource.includes("mode === 'settings'"),
+      'AdminViews.tsx must not render old settings/connection status view'
+    );
+    assert.ok(
+      !adminViewsSource.includes('/settings/connections'),
+      'AdminViews.tsx must not fetch /settings/connections from frontend'
+    );
+
+    // 3. Backend configuration, health checks & internal status endpoints still work
+    const healthRes = await apiCall('/api/Sam_Att/health');
+    assert.equal(healthRes.status, 200);
+    assert.equal(healthRes.data.status, 'OK');
+
+    const backendSettingsRes = await apiCall('/api/Sam_Att/settings/connections', {
+      token: adminToken,
+    });
+    assert.equal(backendSettingsRes.status, 200);
+    assert.equal(backendSettingsRes.data.samAttDatabase.password, undefined);
+
+    // =========================================================================
+    // PART B: TASK 2 — Scanner Sync Capabilities & Pure Range Validation
+    // =========================================================================
+    const scannersMetaRes = await apiCall('/api/Sam_Att/scanners', { token: staffToken });
+    assert.equal(scannersMetaRes.status, 200);
+    assert.ok(scannersMetaRes.data.syncRangeCapabilities, 'GET /scanners must return syncRangeCapabilities');
+    assert.equal(scannersMetaRes.data.syncRangeCapabilities.timezone, 'Asia/Bangkok');
+    assert.equal(scannersMetaRes.data.syncRangeCapabilities.exeSupportsNativeDateTimeRange, false);
+    assert.equal(scannersMetaRes.data.syncRangeCapabilities.filterStrategy, 'BACKEND_POST_READ_FILTER');
+    assert.ok(scannersMetaRes.data.syncRangeCapabilities.maxRangeDays >= 1);
+
+    // Pure unit checks for Asia/Bangkok range validation
+    assert.throws(
+      () =>
+        validateAndNormalizeScannerSyncRange(
+          {
+            syncMode: 'CUSTOM_RANGE',
+            dateFrom: '2026-12-22',
+            timeFrom: '10:00',
+            dateTo: '2026-12-21',
+            timeTo: '08:00',
+          },
+          { maxRangeDays: 90, defaultExeSyncDays: 3, isScannerSyncCli: true }
+        ),
+      (err: unknown) => err instanceof ScannerSyncRangeError && err.code === 'INVALID_DATE_TIME_RANGE'
+    );
+
+    assert.throws(
+      () =>
+        validateAndNormalizeScannerSyncRange(
+          {
+            syncMode: 'CUSTOM_RANGE',
+            dateFrom: '2026-02-30',
+            timeFrom: '00:00',
+            dateTo: '2026-03-01',
+            timeTo: '23:59',
+          },
+          { maxRangeDays: 90, defaultExeSyncDays: 3, isScannerSyncCli: true }
+        ),
+      (err: unknown) => err instanceof ScannerSyncRangeError && err.code === 'INVALID_DATE_TIME_RANGE'
+    );
+
+    assert.throws(
+      () =>
+        validateAndNormalizeScannerSyncRange(
+          {
+            syncMode: 'CUSTOM_RANGE',
+            dateFrom: '2026-01-01',
+            timeFrom: '00:00',
+            dateTo: '2026-06-01',
+            timeTo: '23:59',
+          },
+          { maxRangeDays: 90, defaultExeSyncDays: 3, isScannerSyncCli: true }
+        ),
+      (err: unknown) => err instanceof ScannerSyncRangeError && err.code === 'DATE_RANGE_EXCEEDED'
+    );
+
+    assert.equal(
+      isCanonicalBkkTimeInRange('2026-12-20 19:00:00', '2026-12-20 19:00:00', '2026-12-21 09:00:59'),
+      true
+    );
+    assert.equal(
+      isCanonicalBkkTimeInRange('2026-12-20 18:59:59', '2026-12-20 19:00:00', '2026-12-21 09:00:59'),
+      false
+    );
+
+    // =========================================================================
+    // PART C: Integration Tests on POST /api/Sam_Att/scanners/sync
+    // =========================================================================
+    // 8. Reject invalid date/time ranges via HTTP API (400)
+    const invalidOrderRes = await apiCall('/api/Sam_Att/scanners/sync', {
+      method: 'POST',
+      token: staffToken,
+      body: {
+        syncMode: 'CUSTOM_RANGE',
+        dateFrom: '2026-12-20',
+        timeFrom: '15:00',
+        dateTo: '2026-12-20',
+        timeTo: '14:00',
+      },
+    });
+    assert.equal(invalidOrderRes.status, 400);
+    assert.equal(invalidOrderRes.data.error, 'INVALID_DATE_TIME_RANGE');
+
+    const invalidDateRes = await apiCall('/api/Sam_Att/scanners/sync', {
+      method: 'POST',
+      token: staffToken,
+      body: {
+        syncMode: 'CUSTOM_RANGE',
+        dateFrom: '2026-02-30',
+        timeFrom: '08:00',
+        dateTo: '2026-03-01',
+        timeTo: '17:00',
+      },
+    });
+    assert.equal(invalidDateRes.status, 400);
+    assert.equal(invalidDateRes.data.error, 'INVALID_DATE_TIME_RANGE');
+
+    const exceededRangeRes = await apiCall('/api/Sam_Att/scanners/sync', {
+      method: 'POST',
+      token: staffToken,
+      body: {
+        syncMode: 'CUSTOM_RANGE',
+        dateFrom: '2026-01-01',
+        timeFrom: '00:00',
+        dateTo: '2026-05-15',
+        timeTo: '23:59',
+      },
+    });
+    assert.equal(exceededRangeRes.status, 400);
+    assert.equal(exceededRangeRes.data.error, 'DATE_RANGE_EXCEEDED');
+
+    const invalidModeRes = await apiCall('/api/Sam_Att/scanners/sync', {
+      method: 'POST',
+      token: staffToken,
+      body: { syncMode: 'UNKNOWN_MODE' },
+    });
+    assert.equal(invalidModeRes.status, 400);
+    assert.equal(invalidModeRes.data.error, 'INVALID_SYNC_MODE');
+
+    try {
+      // 4. Sync TODAY (Asia/Bangkok) — filters only today, excludes yesterday, counts malformed event
+      const bkkToday = getCurrentBangkokDateParts().todayYmd;
+      const bkkYesterday = getCurrentBangkokDateParts().yesterdayYmd;
+      setScannerExeTestDouble(
+        JSON.stringify({
+          success: true,
+          scans: [
+            {
+              machineNo: 101,
+              enrollNumber: '1001',
+              scanDateTime: `${bkkYesterday} 23:59:59`,
+              verifyMode: 1,
+              inOutMode: 1,
+              workCode: 0,
+            },
+            {
+              machineNo: 101,
+              enrollNumber: '1001',
+              scanDateTime: `${bkkToday} 07:42:10`,
+              verifyMode: 1,
+              inOutMode: 0,
+              workCode: 0,
+            },
+            {
+              machineNo: 101,
+              enrollNumber: '1001',
+              scanDateTime: `${bkkToday} 16:08:25`,
+              verifyMode: 1,
+              inOutMode: 1,
+              workCode: 0,
+            },
+            {
+              machineNo: -1,
+              enrollNumber: '',
+              scanDateTime: 'NOT-A-DATE',
+              verifyMode: 1,
+              inOutMode: 0,
+              workCode: 0,
+            },
+          ],
+        })
+      );
+
+      const todaySyncRes = await apiCall('/api/Sam_Att/scanners/sync', {
+        method: 'POST',
+        token: staffToken,
+        body: { syncMode: 'TODAY' },
+      });
+      assert.equal(todaySyncRes.status, 200);
+      assert.equal(todaySyncRes.data.syncMode, 'TODAY');
+      assert.equal(todaySyncRes.data.filterStrategy, 'BACKEND_POST_READ_FILTER');
+      assert.equal(todaySyncRes.data.totalReadFromDevice, 4);
+      assert.equal(todaySyncRes.data.matchedInRange, 2);
+      assert.equal(todaySyncRes.data.filteredOutCount, 1);
+      assert.equal(todaySyncRes.data.newInserted, 2);
+      assert.equal(todaySyncRes.data.duplicatesSkipped, 0);
+      assert.equal(todaySyncRes.data.failedCount, 1);
+
+      const yesterdayDbRows = await dbQuery(
+        'SELECT id FROM raw_scans WHERE enroll_number = ? AND canonical_bkk_time = ?',
+        ['1001', `${bkkYesterday} 23:59:59`]
+      );
+      assert.equal(yesterdayDbRows.length, 0, 'Out-of-range scan from yesterday must NOT be saved to DB');
+
+      // 10. Re-syncing TODAY with same payload must deduplicate cleanly
+      const todayResyncRes = await apiCall('/api/Sam_Att/scanners/sync', {
+        method: 'POST',
+        token: staffToken,
+        body: { syncMode: 'TODAY' },
+      });
+      assert.equal(todayResyncRes.status, 200);
+      assert.equal(todayResyncRes.data.matchedInRange, 2);
+      assert.equal(todayResyncRes.data.newInserted, 0);
+      assert.equal(todayResyncRes.data.duplicatesSkipped, 2);
+
+      // 5 & 6. Sync CUSTOM_RANGE (Cross-Day: 2026-12-20 19:00 -> 2026-12-21 09:00 Asia/Bangkok)
+      setScannerExeTestDouble(
+        JSON.stringify([
+          {
+            machineNo: 101,
+            enrollNumber: '1002',
+            scanDateTime: '2026-12-20 18:59:59',
+            verifyMode: 1,
+            inOutMode: 0,
+            workCode: 0,
+          },
+          {
+            machineNo: 101,
+            enrollNumber: '1002',
+            scanDateTime: '2026-12-20T13:15:00Z',
+            verifyMode: 1,
+            inOutMode: 0,
+            workCode: 0,
+          },
+          {
+            machineNo: 101,
+            enrollNumber: '1002',
+            scanDateTime: '2026-12-21 08:12:00',
+            verifyMode: 1,
+            inOutMode: 1,
+            workCode: 0,
+          },
+          {
+            machineNo: 101,
+            enrollNumber: '1002',
+            scanDateTime: '2026-12-21 09:01:00',
+            verifyMode: 1,
+            inOutMode: 1,
+            workCode: 0,
+          },
+        ])
+      );
+
+      const crossDaySyncRes = await apiCall('/api/Sam_Att/scanners/sync', {
+        method: 'POST',
+        token: staffToken,
+        body: {
+          syncMode: 'CUSTOM_RANGE',
+          dateFrom: '2026-12-20',
+          timeFrom: '19:00',
+          dateTo: '2026-12-21',
+          timeTo: '09:00',
+        },
+      });
+      assert.equal(crossDaySyncRes.status, 200);
+      assert.equal(crossDaySyncRes.data.syncMode, 'CUSTOM_RANGE');
+      assert.equal(crossDaySyncRes.data.filterFromBkk, '2026-12-20 19:00:00');
+      assert.equal(crossDaySyncRes.data.filterToBkk, '2026-12-21 09:00:59');
+      assert.equal(crossDaySyncRes.data.totalReadFromDevice, 4);
+      assert.equal(crossDaySyncRes.data.matchedInRange, 2);
+      assert.equal(crossDaySyncRes.data.filteredOutCount, 2);
+      assert.equal(crossDaySyncRes.data.newInserted, 2);
+      assert.equal(crossDaySyncRes.data.duplicatesSkipped, 0);
+
+      const crossDayDbRows = await dbQuery<{ canonical_bkk_time: string }>(
+        `SELECT canonical_bkk_time FROM raw_scans
+         WHERE enroll_number = '1002'
+           AND canonical_bkk_time >= '2026-12-20 00:00:00'
+           AND canonical_bkk_time <= '2026-12-21 23:59:59'
+         ORDER BY canonical_bkk_time ASC`
+      );
+      assert.deepEqual(
+        crossDayDbRows.map((r) => r.canonical_bkk_time),
+        ['2026-12-20 20:15:00', '2026-12-21 08:12:00']
+      );
+
+      const crossDayRunRes = await apiCall(`/api/Sam_Att/sync-runs/${crossDaySyncRes.data.syncRunId}`, {
+        token: staffToken,
+      });
+      assert.equal(crossDayRunRes.status, 200);
+      assert.equal(crossDayRunRes.data.item.sync_scope_mode, 'CUSTOM_RANGE');
+      assert.equal(crossDayRunRes.data.item.filter_from_bkk, '2026-12-20 19:00:00');
+      assert.equal(crossDayRunRes.data.item.filter_to_bkk, '2026-12-21 09:00:59');
+      assert.equal(crossDayRunRes.data.item.matched_in_range_count, 2);
+      assert.equal(crossDayRunRes.data.item.filtered_out_count, 2);
+
+      // 7. Cross-Month range (2026-12-30 07:00 -> 2027-01-02 18:00) + Attendance Processing (using SAM-P002 / enrollNumber 1002 with VALID mapping)
+      setScannerExeTestDouble(
+        JSON.stringify([
+          {
+            machineNo: 101,
+            enrollNumber: '1002',
+            scanDateTime: '2026-12-29 16:00:00',
+            verifyMode: 1,
+            inOutMode: 1,
+            workCode: 0,
+          },
+          {
+            machineNo: 101,
+            enrollNumber: '1002',
+            scanDateTime: '2026-12-31 07:50:00',
+            verifyMode: 1,
+            inOutMode: 0,
+            workCode: 0,
+          },
+          {
+            machineNo: 101,
+            enrollNumber: '1002',
+            scanDateTime: '2026-12-31 16:05:00',
+            verifyMode: 1,
+            inOutMode: 1,
+            workCode: 0,
+          },
+          {
+            machineNo: 101,
+            enrollNumber: '1002',
+            scanDateTime: '2027-01-02 07:55:00',
+            verifyMode: 1,
+            inOutMode: 0,
+            workCode: 0,
+          },
+          {
+            machineNo: 101,
+            enrollNumber: '1002',
+            scanDateTime: '2027-01-03 08:00:00',
+            verifyMode: 1,
+            inOutMode: 0,
+            workCode: 0,
+          },
+        ])
+      );
+
+      const crossMonthRes = await apiCall('/api/Sam_Att/scanners/sync', {
+        method: 'POST',
+        token: staffToken,
+        body: {
+          syncMode: 'CUSTOM_RANGE',
+          dateFrom: '2026-12-30',
+          timeFrom: '07:00',
+          dateTo: '2027-01-02',
+          timeTo: '18:00',
+        },
+      });
+      assert.equal(crossMonthRes.status, 200);
+      assert.equal(crossMonthRes.data.totalReadFromDevice, 5);
+      assert.equal(crossMonthRes.data.matchedInRange, 3);
+      assert.equal(crossMonthRes.data.filteredOutCount, 2);
+      assert.equal(crossMonthRes.data.newInserted, 3);
+      assert.deepEqual(crossMonthRes.data.affectedDates, ['2026-12-31', '2027-01-02']);
+
+      const outOfRangeMonthRows = await dbQuery(
+        `SELECT id FROM raw_scans
+         WHERE enroll_number = '1002'
+           AND canonical_bkk_time IN ('2026-12-29 16:00:00', '2027-01-03 08:00:00')`
+      );
+      assert.equal(outOfRangeMonthRows.length, 0);
+
+      // 15. Verify Attendance Processing automatically processed 2026-12-31 for SAM-P002
+      const attCrossMonthRes = await apiCall(
+        '/api/Sam_Att/attendance?dateFrom=2026-12-31&dateTo=2026-12-31&search=SAM-P002',
+        { token: staffToken }
+      );
+      assert.equal(attCrossMonthRes.status, 200);
+      const dec31Record = attCrossMonthRes.data.items.find((r: any) => r.person_id === 'SAM-P002');
+      assert.ok(dec31Record, 'Attendance Processing must automatically compute attendance_records after filtered sync');
+      assert.equal(dec31Record.check_in_time, '2026-12-31 07:50:00');
+      assert.equal(dec31Record.check_out_time, '2026-12-31 16:05:00');
+
+      // 14. Manual Sync ALL mode still works without post-read time filtering
+      setScannerExeTestDouble(
+        JSON.stringify([
+          {
+            machineNo: 101,
+            enrollNumber: '1001',
+            scanDateTime: '2026-12-25 07:52:00',
+            verifyMode: 1,
+            inOutMode: 0,
+            workCode: 0,
+          },
+        ])
+      );
+      const allModeRes = await apiCall('/api/Sam_Att/scanners/sync', {
+        method: 'POST',
+        token: staffToken,
+        body: { syncMode: 'ALL' },
+      });
+      assert.equal(allModeRes.status, 200);
+      assert.equal(allModeRes.data.syncMode, 'ALL');
+      assert.equal(allModeRes.data.filteredOutCount, 0);
+      assert.equal(allModeRes.data.newInserted, 1);
+
+      // 13. Scheduled Scanner Sync still works cleanly
+      resetSchedulerHistoryForTests();
+      const schedAgainRes = await apiCall('/api/Sam_Att/scanners/scheduler/run-due', {
+        method: 'POST',
+        token: adminToken,
+        body: { referenceBkkNow: '2026-12-25 08:00:05' },
+      });
+      assert.equal(schedAgainRes.status, 200);
+      assert.ok(schedAgainRes.data.triggeredSchedules.length >= 1);
+      assert.equal(schedAgainRes.data.triggeredSchedules[0].status, 'SUCCESS');
+
+      // 12. Failure reporting records FAILED run with requested range metadata
+      const simErr = new Error('SCANNER_DEVICE_UNREACHABLE: Simulated device offline');
+      (simErr as Error & { code?: string }).code = 'SCANNER_DEVICE_UNREACHABLE';
+      setScannerExeTestDouble(simErr);
+      const failedSyncRes = await apiCall('/api/Sam_Att/scanners/sync', {
+        method: 'POST',
+        token: staffToken,
+        body: {
+          syncMode: 'CUSTOM_RANGE',
+          dateFrom: '2026-12-26',
+          timeFrom: '06:00',
+          dateTo: '2026-12-26',
+          timeTo: '18:00',
+        },
+      });
+      assert.equal(failedSyncRes.status, 503);
+      assert.equal(failedSyncRes.data.error, 'SCANNER_DEVICE_UNREACHABLE');
+
+      const latestFailedRuns = await dbQuery<{
+        status: string;
+        sync_scope_mode: string;
+        filter_from_bkk: string;
+        filter_to_bkk: string;
+        error_code: string;
+      }>('SELECT status, sync_scope_mode, filter_from_bkk, filter_to_bkk, error_code FROM sync_runs ORDER BY id DESC LIMIT 1');
+      assert.equal(latestFailedRuns[0].status, 'FAILED');
+      assert.equal(latestFailedRuns[0].sync_scope_mode, 'CUSTOM_RANGE');
+      assert.equal(latestFailedRuns[0].filter_from_bkk, '2026-12-26 06:00:00');
+      assert.equal(latestFailedRuns[0].filter_to_bkk, '2026-12-26 18:00:59');
+      assert.equal(latestFailedRuns[0].error_code, 'SCANNER_DEVICE_UNREACHABLE');
+    } finally {
+      setScannerExeTestDouble(null);
+    }
   });
 });
 

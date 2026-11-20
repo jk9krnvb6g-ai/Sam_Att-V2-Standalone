@@ -34,6 +34,13 @@ import {
   failCentralJob,
   getLatestJobByType,
 } from '../jobs/tracker.ts';
+import {
+  validateAndNormalizeScannerSyncRange,
+  isCanonicalBkkTimeInRange,
+  ScannerSyncRangeError,
+  type ScannerSyncRangeInput,
+  type ResolvedScannerSyncRange,
+} from './syncRange.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -94,46 +101,127 @@ export function validateSixFieldEvent(raw: unknown): SixFieldScannerEvent {
 
 /**
  * บันทึกชุดข้อมูลสแกน 6 ฟิลด์ลงตาราง `raw_scans` แบบ Append-Only
- * พร้อมสร้างแถวเริ่มต้นใน `raw_scan_mappings`, จับคู่บุคลากร และสั่ง Reprocess อัตโนมัติ
+ * พร้อมรองรับการคัดกรองตามช่วงวันที่และเวลา (Asia/Bangkok) บน Backend ก่อนบันทึกจริง,
+ * สร้างแถวเริ่มต้นใน `raw_scan_mappings`, จับคู่บุคลากร และสั่ง Reprocess อัตโนมัติ
  */
 export async function ingestSixFieldEventsBatch(
   rawEvents: unknown[],
   triggerMode: string,
   triggeredBy: string,
-  machineNoFilter?: number | null
+  machineNoFilter?: number | null,
+  options?: {
+    rangeFilter?: ResolvedScannerSyncRange | null;
+    allowPartialInvalidEvents?: boolean;
+    onProgress?: (step: string, processed?: number, total?: number) => void;
+  }
 ): Promise<{
   syncRunId: number;
   totalRead: number;
+  totalReadFromDevice: number;
+  matchedInRange: number;
+  filteredOutCount: number;
   newInserted: number;
   duplicatesSkipped: number;
+  failedCount: number;
+  failedSamples: string[];
   unmatchedCount: number;
   affectedDates: string[];
+  syncMode: string;
+  filterFromBkk: string | null;
+  filterToBkk: string | null;
+  filterStrategy: string | null;
+  filterModeNotice: string | null;
+  exeDaysArgUsed: number | null;
 }> {
-  const validatedEvents: Array<{
+  const rangeFilter = options?.rangeFilter ?? null;
+  const allowPartialInvalid = Boolean(options?.allowPartialInvalidEvents);
+  const totalReadFromDevice = rawEvents.length;
+
+  options?.onProgress?.(
+    rangeFilter?.filterFromBkk && rangeFilter?.filterToBkk
+      ? `กำลังตรวจสอบและคัดกรองช่วงเวลา ${rangeFilter.filterFromBkk} ถึง ${rangeFilter.filterToBkk} (อ่านพบ ${totalReadFromDevice} รายการ)...`
+      : `กำลังตรวจสอบโครงสร้างข้อมูลสแกน 6 ฟิลด์ (${totalReadFromDevice} รายการ)...`,
+    0,
+    totalReadFromDevice
+  );
+
+  const inRangeEvents: Array<{
     event: SixFieldScannerEvent;
     dedupKey: string;
     canonicalBkkTime: string;
   }> = [];
+  let filteredOutCount = 0;
+  let failedCount = 0;
+  const failedSamples: string[] = [];
 
   for (const item of rawEvents) {
-    const ev = validateSixFieldEvent(item);
-    const { dedupKey, canonicalBkkTime } = computeRawScanDedupKey(ev);
-    validatedEvents.push({ event: ev, dedupKey, canonicalBkkTime });
+    try {
+      const ev = validateSixFieldEvent(item);
+      const { dedupKey, canonicalBkkTime } = computeRawScanDedupKey(ev);
+      if (
+        rangeFilter &&
+        !isCanonicalBkkTimeInRange(
+          canonicalBkkTime,
+          rangeFilter.filterFromBkk,
+          rangeFilter.filterToBkk
+        )
+      ) {
+        filteredOutCount++;
+        continue;
+      }
+      inRangeEvents.push({ event: ev, dedupKey, canonicalBkkTime });
+    } catch (evErr: unknown) {
+      if (!allowPartialInvalid) {
+        throw evErr;
+      }
+      failedCount++;
+      if (failedSamples.length < 5) {
+        failedSamples.push(evErr instanceof Error ? evErr.message : String(evErr));
+      }
+    }
   }
+
+  const matchedInRange = inRangeEvents.length;
+  const syncScopeMode = rangeFilter?.syncMode || 'ALL';
+  const filterFromBkk = rangeFilter?.filterFromBkk ?? null;
+  const filterToBkk = rangeFilter?.filterToBkk ?? null;
+  const filterStrategy = rangeFilter?.filterStrategy ?? null;
 
   const runRes = await dbExecute(
     `INSERT INTO sync_runs (
-      trigger_mode, machine_no, status, total_events_read, triggered_by
-    ) VALUES (?, ?, 'RUNNING', ?, ?)`,
-    [triggerMode, machineNoFilter ?? null, validatedEvents.length, triggeredBy]
+      trigger_mode, machine_no, status,
+      sync_scope_mode, filter_from_bkk, filter_to_bkk, filter_strategy,
+      total_events_read, matched_in_range_count, filtered_out_count, failed_events_count,
+      triggered_by
+    ) VALUES (?, ?, 'RUNNING', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      triggerMode,
+      machineNoFilter ?? null,
+      syncScopeMode,
+      filterFromBkk,
+      filterToBkk,
+      filterStrategy,
+      totalReadFromDevice,
+      matchedInRange,
+      filteredOutCount,
+      failedCount,
+      triggeredBy,
+    ]
   );
   const syncRunId = runRes.insertId || 1;
+
+  options?.onProgress?.(
+    `กำลังตรวจสอบรายการซ้ำและบันทึกสแกนใหม่ (ตรงช่วงเวลา ${matchedInRange} จาก ${totalReadFromDevice} รายการ)...`,
+    0,
+    matchedInRange
+  );
 
   let newInserted = 0;
   let duplicatesSkipped = 0;
   const affectedDateSet = new Set<string>();
 
-  for (const { event, dedupKey, canonicalBkkTime } of validatedEvents) {
+  for (let i = 0; i < inRangeEvents.length; i++) {
+    const { event, dedupKey, canonicalBkkTime } = inRangeEvents[i];
     const existing = await dbQuery<{ id: number }>(
       'SELECT id FROM raw_scans WHERE event_dedup_key = ? LIMIT 1',
       [dedupKey]
@@ -181,6 +269,11 @@ export async function ingestSixFieldEventsBatch(
   let unmatchedCount = 0;
 
   if (sortedDates.length > 0) {
+    options?.onProgress?.(
+      `กำลังจับคู่รหัสบุคลากรและคำนวณเวลาปฏิบัติงาน (${sortedDates[0]} ถึง ${sortedDates[sortedDates.length - 1]})...`,
+      matchedInRange,
+      matchedInRange
+    );
     const minDate = sortedDates[0];
     const maxDate = sortedDates[sortedDates.length - 1];
     const mapStats = await resolveRawScanPersonnelMappings(minDate, maxDate);
@@ -196,9 +289,18 @@ export async function ingestSixFieldEventsBatch(
   await dbExecute(
     `UPDATE sync_runs
      SET finished_at = CURRENT_TIMESTAMP, status = 'SUCCESS',
+         matched_in_range_count = ?, filtered_out_count = ?, failed_events_count = ?,
          new_scans_inserted = ?, duplicate_scans_skipped = ?, unmatched_scans_count = ?
      WHERE id = ?`,
-    [newInserted, duplicatesSkipped, unmatchedCount, syncRunId]
+    [
+      matchedInRange,
+      filteredOutCount,
+      failedCount,
+      newInserted,
+      duplicatesSkipped,
+      unmatchedCount,
+      syncRunId,
+    ]
   );
 
   if (machineNoFilter) {
@@ -213,17 +315,30 @@ export async function ingestSixFieldEventsBatch(
 
   return {
     syncRunId,
-    totalRead: validatedEvents.length,
+    totalRead: totalReadFromDevice,
+    totalReadFromDevice,
+    matchedInRange,
+    filteredOutCount,
     newInserted,
     duplicatesSkipped,
+    failedCount,
+    failedSamples,
     unmatchedCount,
     affectedDates: sortedDates,
+    syncMode: syncScopeMode,
+    filterFromBkk,
+    filterToBkk,
+    filterStrategy,
+    filterModeNotice: rangeFilter?.filterModeNotice ?? null,
+    exeDaysArgUsed: rangeFilter?.exeDaysArg ?? null,
   };
 }
 
 /**
- * ฟังก์ชันกลางสำหรับสั่งรัน `ScannerReader.exe` (ใช้ร่วมกันทั้งการกด Manual Sync และ Automatic Scheduler)
- * มีการล็อกป้องกันการทำงานซ้อนกัน (Concurrency Mutex) และรองรับการตรวจจับ Timeout / เครื่องสแกนไม่ตอบสนอง
+ * ฟังก์ชันกลางสำหรับสั่งรัน `ScannerReader.exe` / `ScannerSyncCli.exe` (ใช้ร่วมกันทั้งการกด Manual Sync และ Automatic Scheduler)
+ * - ไม่แก้ไขตัวไฟล์ EXE เดิม
+ * - มีการตรวจสอบช่วงวันที่/เวลา (Asia/Bangkok) และคัดกรองบน Backend ก่อนบันทึก Raw Scans
+ * - มีการล็อกป้องกันการทำงานซ้อนกัน (Concurrency Mutex) และรองรับการตรวจจับ Timeout / เครื่องสแกนไม่ตอบสนอง
  */
 export async function executeScannerReaderSync(options: {
   triggerMode: string;
@@ -232,7 +347,23 @@ export async function executeScannerReaderSync(options: {
   machineNo?: number | null;
   requestId?: string;
   ipAddress?: string;
+  rangeInput?: ScannerSyncRangeInput;
+  referenceDate?: Date;
+  onProgress?: (step: string, processed?: number, total?: number) => void;
 }) {
+  const cfg = loadConfig();
+  const isScannerSyncCli = /ScannerSyncCli\.exe$/i.test(cfg.scanner.readerExePath);
+  const isScheduledSync = options.triggerMode.toUpperCase().includes('SCHEDULED');
+
+  // ตรวจสอบความถูกต้องของช่วงวันที่และเวลาก่อนจอง Mutex และก่อนเรียก EXE (Fail-Fast 400)
+  const resolvedRange = validateAndNormalizeScannerSyncRange(options.rangeInput, {
+    maxRangeDays: cfg.scanner.maxRangeDays,
+    defaultExeSyncDays: cfg.scanner.syncDays,
+    isScannerSyncCli,
+    isScheduledSync,
+    referenceDate: options.referenceDate,
+  });
+
   if (scannerSyncMutexLocked) {
     const conflictErr = new Error(
       'SYNC_ALREADY_RUNNING: ระบบกำลังดึงข้อมูลจากเครื่องสแกนอยู่ในขณะนี้ กรุณารอให้รอบปัจจุบันเสร็จสิ้นก่อน'
@@ -243,11 +374,16 @@ export async function executeScannerReaderSync(options: {
   }
 
   scannerSyncMutexLocked = true;
-  const cfg = loadConfig();
   const machineNo = options.machineNo ?? null;
 
   try {
     let stdoutText: string;
+
+    options.onProgress?.(
+      machineNo
+        ? `กำลังเชื่อมต่อเครื่องสแกนหมายเลข #${machineNo} และอ่านข้อมูลสแกน...`
+        : 'กำลังเชื่อมต่อโปรแกรมอ่านเครื่องสแกนและดึงข้อมูลจากเครื่องที่เปิดใช้งาน...'
+    );
 
     if (testDoubleScannerOutput !== null) {
       if (testDoubleScannerOutput instanceof Error) {
@@ -270,10 +406,9 @@ export async function executeScannerReaderSync(options: {
         throw err;
       }
 
-      const isScannerSyncCli = /ScannerSyncCli\.exe$/i.test(cfg.scanner.readerExePath);
       const args: string[] = [];
       if (isScannerSyncCli) {
-        args.push('--days', String(cfg.scanner.syncDays));
+        args.push('--days', String(resolvedRange.exeDaysArg));
         if (cfg.scanner.previewMode) {
           args.push('--preview');
         }
@@ -406,7 +541,12 @@ export async function executeScannerReaderSync(options: {
       eventsToIngest,
       options.triggerMode,
       options.actorUsername,
-      machineNo
+      machineNo,
+      {
+        rangeFilter: resolvedRange,
+        allowPartialInvalidEvents: true,
+        onProgress: options.onProgress,
+      }
     );
 
     await writeAuditLog({
@@ -429,10 +569,22 @@ export async function executeScannerReaderSync(options: {
     await dbExecute(
       `INSERT INTO sync_runs (
         trigger_mode, machine_no, finished_at, status,
-        total_events_read, new_scans_inserted, duplicate_scans_skipped, unmatched_scans_count,
+        sync_scope_mode, filter_from_bkk, filter_to_bkk, filter_strategy,
+        total_events_read, matched_in_range_count, filtered_out_count,
+        new_scans_inserted, duplicate_scans_skipped, failed_events_count, unmatched_scans_count,
         error_code, error_message, triggered_by
-      ) VALUES (?, ?, CURRENT_TIMESTAMP, 'FAILED', 0, 0, 0, 0, ?, ?, ?)`,
-      [options.triggerMode, machineNo, code, message, options.actorUsername]
+      ) VALUES (?, ?, CURRENT_TIMESTAMP, 'FAILED', ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, 0, ?, ?, ?)`,
+      [
+        options.triggerMode,
+        machineNo,
+        resolvedRange.syncMode,
+        resolvedRange.filterFromBkk,
+        resolvedRange.filterToBkk,
+        resolvedRange.filterStrategy,
+        code,
+        message,
+        options.actorUsername,
+      ]
     );
 
     if (machineNo) {
@@ -454,7 +606,12 @@ export async function executeScannerReaderSync(options: {
       targetId: machineNo ? String(machineNo) : 'ALL',
       result: 'FAILURE',
       errorCode: code,
-      detail: { message },
+      detail: {
+        message,
+        syncMode: resolvedRange.syncMode,
+        filterFromBkk: resolvedRange.filterFromBkk,
+        filterToBkk: resolvedRange.filterToBkk,
+      },
     });
 
     throw err;
@@ -475,6 +632,7 @@ scannersRouter.get(
       const schedules = await dbQuery('SELECT * FROM sync_schedules ORDER BY cron_time ASC');
       const syncRuns = await dbQuery('SELECT * FROM sync_runs ORDER BY id DESC LIMIT 25');
       const cfg = loadConfig();
+      const isScannerSyncCli = /ScannerSyncCli\.exe$/i.test(cfg.scanner.readerExePath);
 
       res.json({
         devices,
@@ -486,6 +644,20 @@ scannersRouter.get(
           readerExePath: cfg.scanner.readerExePath,
           exeBinaryPresent: fs.existsSync(cfg.scanner.readerExePath),
           contractFields: ['machineNo', 'enrollNumber', 'scanDateTime', 'verifyMode', 'inOutMode', 'workCode'],
+        },
+        syncRangeCapabilities: {
+          timezone: 'Asia/Bangkok',
+          maxRangeDays: cfg.scanner.maxRangeDays,
+          defaultScheduledSyncDays: cfg.scanner.syncDays,
+          supportsTodayMode: true,
+          supportsCustomRangeMode: true,
+          supportsAllMode: true,
+          exeSupportsNativeDateTimeRange: false,
+          filterStrategy: 'BACKEND_POST_READ_FILTER',
+          exeBinaryName: isScannerSyncCli ? 'ScannerSyncCli.exe' : 'ScannerReader.exe',
+          explanationTh: isScannerSyncCli
+            ? `โปรแกรม ScannerSyncCli.exe เดิมรองรับเฉพาะพารามิเตอร์จำนวนวันย้อนหลัง (--days) และไม่ได้รับช่วงเวลาตรงจากตัวเครื่อง ระบบจึงอ่านข้อมูลย้อนหลังให้ครอบคลุมแล้วคัดกรองเฉพาะรายการสแกนที่มีเวลา (scanDateTime เขตเวลา Asia/Bangkok) อยู่ในช่วงวันที่และเวลาที่เลือกบน Backend ก่อนบันทึกลงฐานข้อมูล (รายการนอกช่วงจะไม่ถูกบันทึก และเลือกช่วงได้สูงสุด ${cfg.scanner.maxRangeDays} วันต่อรอบ)`
+            : `ระบบอ่านข้อมูลจากโปรแกรมเครื่องสแกนเดิม แล้วคัดกรองเฉพาะรายการสแกนที่มีเวลา (scanDateTime เขตเวลา Asia/Bangkok) อยู่ในช่วงวันที่และเวลาที่เลือกบน Backend ก่อนบันทึกลงฐานข้อมูล (เลือกช่วงได้สูงสุด ${cfg.scanner.maxRangeDays} วันต่อรอบ)`,
         },
       });
     } catch (err) {
@@ -857,7 +1029,7 @@ scannersRouter.patch(
 );
 
 /**
- * Triggers Scanner Reader EXE Sync (Manual Sync).
+ * Triggers Scanner Reader EXE Sync (Manual Sync) with optional Date/Time Range filtering (Asia/Bangkok).
  */
 scannersRouter.post(
   '/scanners/sync',
@@ -865,16 +1037,79 @@ scannersRouter.post(
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
   async (req, res) => {
     const actor = req.user!.username;
-    const machineNo = req.body?.machineNo ? Number(req.body.machineNo) : null;
+    const rawMachineNo = req.body?.machineNo;
+    const machineNo =
+      rawMachineNo !== undefined && rawMachineNo !== null && String(rawMachineNo).trim() !== ''
+        ? Number(rawMachineNo)
+        : null;
+
+    if (machineNo !== null && (!Number.isInteger(machineNo) || machineNo <= 0)) {
+      res.status(400).json({
+        error: 'INVALID_MACHINE_NO',
+        message: 'หมายเลขเครื่องสแกน (machineNo) ต้องเป็นจำนวนเต็มบวก',
+        requestId: req.requestId,
+      });
+      return;
+    }
+
+    const rangeInput: ScannerSyncRangeInput = {
+      syncMode: req.body?.syncMode ?? undefined,
+      dateFrom: req.body?.dateFrom ?? undefined,
+      timeFrom: req.body?.timeFrom ?? undefined,
+      dateTo: req.body?.dateTo ?? undefined,
+      timeTo: req.body?.timeTo ?? undefined,
+    };
+
+    // ตรวจสอบช่วงวันที่และเวลาก่อนสร้าง Background Job เพื่อคืน HTTP 400 ทันทีหากไม่ถูกต้อง
+    const cfg = loadConfig();
+    const isScannerSyncCli = /ScannerSyncCli\.exe$/i.test(cfg.scanner.readerExePath);
+    let previewRange: ResolvedScannerSyncRange;
+    try {
+      previewRange = validateAndNormalizeScannerSyncRange(rangeInput, {
+        maxRangeDays: cfg.scanner.maxRangeDays,
+        defaultExeSyncDays: cfg.scanner.syncDays,
+        isScannerSyncCli,
+      });
+    } catch (rangeErr: unknown) {
+      if (rangeErr instanceof ScannerSyncRangeError) {
+        res.status(rangeErr.statusCode).json({
+          error: rangeErr.code,
+          message: rangeErr.message,
+          requestId: req.requestId,
+        });
+        return;
+      }
+      res.status(400).json({
+        error: 'INVALID_DATE_TIME_RANGE',
+        message: rangeErr instanceof Error ? rangeErr.message : 'ช่วงวันที่และเวลาไม่ถูกต้อง',
+        requestId: req.requestId,
+      });
+      return;
+    }
+
+    if (scannerSyncMutexLocked) {
+      res.status(409).json({
+        error: 'SYNC_ALREADY_RUNNING',
+        message:
+          'SYNC_ALREADY_RUNNING: ระบบกำลังดึงข้อมูลจากเครื่องสแกนอยู่ในขณะนี้ กรุณารอให้รอบปัจจุบันเสร็จสิ้นก่อน',
+        failClosed: true,
+        requestId: req.requestId,
+      });
+      return;
+    }
 
     let trackedJobId: string | null = null;
     try {
+      const rangeLabel =
+        previewRange.filterFromBkk && previewRange.filterToBkk
+          ? ` ช่วง ${previewRange.filterFromBkk} ถึง ${previewRange.filterToBkk}`
+          : ' (ดึงข้อมูลทั้งหมดที่เครื่องรองรับ)';
       const job = startCentralJob({
         jobType: 'SCANNER_MANUAL_SYNC',
         actorUsername: actor,
         initialStep: machineNo
-          ? `กำลังเชื่อมต่อเครื่องสแกนหมายเลข #${machineNo} และอ่านข้อมูลสแกนนิ้ว...`
-          : 'กำลังเชื่อมต่อเครื่องสแกนทุกเครื่องที่เปิดใช้งานและอ่านข้อมูลสแกนนิ้ว...',
+          ? `กำลังเชื่อมต่อเครื่องสแกนหมายเลข #${machineNo}${rangeLabel}...`
+          : `กำลังเชื่อมต่อเครื่องสแกนทุกเครื่องที่เปิดใช้งาน${rangeLabel}...`,
       });
       trackedJobId = job.jobId;
     } catch {
@@ -889,18 +1124,23 @@ scannersRouter.post(
         machineNo,
         requestId: req.requestId,
         ipAddress: req.ip || '127.0.0.1',
+        rangeInput,
+        onProgress: (step, processed, total) => {
+          if (trackedJobId) {
+            updateCentralJobStep(trackedJobId, {
+              currentStep: step,
+              ...(typeof processed === 'number' ? { processedCount: processed } : {}),
+              ...(typeof total === 'number' ? { totalCount: total } : {}),
+            });
+          }
+        },
       });
 
       if (trackedJobId) {
-        updateCentralJobStep(trackedJobId, {
-          currentStep: 'กำลังจับคู่รหัสสแกนนิ้วและคำนวณเวลาปฏิบัติงาน...',
-          processedCount: Number(result.totalRead ?? 0),
-          totalCount: Number(result.totalRead ?? 0),
-        });
         completeCentralJob(trackedJobId, {
           currentStep: 'ดึงข้อมูลจากเครื่องสแกนและคำนวณเวลาเสร็จสมบูรณ์',
-          processedCount: Number(result.totalRead ?? 0),
-          totalCount: Number(result.totalRead ?? 0),
+          processedCount: Number(result.matchedInRange ?? result.totalRead ?? 0),
+          totalCount: Number(result.totalReadFromDevice ?? result.totalRead ?? 0),
           resultSummary: result as unknown as Record<string, unknown>,
         });
       }
