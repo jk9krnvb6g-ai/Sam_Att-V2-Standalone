@@ -216,7 +216,7 @@ export default function App() {
           )}
           {activeView === 'myAttendance' && <MyAttendanceView user={user} />}
           {activeView === 'personnel' && <PersonnelView />}
-          {activeView === 'shifts' && <ShiftsView />}
+          {activeView === 'shifts' && <ShiftsView userRole={user.role} />}
           {activeView === 'hrAttendance' && <HrAttendanceView mode="management" />}
           {activeView === 'attendanceReview' && <HrAttendanceView mode="review" />}
           {activeView === 'rawScans' && <RawScansView mode="rawScans" user={user} />}

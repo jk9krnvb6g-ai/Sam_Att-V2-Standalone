@@ -17,12 +17,13 @@
  * 5. แสดงผลตรวจสอบความขัดแย้งภาษาไทยชัดเจน พร้อมรหัสอ้างอิง (Request ID) เมื่อเกิดข้อผิดพลาด
  * ============================================================================
  */
-import React, { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import {
   Plus,
   Trash2,
   Clock,
   Moon,
+  MoonStar,
   Sun,
   Sunset,
   Sunrise,
@@ -36,6 +37,7 @@ import {
   ChevronRight,
   CheckCircle2,
   AlertTriangle,
+  Info,
   Users,
   User,
   RotateCcw,
@@ -70,6 +72,8 @@ import {
   classifyShiftIconKind,
   buildCompactMonthlyCellViewModel,
   findClientSelectedShiftsOverlap,
+  computeClientShiftInterval,
+  intervalsOverlapHalfOpen,
   type ShiftIconKind,
 } from '../utils/shiftDisplay.ts';
 
@@ -99,11 +103,11 @@ function renderShiftIcon(kind: ShiftIconKind, className = 'w-3.5 h-3.5') {
       return <Sunrise className={`${className} text-[#7359B4] shrink-0`} aria-hidden="true" />;
     case 'AFTERNOON_NIGHT':
       return <CloudMoon className={`${className} text-indigo-600 shrink-0`} aria-hidden="true" />;
-    case 'FULL_DAY':
-      return <Clock className={`${className} text-[#7359B4] shrink-0`} aria-hidden="true" />;
     case 'SPECIAL':
+      return <MoonStar className={`${className} text-fuchsia-700 shrink-0`} aria-hidden="true" />;
+    case 'FULL_DAY':
     default:
-      return <Sparkles className={`${className} text-fuchsia-700 shrink-0`} aria-hidden="true" />;
+      return <Clock className={`${className} text-[#7359B4] shrink-0`} aria-hidden="true" />;
   }
 }
 
@@ -295,7 +299,8 @@ function buildDatesFromRange(
   return result;
 }
 
-export function ShiftsView() {
+export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
+  const canEditShifts = userRole === 'ADMIN' || userRole === 'RESPONSIBLE_STAFF';
   const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
 
   // แท็บหลัก: ตารางเวร (ROSTER) | จัดเวร/เพิ่มเวรใหม่ (ASSIGN_WORKSPACE) | แม่แบบกะทำงาน (TEMPLATES)
@@ -420,15 +425,156 @@ export function ShiftsView() {
   );
 
   // =========================================================================
-  // Quick Single-Person Cell Modal (คลิกช่องวันที่ของบุคลากร 1 คน จัดการทันที)
+  // Quick Single-Person Cell Modal (คลิกวันที่ -> โหลดกะจริง -> ติ๊กกะ -> บันทึกครั้งเดียว)
   // =========================================================================
   const [quickCellTarget, setQuickCellTarget] = useState<{
     person: any;
     workDate: string;
   } | null>(null);
-  const [quickCellSelectedShiftId, setQuickCellSelectedShiftId] = useState<number>(0);
+  const [quickCellLoading, setQuickCellLoading] = useState(false);
+  const [quickCellLoadError, setQuickCellLoadError] = useState<string | null>(null);
+  const [quickCellData, setQuickCellData] = useState<{
+    canEdit: boolean;
+    person: {
+      person_id: string;
+      full_name: string;
+      department_name: string;
+      personnel_type_code: string;
+      personnel_type_name: string;
+    };
+    workDate: string;
+    effectiveState: string;
+    effectiveShifts: Array<{
+      identityKey: string;
+      assignmentId: number | null;
+      templateId: number | null;
+      shiftCode: string;
+      shiftName: string;
+      shiftCategory: string;
+      workDate: string;
+      startTime: string;
+      endTime: string;
+      endDate: string;
+      isCrossMidnight: number;
+      source: 'ASSIGNMENT' | 'DEFAULT_IMPLICIT';
+      isSpecialAssignment: boolean;
+      specialReason: 'UNMATCHED_TEMPLATE' | 'DUPLICATE_TEMPLATE' | null;
+    }>;
+    availableTemplates: Array<{
+      id: number;
+      shiftCode: string;
+      shiftName: string;
+      shiftCategory: string;
+      startTime: string;
+      endTime: string;
+      graceMinutes: number;
+      cutoffTime: string;
+      isCrossMidnight: number;
+    }>;
+    selectedTemplateIds: number[];
+    dailyOverride: {
+      overrideState: string;
+      reason: string | null;
+      updatedBy: string;
+      updatedAt: string | null;
+    } | null;
+    clearedAll: boolean;
+    defaultRule: {
+      personnelTypeCode: string;
+      personnelTypeName: string;
+      defaultStartTime: string;
+      defaultEndTime: string;
+      defaultGraceMinutes: number;
+      defaultCutoffTime: string;
+      isActive: number;
+    } | null;
+    carryoverFromPrevDay: Array<{
+      assignmentId: number | null;
+      shiftCode: string;
+      shiftName: string;
+      workDate: string;
+      startTime: string;
+      endTime: string;
+      endDate: string;
+      isCrossMidnight: number;
+      noticeText: string;
+    }>;
+    nextDayShifts: Array<{
+      shiftCode: string;
+      shiftName: string;
+      workDate: string;
+      startTime: string;
+      endTime: string;
+      endDate: string;
+      isCrossMidnight: number;
+    }>;
+    specialExistingAssignments: Array<{
+      identityKey: string;
+      assignmentId: number | null;
+      templateId: number | null;
+      shiftCode: string;
+      shiftName: string;
+      startTime: string;
+      endTime: string;
+      isCrossMidnight: number;
+      specialReason: 'UNMATCHED_TEMPLATE' | 'DUPLICATE_TEMPLATE' | null;
+    }>;
+  } | null>(null);
+  const [quickCellSelectedIds, setQuickCellSelectedIds] = useState<number[]>([]);
+  const [quickCellKeepSpecialIds, setQuickCellKeepSpecialIds] = useState<number[]>([]);
+  const [quickCellPreviewLoading, setQuickCellPreviewLoading] = useState(false);
+  const [quickCellPreview, setQuickCellPreview] = useState<{
+    canProceed: boolean;
+    hasChanges: boolean;
+    willClearAll: boolean;
+    conflicts: Array<{
+      code: string;
+      message: string;
+    }>;
+    existingEffectiveShifts: Array<{
+      shiftCode: string;
+      shiftName: string;
+      startTime: string;
+      endTime: string;
+      isCrossMidnight: number;
+      source: string;
+    }>;
+    shiftsToKeep: Array<{
+      shiftCode: string;
+      shiftName: string;
+      startTime: string;
+      endTime: string;
+      isCrossMidnight: number;
+    }>;
+    shiftsToAdd: Array<{
+      shiftCode: string;
+      shiftName: string;
+      startTime: string;
+      endTime: string;
+      isCrossMidnight: number;
+    }>;
+    shiftsToRemove: Array<{
+      shiftCode: string;
+      shiftName: string;
+      startTime: string;
+      endTime: string;
+      isCrossMidnight: number;
+    }>;
+    resultingShifts: Array<{
+      shiftCode: string;
+      shiftName: string;
+      startTime: string;
+      endTime: string;
+      isCrossMidnight: number;
+      source: 'EXISTING' | 'DEFAULT_IMPLICIT' | 'NEW';
+    }>;
+  } | null>(null);
+  const [quickCellConfirmStep, setQuickCellConfirmStep] = useState(false);
+  const [quickCellError, setQuickCellError] = useState<string | null>(null);
   const [quickCellBusy, setQuickCellBusy] = useState(false);
   const [quickCellReason, setQuickCellReason] = useState('');
+  const quickCellLoadSeqRef = useRef(0);
+  const quickCellSubmitLockRef = useRef(false);
 
   // =========================================================================
   // นำเข้าตารางเวรจากไฟล์ Excel (.xlsx)
@@ -496,9 +642,6 @@ export function ShiftsView() {
           const kept = prev.filter((id) => validIds.has(id));
           return kept.length > 0 ? kept : [Number(loadedShifts[0].id)];
         });
-        setQuickCellSelectedShiftId((prev) =>
-          prev && validIds.has(Number(prev)) ? prev : Number(loadedShifts[0].id)
-        );
       }
     } catch (err) {
       if (err instanceof ApiClientError) {
@@ -558,10 +701,10 @@ export function ShiftsView() {
     });
   }, [assignments, statusFilter, departmentFilter, shiftFilter, searchText]);
 
-  // จัดกลุ่มตารางเวรตาม (person_id -> work_date -> รายการเวร)
+  // จัดกลุ่มตารางเวรจริงทั้งหมด (ไม่ถูกตัดออกด้วยตัวกรอง) เพื่อแสดง Icon-Only บนปฏิทินได้ถูกต้องครบถ้วน
   const assignmentsByPersonAndDate = useMemo(() => {
     const map = new Map<string, Map<string, any[]>>();
-    for (const a of filteredAssignments) {
+    for (const a of assignments) {
       const pid = String(a.person_id ?? '').trim();
       const wDate = String(a.work_date ?? '').slice(0, 10);
       let dateMap = map.get(pid);
@@ -574,7 +717,7 @@ export function ShiftsView() {
       dateMap.set(wDate, list);
     }
     return map;
-  }, [filteredAssignments]);
+  }, [assignments]);
 
   // แผนที่ค้นหาสถานะ Override รายวัน (person_id::work_date -> override row)
   const dailyOverrideByPersonDateMap = useMemo(() => {
@@ -680,55 +823,254 @@ export function ShiftsView() {
     [assignmentsByPersonAndDate, dailyOverrideByPersonDateMap, findDefaultRuleForPerson]
   );
 
-  // เปิด Quick Single-Person Cell Modal ทันทีเมื่อคลิกช่องวันที่ของบุคลากร
-  function openQuickCellModal(person: any, workDate: string) {
-    setQuickCellTarget({ person, workDate });
+  // ปิด Quick Daily Shift Cell Modal และรีเซ็ตค่าทุกอย่างไม่ให้ค้างไปรอบถัดไป
+  function closeQuickCellModal() {
+    if (quickCellBusy) return;
+    quickCellLoadSeqRef.current += 1;
+    setQuickCellTarget(null);
+    setQuickCellData(null);
+    setQuickCellSelectedIds([]);
+    setQuickCellKeepSpecialIds([]);
+    setQuickCellPreview(null);
+    setQuickCellConfirmStep(false);
+    setQuickCellLoadError(null);
+    setQuickCellError(null);
     setQuickCellReason('');
-    if (shifts.length > 0 && !quickCellSelectedShiftId) {
-      setQuickCellSelectedShiftId(Number(shifts[0].id));
-    }
+    setQuickCellLoading(false);
+    setQuickCellPreviewLoading(false);
   }
 
-  // ดำเนินการจัดการเวรรายช่อง (เพิ่มกะ / เปลี่ยนกะ / ลบกะเช้า / ลบกะบ่าย / ลบกะทั้งหมด / คืนค่ากะเริ่มต้น)
-  async function handleQuickCellAction(
-    action:
-      | 'ADD_SHIFT'
-      | 'REPLACE_SHIFTS'
-      | 'REMOVE_MORNING'
-      | 'REMOVE_AFTERNOON'
-      | 'CLEAR_ALL_SHIFTS'
-      | 'RESTORE_DEFAULT',
-    explicitShiftId?: number
-  ) {
-    if (!quickCellTarget) return;
+  // เปิด Quick Daily Shift Cell Modal และโหลดสถานะจริงล่าสุดจาก Backend ทันที
+  function openQuickCellModal(person: any, workDate: string) {
+    const seq = quickCellLoadSeqRef.current + 1;
+    quickCellLoadSeqRef.current = seq;
+
+    // ล้างค่าค้างจากการเปิดครั้งก่อนทั้งหมดก่อนเริ่มโหลดใหม่
+    setQuickCellTarget({ person, workDate });
+    setQuickCellData(null);
+    setQuickCellSelectedIds([]);
+    setQuickCellKeepSpecialIds([]);
+    setQuickCellPreview(null);
+    setQuickCellConfirmStep(false);
+    setQuickCellLoadError(null);
+    setQuickCellError(null);
+    setQuickCellReason('');
+    setQuickCellLoading(true);
+
+    const pid = String(person.person_id ?? '').trim();
+    apiRequest(
+      `/shift-assignments/daily-cell?personId=${encodeURIComponent(pid)}&workDate=${encodeURIComponent(workDate)}`
+    )
+      .then((res) => {
+        if (quickCellLoadSeqRef.current !== seq) return;
+        setQuickCellData(res);
+        setQuickCellSelectedIds(Array.isArray(res.selectedTemplateIds) ? res.selectedTemplateIds.map(Number) : []);
+        const specialIds = Array.isArray(res.specialExistingAssignments)
+          ? res.specialExistingAssignments
+              .map((s: any) => Number(s.assignmentId))
+              .filter((id: number) => id > 0)
+          : [];
+        setQuickCellKeepSpecialIds(specialIds);
+      })
+      .catch((err) => {
+        if (quickCellLoadSeqRef.current !== seq) return;
+        if (err instanceof ApiClientError) {
+          setQuickCellLoadError(err.message);
+        } else {
+          setQuickCellLoadError('ไม่สามารถโหลดข้อมูลกะทำงานล่าสุดจากระบบได้ กรุณาลองใหม่อีกครั้ง');
+        }
+      })
+      .finally(() => {
+        if (quickCellLoadSeqRef.current === seq) {
+          setQuickCellLoading(false);
+        }
+      });
+  }
+
+  function toggleQuickCellTemplate(templateId: number) {
+    if (!canEditShifts || quickCellBusy || quickCellLoading || !quickCellData) return;
+    const idNum = Number(templateId);
+    setQuickCellConfirmStep(false);
+    setQuickCellError(null);
+    setQuickCellSelectedIds((prev) =>
+      prev.includes(idNum) ? prev.filter((id) => id !== idNum) : [...prev, idNum]
+    );
+  }
+
+  function toggleQuickCellSpecialAssignment(assignmentId: number) {
+    if (!canEditShifts || quickCellBusy || quickCellLoading || !quickCellData) return;
+    const idNum = Number(assignmentId);
+    setQuickCellConfirmStep(false);
+    setQuickCellError(null);
+    setQuickCellKeepSpecialIds((prev) =>
+      prev.includes(idNum) ? prev.filter((id) => id !== idNum) : [...prev, idNum]
+    );
+  }
+
+  // ตรวจสอบเวลาทับซ้อนฝั่ง Client แบบทันที (Half-open [start, end) รวมวันก่อนหน้าและวันถัดไป)
+  const quickCellClientConflicts = useMemo(() => {
+    if (!quickCellData) return [] as string[];
+    const workDate = quickCellData.workDate;
+    const selectedTemplates = quickCellData.availableTemplates.filter((t) =>
+      quickCellSelectedIds.includes(Number(t.id))
+    );
+    const keptSpecials = (quickCellData.specialExistingAssignments || []).filter(
+      (s) => s.assignmentId !== null && quickCellKeepSpecialIds.includes(Number(s.assignmentId))
+    );
+
+    const activeIntervals = [
+      ...selectedTemplates.map((t) => ({
+        label: `${formatCleanShiftName(t.shiftName)} (${t.startTime}–${t.endTime} น.)`,
+        iv: computeClientShiftInterval(workDate, t.startTime, t.endTime, t.isCrossMidnight),
+      })),
+      ...keptSpecials.map((s) => ({
+        label: `${formatCleanShiftName(s.shiftName)} (${s.startTime}–${s.endTime} น.)`,
+        iv: computeClientShiftInterval(workDate, s.startTime, s.endTime, s.isCrossMidnight),
+      })),
+    ];
+
+    const msgs: string[] = [];
+    for (let i = 0; i < activeIntervals.length; i++) {
+      for (let j = i + 1; j < activeIntervals.length; j++) {
+        if (intervalsOverlapHalfOpen(activeIntervals[i].iv, activeIntervals[j].iv)) {
+          msgs.push(
+            `ช่วงเวลาทับซ้อนภายในวัน: ${activeIntervals[i].label} ทับซ้อนกับ ${activeIntervals[j].label}`
+          );
+        }
+      }
+    }
+    for (const cur of activeIntervals) {
+      for (const prev of quickCellData.carryoverFromPrevDay || []) {
+        const prevIv = computeClientShiftInterval(
+          prev.workDate,
+          prev.startTime,
+          prev.endTime,
+          prev.isCrossMidnight
+        );
+        if (intervalsOverlapHalfOpen(cur.iv, prevIv)) {
+          msgs.push(
+            `เวลาทับซ้อนกับกะข้ามวันจากวันก่อนหน้า: ${cur.label} ทับซ้อนกับ ${formatCleanShiftName(prev.shiftName)} (เริ่ม ${formatThaiDate(prev.workDate)} ${prev.startTime}–${prev.endTime} น.)`
+          );
+        }
+      }
+      for (const nxt of quickCellData.nextDayShifts || []) {
+        const nxtIv = computeClientShiftInterval(
+          nxt.workDate,
+          nxt.startTime,
+          nxt.endTime,
+          nxt.isCrossMidnight
+        );
+        if (intervalsOverlapHalfOpen(cur.iv, nxtIv)) {
+          msgs.push(
+            `เวลาทับซ้อนกับกะของวันถัดไป: ${cur.label} ทับซ้อนกับ ${formatCleanShiftName(nxt.shiftName)} (${formatThaiDate(nxt.workDate)} ${nxt.startTime}–${nxt.endTime} น.)`
+          );
+        }
+      }
+    }
+    return msgs;
+  }, [quickCellData, quickCellSelectedIds, quickCellKeepSpecialIds]);
+
+  // เรียก Backend Synchronize Preview ทุกครั้งที่ Checkbox เปลี่ยน เพื่อตรวจสอบ Conflict และ Diff ที่แม่นยำ 100%
+  useEffect(() => {
+    if (!quickCellTarget || !quickCellData || quickCellLoading || !canEditShifts) {
+      setQuickCellPreview(null);
+      setQuickCellPreviewLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setQuickCellPreviewLoading(true);
+
+    apiRequest('/shift-assignments/daily-cell-sync-preview', {
+      method: 'POST',
+      body: JSON.stringify({
+        personId: quickCellData.person.person_id,
+        workDate: quickCellData.workDate,
+        selectedTemplateIds: quickCellSelectedIds,
+        keepSpecialAssignmentIds: quickCellKeepSpecialIds,
+      }),
+    })
+      .then((res) => {
+        if (!cancelled) {
+          setQuickCellPreview(res);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setQuickCellPreview(null);
+          if (err instanceof ApiClientError) {
+            setQuickCellError(err.message);
+          } else {
+            setQuickCellError('ไม่สามารถตรวจสอบสรุปการเปลี่ยนแปลงและความทับซ้อนของกะได้');
+          }
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setQuickCellPreviewLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    quickCellTarget,
+    quickCellData,
+    quickCellLoading,
+    quickCellSelectedIds,
+    quickCellKeepSpecialIds,
+    canEditShifts,
+  ]);
+
+  // กด "ยืนยันบันทึก" -> ซิงค์ Selected Shifts เป็นสถานะสุดท้ายของวันใน Transaction เดียว (ป้องกัน Double Submit)
+  async function handleConfirmQuickCellSync() {
+    if (!quickCellTarget || !quickCellData || !canEditShifts) return;
+    if (quickCellSubmitLockRef.current || quickCellBusy) return;
+    if (quickCellLoadError) return;
+    if (quickCellClientConflicts.length > 0 || (quickCellPreview && !quickCellPreview.canProceed)) {
+      setQuickCellError('พบช่วงเวลาทับซ้อน ไม่สามารถบันทึกได้');
+      return;
+    }
+
+    quickCellSubmitLockRef.current = true;
     setQuickCellBusy(true);
+    setQuickCellError(null);
     setError(null);
     try {
-      const targetShiftId = explicitShiftId || quickCellSelectedShiftId;
-      const body: Record<string, any> = {
-        personId: String(quickCellTarget.person.person_id).trim(),
-        workDate: quickCellTarget.workDate,
-        action,
-        reason: quickCellReason.trim() || undefined,
-      };
-      if (action === 'ADD_SHIFT') {
-        body.shiftId = Number(targetShiftId);
-      } else if (action === 'REPLACE_SHIFTS') {
-        body.shiftIds = [Number(targetShiftId)];
-      }
-      const res = await apiRequest('/shift-assignments/daily-cell-action', {
+      const res = await apiRequest('/shift-assignments/daily-cell-sync', {
         method: 'POST',
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          personId: quickCellData.person.person_id,
+          workDate: quickCellData.workDate,
+          selectedTemplateIds: quickCellSelectedIds,
+          keepSpecialAssignmentIds: quickCellKeepSpecialIds,
+          reason: quickCellReason.trim() || undefined,
+        }),
       });
-      setNotice(res.message || 'อัปเดตตารางเวรสำเร็จ');
+      setNotice(res.message || 'บันทึกตารางเวรสำเร็จ');
+      // ปิด Modal และรีเฟรชตารางเวรทันทีเมื่อบันทึกสำเร็จ
+      quickCellLoadSeqRef.current += 1;
+      setQuickCellTarget(null);
+      setQuickCellData(null);
+      setQuickCellSelectedIds([]);
+      setQuickCellKeepSpecialIds([]);
+      setQuickCellPreview(null);
+      setQuickCellConfirmStep(false);
+      setQuickCellReason('');
       await loadData();
     } catch (err) {
+      // บันทึกไม่สำเร็จ: ไม่ปิด Modal, รักษาค่าที่ผู้ใช้เลือกไว้เพื่อแก้ไข, ไม่แสดงข้อความสำเร็จ
       if (err instanceof ApiClientError) {
+        setQuickCellError(err.message);
         setError({ code: err.code, message: err.message, requestId: err.requestId });
       } else {
-        setError({ message: 'ไม่สามารถอัปเดตตารางเวรในช่องที่เลือกได้' });
+        setQuickCellError('ไม่สามารถบันทึกตารางเวรได้ กรุณาตรวจสอบและลองใหม่อีกครั้ง');
+        setError({ message: 'ไม่สามารถบันทึกตารางเวรได้ กรุณาตรวจสอบและลองใหม่อีกครั้ง' });
       }
+      setQuickCellConfirmStep(false);
     } finally {
+      quickCellSubmitLockRef.current = false;
       setQuickCellBusy(false);
     }
   }
@@ -2016,25 +2358,25 @@ export function ShiftsView() {
                   </span>
                   <span className="inline-flex items-center gap-1">
                     <Clock className="w-3.5 h-3.5 text-[#7359B4]" />
-                    <span>ทั้งวัน</span>
+                    <span>กะอื่น/ทั้งวัน</span>
                   </span>
                   <span className="inline-flex items-center gap-1">
-                    <Sparkles className="w-3.5 h-3.5 text-fuchsia-700" />
-                    <span>กะพิเศษ</span>
+                    <MoonStar className="w-3.5 h-3.5 text-fuchsia-700" />
+                    <span>กะพิเศษข้ามวัน</span>
                   </span>
                   <span className="text-slate-300" aria-hidden="true">|</span>
                   <span className="inline-flex items-center gap-1.5">
                     <span className="w-5 h-5 rounded-md border border-dashed border-emerald-400 bg-emerald-50/70 inline-flex items-center justify-center">
                       <Sun className="w-3 h-3 text-amber-600" />
                     </span>
-                    <span>กะเช้าเริ่มต้น (อัตโนมัติ)</span>
+                    <span>กรอบเส้นประ: กะเริ่มต้นอัตโนมัติ</span>
                   </span>
                   <span className="inline-flex items-center gap-1.5">
                     <span className="relative w-5 h-5 rounded-md border border-[#8B73C7] bg-[#F3EEFC] inline-flex items-center justify-center">
                       <Sun className="w-3 h-3 text-amber-600" />
                       <span className="w-1.5 h-1.5 rounded-full bg-[#7359B4] absolute -top-0.5 -right-0.5" />
                     </span>
-                    <span>กะที่เจ้าหน้าที่แก้ไข/กำหนดเอง</span>
+                    <span>กรอบทึบ+จุดมุมขวา: กะที่เจ้าหน้าที่กำหนดเอง</span>
                   </span>
                   <span className="inline-flex items-center gap-1.5">
                     <span className="font-mono font-bold text-slate-400 px-1">—</span>
@@ -2293,46 +2635,98 @@ export function ShiftsView() {
               มุมมองที่ 1.2: ตารางเวรรายสัปดาห์ (WEEKLY ROSTER GRID)
              ================================================================= */}
           {rosterViewMode === 'WEEKLY_GRID' && (
-            <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-              <div className="px-4 sm:px-5 py-3.5 bg-violet-50/50 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div>
-                  <h2 className="text-[16px] font-bold text-slate-900">
-                    ตารางเวรรายสัปดาห์ · {activeWeekObj.label}
-                  </h2>
-                  <p className="text-[12.5px] text-slate-600">
-                    แสดงรายละเอียดชื่อกะทำงาน เวลาเริ่ม–เลิกงาน และสถานะไม่มีเวรแบบเต็มช่อง อ่านง่ายสำหรับตรวจเวรรายสัปดาห์
-                  </p>
+            <div className="bg-white border border-[#E7E2F0] rounded-xl overflow-hidden">
+              <div className="px-4 sm:px-5 py-3.5 bg-[#FAF9FD] border-b border-[#E7E2F0] flex flex-col gap-2.5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h2 className="text-[16px] font-bold text-[#273244]">
+                      ตารางเวรรายสัปดาห์ · {activeWeekObj.label}
+                    </h2>
+                    <p className="text-[12.5px] text-slate-600">
+                      แสดงเวรแบบ Icon กะทัดรัด (แสดงหลาย Icon ในวันที่มีหลายกะ) วางเมาส์เพื่อดูเวลาจริง หรือคลิกช่องเพื่อเปิดดูรายละเอียดและแก้ไข
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      disabled={selectedWeekIndex <= 0}
+                      onClick={() => setSelectedWeekIndex((w) => Math.max(0, w - 1))}
+                      className="h-8 px-3 rounded-lg border border-[#D8CDF2] bg-white hover:bg-[#F3EEFC] disabled:opacity-40 text-[#5B41A1] text-[12.5px] font-semibold inline-flex items-center gap-1"
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                      <span>สัปดาห์ก่อน</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={selectedWeekIndex >= monthBounds.weeks.length - 1}
+                      onClick={() =>
+                        setSelectedWeekIndex((w) => Math.min(monthBounds.weeks.length - 1, w + 1))
+                      }
+                      className="h-8 px-3 rounded-lg border border-[#D8CDF2] bg-white hover:bg-[#F3EEFC] disabled:opacity-40 text-[#5B41A1] text-[12.5px] font-semibold inline-flex items-center gap-1"
+                    >
+                      <span>สัปดาห์ถัดไป</span>
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    disabled={selectedWeekIndex <= 0}
-                    onClick={() => setSelectedWeekIndex((w) => Math.max(0, w - 1))}
-                    className="h-8 px-3 rounded-lg border border-violet-200 bg-white hover:bg-violet-50 disabled:opacity-40 text-violet-900 text-[12.5px] font-semibold inline-flex items-center gap-1"
-                  >
-                    <ChevronLeft className="w-4 h-4" />
-                    <span>สัปดาห์ก่อน</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={selectedWeekIndex >= monthBounds.weeks.length - 1}
-                    onClick={() =>
-                      setSelectedWeekIndex((w) => Math.min(monthBounds.weeks.length - 1, w + 1))
-                    }
-                    className="h-8 px-3 rounded-lg border border-violet-200 bg-white hover:bg-violet-50 disabled:opacity-40 text-violet-900 text-[12.5px] font-semibold inline-flex items-center gap-1"
-                  >
-                    <span>สัปดาห์ถัดไป</span>
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
+                {/* แถบคำอธิบาย Icon เดียวกับตารางรายเดือน */}
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[12px] text-slate-700 pt-1 border-t border-[#E7E2F0]/70">
+                  <span className="inline-flex items-center gap-1">
+                    <Sun className="w-3.5 h-3.5 text-amber-600" />
+                    <span>กะเช้า</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <Sunset className="w-3.5 h-3.5 text-orange-600" />
+                    <span>กะบ่าย</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <Moon className="w-3.5 h-3.5 text-indigo-700" />
+                    <span>กะดึก</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <Sunrise className="w-3.5 h-3.5 text-[#7359B4]" />
+                    <span>เช้า–บ่าย</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <CloudMoon className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>บ่าย–ดึก</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <Clock className="w-3.5 h-3.5 text-[#7359B4]" />
+                    <span>กะอื่น/ทั้งวัน</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1">
+                    <MoonStar className="w-3.5 h-3.5 text-fuchsia-700" />
+                    <span>กะพิเศษข้ามวัน</span>
+                  </span>
+                  <span className="text-slate-300" aria-hidden="true">|</span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="w-5 h-5 rounded-md border border-dashed border-emerald-400 bg-emerald-50/70 inline-flex items-center justify-center">
+                      <Sun className="w-3 h-3 text-amber-600" />
+                    </span>
+                    <span>กรอบเส้นประ: กะเริ่มต้นอัตโนมัติ</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="relative w-5 h-5 rounded-md border border-[#8B73C7] bg-[#F3EEFC] inline-flex items-center justify-center">
+                      <Sun className="w-3 h-3 text-amber-600" />
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#7359B4] absolute -top-0.5 -right-0.5" />
+                    </span>
+                    <span>กรอบทึบ+จุดมุมขวา: กะที่เจ้าหน้าที่กำหนดเอง</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="font-mono font-bold text-slate-400 px-1">—</span>
+                    <span>ไม่มีเวร</span>
+                  </span>
                 </div>
               </div>
 
               <div className="overflow-x-auto max-h-[680px]">
                 <table className="w-full border-collapse text-left text-[13px]">
                   <thead className="sticky top-0 z-20">
-                    <tr className="border-b border-slate-200 bg-slate-50 text-slate-700">
-                      <th className="sticky left-0 z-30 bg-slate-50 py-3 px-4 font-semibold min-w-[230px] max-w-[260px] border-r border-slate-200">
+                    <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
+                      <th className="sticky left-0 z-30 bg-[#FAF9FD] py-2.5 px-4 font-semibold min-w-[220px] max-w-[255px] border-r border-[#E7E2F0]">
                         บุคลากร / กลุ่มงาน ({filteredPersonnelForRoster.length} คน)
                       </th>
                       {activeWeekObj.dates.map((d) => {
@@ -2340,16 +2734,16 @@ export function ShiftsView() {
                         return (
                           <th
                             key={d.dateStr}
-                            className={`py-2.5 px-3 text-center min-w-[138px] border-r border-slate-200/80 ${
+                            className={`py-2.5 px-2 text-center min-w-[92px] border-r border-[#E7E2F0]/80 ${
                               isToday
-                                ? 'bg-violet-100 text-violet-950'
+                                ? 'bg-[#EDE6FA] text-[#5B41A1]'
                                 : d.isWeekend
-                                  ? 'bg-slate-100 text-slate-700'
-                                  : 'bg-slate-50 text-slate-700'
+                                  ? 'bg-slate-100/90 text-slate-700'
+                                  : 'bg-[#FAF9FD] text-[#273244]'
                             }`}
                           >
-                            <div className="text-[12px] font-semibold">{d.weekdayFull}</div>
-                            <div className="text-[12.5px] font-mono tabular-nums text-slate-600">
+                            <div className="text-[11.5px] font-semibold">{d.weekdayFull}</div>
+                            <div className="text-[12px] font-mono tabular-nums text-slate-600">
                               {formatThaiDate(d.dateStr)}
                             </div>
                           </th>
@@ -2357,7 +2751,7 @@ export function ShiftsView() {
                       })}
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-200">
+                  <tbody className="divide-y divide-[#E7E2F0]/80">
                     {loading ? (
                       <tr>
                         <td
@@ -2377,105 +2771,95 @@ export function ShiftsView() {
                       pagedPersonnelForRoster.map((person) => {
                         const pid = String(person.person_id).trim();
                         return (
-                          <tr key={pid} className="hover:bg-violet-50/25 transition-colors group">
-                            <td className="sticky left-0 z-10 bg-white group-hover:bg-violet-50/40 py-3 px-4 border-r border-slate-200 align-top">
-                              <div className="font-bold text-[13.5px] text-slate-900">
+                          <tr key={pid} className="hover:bg-[#FAF9FD] transition-colors group">
+                            <td className="sticky left-0 z-10 bg-white group-hover:bg-[#FAF9FD] py-2.5 px-4 border-r border-[#E7E2F0] align-middle">
+                              <div className="font-bold text-[13.5px] text-[#273244] truncate max-w-[235px]">
                                 {person.full_name}
                               </div>
-                              <div className="text-[12px] text-slate-500 mt-0.5">
+                              <div className="text-[12px] text-slate-500 mt-0.5 truncate max-w-[235px]">
                                 <span className="font-mono">{pid}</span> · {person.department_name}
                               </div>
+                              {person.personnel_type_name && (
+                                <div className="text-[10.5px] text-[#7359B4] font-medium truncate max-w-[235px]">
+                                  {person.personnel_type_name}
+                                </div>
+                              )}
                             </td>
 
                             {activeWeekObj.dates.map((d) => {
                               const cellEff = getEffectiveCellState(person, d.dateStr);
+                              const vm = buildCompactMonthlyCellViewModel(
+                                cellEff,
+                                formatThaiDate(d.dateStr),
+                                2
+                              );
+                              const isToday = d.dateStr === initialBkk.todayYmd;
                               return (
                                 <td
                                   key={d.dateStr}
-                                  className={`p-2 border-r border-slate-200/70 align-top ${
-                                    d.isWeekend ? 'bg-slate-50/75' : ''
+                                  className={`p-1.5 border-r border-[#E7E2F0]/70 align-middle text-center ${
+                                    isToday
+                                      ? 'bg-[#F3EEFC]/35'
+                                      : d.isWeekend
+                                        ? 'bg-slate-50/80'
+                                        : ''
                                   }`}
                                 >
-                                  <div className="flex flex-col gap-1.5 min-h-[64px]">
-                                    {cellEff.mode === 'CLEARED_ALL_SHIFTS' ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => openQuickCellModal(person, d.dateStr)}
-                                        className="w-full h-14 rounded-lg border border-dashed border-amber-300 bg-amber-50/60 hover:bg-amber-100/70 text-amber-900 flex flex-col items-center justify-center gap-0.5 transition-colors"
-                                      >
-                                        <span className="text-[12px] font-bold">ไม่มีเวร (ลบเวรแล้ว)</span>
-                                        <span className="text-[11px] font-semibold text-amber-800 inline-flex items-center gap-1">
-                                          คลิกเพื่อเพิ่มเวรหรือคืนค่าเริ่มต้น
+                                  {vm.kind === 'EMPTY_DASH' ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => openQuickCellModal(person, d.dateStr)}
+                                      title={vm.tooltipText}
+                                      aria-label={vm.ariaLabel}
+                                      className={`w-full h-11 rounded-lg flex items-center justify-center transition-colors ${
+                                        vm.isClearedByStaff
+                                          ? 'border border-dashed border-amber-300 bg-amber-50/70 text-amber-700 hover:bg-amber-100/80'
+                                          : 'border border-transparent text-slate-400 hover:border-[#8B73C7]/60 hover:bg-[#F3EEFC]/60 hover:text-[#7359B4]'
+                                      }`}
+                                    >
+                                      <span className="font-mono text-[15px] font-semibold leading-none">
+                                        —
+                                      </span>
+                                    </button>
+                                  ) : vm.kind === 'DEFAULT' ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => openQuickCellModal(person, d.dateStr)}
+                                      title={vm.tooltipText}
+                                      aria-label={vm.ariaLabel}
+                                      className="w-full h-11 rounded-lg border border-dashed border-emerald-400/90 bg-emerald-50/65 hover:bg-emerald-100/80 flex items-center justify-center transition-colors"
+                                    >
+                                      {renderShiftIcon(vm.visibleIcons[0].iconKind, 'w-4.5 h-4.5')}
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="button"
+                                      onClick={() => openQuickCellModal(person, d.dateStr)}
+                                      title={vm.tooltipText}
+                                      aria-label={vm.ariaLabel}
+                                      className="relative w-full h-11 rounded-lg border border-[#8B73C7] bg-[#F3EEFC] hover:bg-[#E7DDF8] flex items-center justify-center gap-1 px-1.5 transition-colors"
+                                    >
+                                      <span
+                                        className="w-1.5 h-1.5 rounded-full bg-[#7359B4] absolute top-1.5 right-1.5"
+                                        aria-hidden="true"
+                                      />
+                                      <div className="flex items-center justify-center gap-1">
+                                        {vm.visibleIcons.map((iconItem) => (
+                                          <span key={iconItem.id} className="inline-flex">
+                                            {renderShiftIcon(
+                                              iconItem.iconKind,
+                                              vm.visibleIcons.length > 2 ? 'w-4 h-4' : 'w-4.5 h-4.5'
+                                            )}
+                                          </span>
+                                        ))}
+                                      </div>
+                                      {vm.overflowCount > 0 && (
+                                        <span className="text-[11px] font-mono font-bold text-[#5B41A1] leading-none">
+                                          +{vm.overflowCount}
                                         </span>
-                                      </button>
-                                    ) : cellEff.mode === 'DEFAULT_FROM_TYPE' && cellEff.defaultRule ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => openQuickCellModal(person, d.dateStr)}
-                                        className="w-full text-left p-2 rounded-lg border border-emerald-200 bg-emerald-50/70 hover:bg-emerald-100/80 text-emerald-950 text-[12px] space-y-0.5 transition-colors"
-                                      >
-                                        <div className="font-bold leading-snug">
-                                          กะเช้า (ค่าเริ่มต้นตามประเภท)
-                                        </div>
-                                        <div className="font-mono text-[11.5px] font-semibold tabular-nums">
-                                          {cellEff.defaultRule.default_start_time || '08:00'}–
-                                          {cellEff.defaultRule.default_end_time || '16:00'} น.
-                                        </div>
-                                        <div className="text-[10.5px] text-emerald-800">
-                                          ผ่อนผัน {cellEff.defaultRule.default_grace_minutes ?? 15} นาที · คลิกเพื่อแก้ไข
-                                        </div>
-                                      </button>
-                                    ) : cellEff.mode === 'CUSTOM_ASSIGNED' ? (
-                                      <>
-                                        {cellEff.activeItems.map((item) => {
-                                          const isCross =
-                                            Number(item.snapshot_is_cross_midnight) === 1;
-                                          return (
-                                            <button
-                                              key={item.id}
-                                              type="button"
-                                              onClick={() => openQuickCellModal(person, d.dateStr)}
-                                              className={`w-full text-left p-2 rounded-lg border text-[12px] space-y-0.5 transition-colors ${
-                                                isCross
-                                                  ? 'bg-blue-50 border-blue-200 text-blue-950 hover:bg-blue-100'
-                                                  : 'bg-violet-50 border-violet-200 text-violet-950 hover:bg-violet-100'
-                                              }`}
-                                            >
-                                              <div className="font-bold leading-snug">
-                                                {formatCleanShiftName(item.snapshot_shift_name)}
-                                              </div>
-                                              <div className="font-mono text-[11.5px] font-semibold tabular-nums">
-                                                {item.snapshot_start_time}–{item.snapshot_end_time} น.
-                                              </div>
-                                              <div className="text-[10.5px] text-slate-500 font-mono">
-                                                รหัส: {item.snapshot_shift_code}
-                                                {isCross ? ' · ข้ามวัน' : ''}
-                                              </div>
-                                            </button>
-                                          );
-                                        })}
-                                        <button
-                                          type="button"
-                                          onClick={() => openQuickCellModal(person, d.dateStr)}
-                                          className="w-full h-6 rounded border border-dashed border-slate-200 text-slate-500 hover:border-violet-400 hover:text-violet-800 hover:bg-violet-50 text-[11px] font-medium inline-flex items-center justify-center gap-1"
-                                        >
-                                          <Plus className="w-3 h-3" />
-                                          <span>จัดการ / เพิ่มกะ</span>
-                                        </button>
-                                      </>
-                                    ) : (
-                                      <button
-                                        type="button"
-                                        onClick={() => openQuickCellModal(person, d.dateStr)}
-                                        className="w-full h-14 rounded-lg border border-dashed border-slate-200 hover:border-violet-400 hover:bg-violet-50/70 text-slate-400 hover:text-violet-800 flex flex-col items-center justify-center gap-0.5 transition-colors"
-                                      >
-                                        <span className="text-[12px] font-medium">ไม่มีเวร</span>
-                                        <span className="text-[11px] font-semibold text-violet-700 inline-flex items-center gap-1">
-                                          <Plus className="w-3.5 h-3.5" /> คลิกเพื่อเพิ่มเวร
-                                        </span>
-                                      </button>
-                                    )}
-                                  </div>
+                                      )}
+                                    </button>
+                                  )}
                                 </td>
                               );
                             })}
@@ -4572,151 +4956,457 @@ export function ShiftsView() {
          ===================================================================== */}
       <SharedModal
         open={Boolean(quickCellTarget)}
-        onClose={() => setQuickCellTarget(null)}
-        kickerText="จัดการเวรรายบุคคลประจำวัน (Quick Daily Shift Cell)"
+        onClose={closeQuickCellModal}
+        kickerText="จัดเวรรายวัน (Quick Daily Shift Cell)"
         title={
           quickCellTarget
             ? `${quickCellTarget.person.full_name} — ${formatThaiDate(quickCellTarget.workDate)}`
-            : 'จัดการเวรรายบุคคล'
+            : 'จัดเวรรายวัน'
         }
         maxWidthClass="max-w-xl"
       >
         {quickCellTarget && (() => {
-          const eff = getEffectiveCellState(quickCellTarget.person, quickCellTarget.workDate);
-          const defRule = eff.defaultRule;
+          const effectiveEditable = canEditShifts && Boolean(quickCellData?.canEdit ?? canEditShifts);
+          const backendConflicts = quickCellPreview?.conflicts?.map((c) => c.message) || [];
+          const allConflictMessages =
+            backendConflicts.length > 0 ? backendConflicts : quickCellClientConflicts;
+          const hasConflicts = allConflictMessages.length > 0;
+          const hasChanges = Boolean(quickCellPreview?.hasChanges);
+          const existingTemplateIdSet = new Set(
+            (quickCellData?.effectiveShifts || [])
+              .filter((e) => !e.isSpecialAssignment && e.templateId !== null)
+              .map((e) => Number(e.templateId))
+          );
+
+          const canProceedToConfirm =
+            effectiveEditable &&
+            !quickCellLoading &&
+            !quickCellLoadError &&
+            !quickCellBusy &&
+            !quickCellPreviewLoading &&
+            !hasConflicts &&
+            Boolean(quickCellPreview) &&
+            hasChanges;
+
           return (
             <div className="space-y-4 text-[13.5px]">
-              {/* ข้อมูลสรุปบุคลากรและสถานะเวรปัจจุบัน */}
-              <div className="p-3.5 rounded-xl bg-violet-50/60 border border-violet-200 space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-600">ชื่อบุคลากร:</span>
-                  <span className="font-bold text-slate-900">
-                    {quickCellTarget.person.full_name} ({quickCellTarget.person.person_id})
-                  </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-600">วันที่ปฏิบัติงาน:</span>
-                  <span className="font-mono font-bold text-violet-950">
+              {/* ส่วนหัว: ชื่อบุคลากร · วันที่ · ประเภทบุคลากร */}
+              <div className="p-3.5 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0] space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="font-bold text-[#273244] text-[14.5px]">
+                      {quickCellData?.person.full_name || quickCellTarget.person.full_name}
+                    </span>{' '}
+                    <span className="font-mono text-[12px] text-slate-500">
+                      ({quickCellData?.person.person_id || quickCellTarget.person.person_id})
+                    </span>
+                  </div>
+                  <span className="font-mono font-bold text-[#5B41A1] bg-[#F3EEFC] border border-[#D8CDF2] px-2.5 py-0.5 rounded-md text-[12.5px]">
                     {formatThaiDate(quickCellTarget.workDate)}
                   </span>
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-600">ประเภทบุคลากร:</span>
-                  <span className="font-semibold text-slate-800">
-                    {quickCellTarget.person.personnel_type_name ||
-                      defRule?.personnel_type_name ||
-                      'ไม่ระบุประเภท'}
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[12.5px] text-slate-600">
+                  <span>
+                    ประเภทบุคลากร:{' '}
+                    <strong className="text-[#273244]">
+                      {quickCellData?.person.personnel_type_name ||
+                        quickCellTarget.person.personnel_type_name ||
+                        'ไม่ระบุประเภท'}
+                    </strong>
                   </span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-600">กะเช้าเริ่มต้นตามประเภท:</span>
-                  <span className="font-mono font-semibold text-emerald-800">
-                    {defRule
-                      ? `กะเช้า (${defRule.default_start_time || '08:00'}–${defRule.default_end_time || '16:00'} น. · สายได้ ${defRule.default_grace_minutes ?? 15} นาที)`
-                      : 'ยังไม่ได้ตั้งค่ากะเริ่มต้น'}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between pt-1 border-t border-violet-200/80">
-                  <span className="text-slate-600">กะปัจจุบันในวันนี้:</span>
-                  <span className="font-bold text-violet-900">
-                    {eff.mode === 'CLEARED_ALL_SHIFTS'
-                      ? 'ไม่มีเวร (ลบเวรทั้งหมดในวันนี้ออกแล้ว)'
-                      : eff.mode === 'CUSTOM_ASSIGNED'
-                        ? eff.activeItems
-                            .map(
-                              (x: any) =>
-                                `${formatCleanShiftName(x.snapshot_shift_name)} (${x.snapshot_start_time}–${x.snapshot_end_time})`
-                            )
-                            .join(', ')
-                        : eff.mode === 'DEFAULT_FROM_TYPE' && defRule
-                          ? `กะเช้าเริ่มต้น (${defRule.default_start_time || '08:00'}–${defRule.default_end_time || '16:00'} น.)`
-                          : 'ไม่มีเวร'}
-                  </span>
+                  {quickCellData && (
+                    <span
+                      className={`text-[11.5px] font-semibold px-2 py-0.5 rounded-md border ${
+                        quickCellData.clearedAll
+                          ? 'bg-amber-50 border-amber-300 text-amber-900'
+                          : quickCellData.effectiveState === 'CUSTOM_ASSIGNED'
+                            ? 'bg-[#F3EEFC] border-[#8B73C7] text-[#5B41A1]'
+                            : 'bg-emerald-50 border-dashed border-emerald-400 text-emerald-900'
+                      }`}
+                    >
+                      {quickCellData.clearedAll
+                        ? 'สถานะ: ไม่มีเวร (ตั้งใจยกเลิกทุกกะ)'
+                        : quickCellData.effectiveState === 'CUSTOM_ASSIGNED'
+                          ? `กำหนดเวรเอง (${quickCellData.effectiveShifts.length} กะ)`
+                          : 'กะเริ่มต้นตามประเภทบุคลากร'}
+                    </span>
+                  )}
                 </div>
               </div>
 
-              {/* เลือกแม่แบบกะสำหรับ เพิ่มกะ หรือ เปลี่ยนกะ */}
-              <div className="p-3.5 rounded-xl bg-white border border-slate-200 space-y-3">
-                <label className="block text-[13px] font-bold text-slate-800">
-                  เลือกแม่แบบกะทำงานที่ต้องการเพิ่มหรือเปลี่ยนแทนที่:
-                </label>
-                <select
-                  aria-label="เลือกแม่แบบกะทำงานสำหรับช่องวันที่นี้"
-                  value={quickCellSelectedShiftId}
-                  onChange={(e) => setQuickCellSelectedShiftId(Number(e.target.value))}
-                  className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-[13.5px] font-semibold text-slate-900 focus:outline-none focus:border-violet-600"
+              {/* สถานะกำลังโหลดจาก Backend */}
+              {quickCellLoading && (
+                <div className="py-10 text-center space-y-2 text-slate-600 bg-[#FAF9FD] rounded-xl border border-[#E7E2F0]">
+                  <RefreshCw className="w-5 h-5 animate-spin mx-auto text-[#7359B4]" />
+                  <div className="text-[13.5px] font-medium">
+                    กำลังโหลดข้อมูลกะทำงานล่าสุดจากระบบ...
+                  </div>
+                </div>
+              )}
+
+              {/* โหลดข้อมูลไม่สำเร็จ -> แจ้ง Error และไม่อนุญาตให้บันทึกข้อมูลที่ไม่สมบูรณ์ */}
+              {!quickCellLoading && quickCellLoadError && (
+                <div
+                  role="alert"
+                  className="p-4 rounded-xl bg-red-50 border border-red-300 text-red-950 space-y-3"
                 >
-                  {shifts.map((s) => (
-                    <option key={s.id} value={Number(s.id)}>
-                      {formatCleanShiftName(s.shift_name)} · {s.start_time}–{s.end_time} น. ({s.shift_code})
-                    </option>
-                  ))}
-                </select>
+                  <div className="font-bold text-red-900 flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 text-red-700 shrink-0" />
+                    <span>โหลดข้อมูลตารางเวรไม่สำเร็จ — ไม่สามารถบันทึกได้</span>
+                  </div>
+                  <p className="text-[13px] text-red-900">{quickCellLoadError}</p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => openQuickCellModal(quickCellTarget.person, quickCellTarget.workDate)}
+                      className="h-9 px-3.5 rounded-lg bg-[#7359B4] hover:bg-[#5F479C] text-white text-[12.5px] font-semibold inline-flex items-center gap-1.5"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>ลองโหลดใหม่</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={closeQuickCellModal}
+                      className="h-9 px-3.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-[12.5px] font-semibold"
+                    >
+                      ปิดหน้าต่าง
+                    </button>
+                  </div>
+                </div>
+              )}
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    disabled={quickCellBusy}
-                    onClick={() => handleQuickCellAction('REPLACE_SHIFTS')}
-                    className="h-10 px-3.5 rounded-lg bg-violet-700 hover:bg-violet-800 text-white font-semibold text-[13px] inline-flex items-center justify-center gap-1.5"
-                  >
-                    <Check className="w-4 h-4" />
-                    <span>บันทึก / เปลี่ยนเป็นกะที่เลือก</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={quickCellBusy}
-                    onClick={() => handleQuickCellAction('ADD_SHIFT')}
-                    className="h-10 px-3.5 rounded-lg border border-violet-300 bg-violet-50 hover:bg-violet-100 text-violet-900 font-semibold text-[13px] inline-flex items-center justify-center gap-1.5"
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>เพิ่มกะที่เลือกควบคู่ในวันนี้</span>
-                  </button>
-                </div>
-              </div>
+              {/* เนื้อหาหลักหลังโหลดข้อมูลสำเร็จ */}
+              {!quickCellLoading && !quickCellLoadError && quickCellData && (
+                <>
+                  {/* กะที่ต่อเนื่องจากวันก่อนหน้า (Read-only Info — ไม่แสดงเป็น Checkbox เพื่อไม่ให้ลบกะวันก่อนหน้าโดยไม่ตั้งใจ) */}
+                  {quickCellData.carryoverFromPrevDay.length > 0 && (
+                    <div className="p-3 rounded-xl bg-indigo-50/80 border border-indigo-200 text-indigo-950 space-y-1.5">
+                      <div className="text-[12.5px] font-bold text-indigo-900 flex items-center gap-1.5">
+                        <Info className="w-4 h-4 text-indigo-700 shrink-0" />
+                        <span>กะที่ต่อเนื่องจากวันก่อนหน้า</span>
+                      </div>
+                      <div className="space-y-1">
+                        {quickCellData.carryoverFromPrevDay.map((co, idx) => {
+                          const iconKind = classifyShiftIconKind({
+                            shiftCode: co.shiftCode,
+                            shiftName: co.shiftName,
+                            startTime: co.startTime,
+                            endTime: co.endTime,
+                            isCrossMidnight: co.isCrossMidnight,
+                          });
+                          return (
+                            <div
+                              key={`${co.shiftCode}-${idx}`}
+                              className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-white/90 border border-indigo-200/80 text-[12.5px]"
+                            >
+                              <div className="flex items-center gap-1.5 font-semibold text-[#273244]">
+                                {renderShiftIcon(iconKind, 'w-3.5 h-3.5')}
+                                <span>{formatCleanShiftName(co.shiftName)}</span>
+                                <span className="font-mono text-[#5B41A1]">
+                                  {co.startTime}–{co.endTime} น.
+                                </span>
+                              </div>
+                              <span className="text-[11.5px] text-indigo-800 font-medium">
+                                กะนี้เริ่มจากวันที่ {formatThaiDate(co.workDate)}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <p className="text-[11.5px] text-indigo-800">
+                        หากต้องการแก้ไขกะข้ามวันข้างต้น กรุณาคลิกที่ช่องวันที่เริ่มต้นของกะนั้น
+                      </p>
+                    </div>
+                  )}
 
-              {/* ปุ่มลัดจัดการกะเช้า / กะบ่าย / ลบกะทั้งหมด (ไม่มีเวร) / คืนค่ากะเริ่มต้น */}
-              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
-                <div className="text-[12.5px] font-bold text-slate-700">
-                  คำสั่งจัดการด่วนสำหรับวันที่ {formatThaiDate(quickCellTarget.workDate)}:
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    disabled={quickCellBusy}
-                    onClick={() => handleQuickCellAction('REMOVE_MORNING')}
-                    className="h-9 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-[12.5px] font-semibold"
-                  >
-                    ลบเฉพาะกะเช้า
-                  </button>
-                  <button
-                    type="button"
-                    disabled={quickCellBusy}
-                    onClick={() => handleQuickCellAction('REMOVE_AFTERNOON')}
-                    className="h-9 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 text-[12.5px] font-semibold"
-                  >
-                    ลบเฉพาะกะบ่าย
-                  </button>
-                  <button
-                    type="button"
-                    disabled={quickCellBusy}
-                    onClick={() => handleQuickCellAction('CLEAR_ALL_SHIFTS')}
-                    className="h-9 px-3 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-red-800 text-[12.5px] font-bold inline-flex items-center justify-center gap-1"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    <span>ลบกะทั้งหมด (ตั้งเป็นไม่มีเวร)</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={quickCellBusy}
-                    onClick={() => handleQuickCellAction('RESTORE_DEFAULT')}
-                    className="h-9 px-3 rounded-lg border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 text-[12.5px] font-bold inline-flex items-center justify-center gap-1"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    <span>คืนค่ากะเริ่มต้น</span>
-                  </button>
-                </div>
-              </div>
+                  {/* ขั้นตอนที่ 1: เลือกกะด้วย Checkbox (คลิกวันที่ -> ติ๊กกะ -> บันทึกครั้งเดียว) */}
+                  {!quickCellConfirmStep ? (
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="font-bold text-[#273244] text-[14px]">
+                          เลือกกะที่ต้องการให้มีในวันนี้
+                        </div>
+                        <span className="font-mono text-[12px] font-bold text-[#5B41A1] bg-[#F3EEFC] border border-[#D8CDF2] px-2 py-0.5 rounded-md tabular-nums">
+                          เลือกอยู่ {quickCellSelectedIds.length + quickCellKeepSpecialIds.length} กะ
+                        </span>
+                      </div>
+
+                      {!effectiveEditable && (
+                        <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 text-slate-600 text-[12px]">
+                          บัญชีของคุณมีสิทธิ์ดูตารางเวรเท่านั้น ไม่สามารถแก้ไขกะทำงานได้
+                        </div>
+                      )}
+
+                      {/* รายการแม่แบบกะทั้งหมดจากฐานข้อมูลจริง */}
+                      <div className="space-y-2 max-h-72 overflow-y-auto pr-0.5">
+                        {quickCellData.availableTemplates.map((tpl) => {
+                          const tid = Number(tpl.id);
+                          const checked = quickCellSelectedIds.includes(tid);
+                          const isCross = Number(tpl.isCrossMidnight) === 1;
+                          const isCurrentlyActive = existingTemplateIdSet.has(tid);
+                          const iconKind = classifyShiftIconKind({
+                            shiftCode: tpl.shiftCode,
+                            shiftName: tpl.shiftName,
+                            shiftCategory: tpl.shiftCategory,
+                            startTime: tpl.startTime,
+                            endTime: tpl.endTime,
+                            isCrossMidnight: isCross,
+                          });
+
+                          return (
+                            <label
+                              key={tid}
+                              className={`p-3 rounded-xl border transition-colors flex items-center gap-3 select-none ${
+                                effectiveEditable ? 'cursor-pointer' : 'cursor-default opacity-85'
+                              } ${
+                                checked
+                                  ? 'bg-[#F3EEFC] border-[#7359B4]'
+                                  : 'bg-white border-[#E7E2F0] hover:border-[#8B73C7]/70'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={!effectiveEditable || quickCellBusy}
+                                onChange={() => toggleQuickCellTemplate(tid)}
+                                className="w-4 h-4 rounded border-slate-300 text-[#7359B4] focus:ring-[#7359B4] shrink-0"
+                              />
+                              {renderShiftIcon(iconKind, 'w-4 h-4')}
+                              <div className="min-w-0 flex-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <span className="font-bold text-[13.5px] text-[#273244] truncate">
+                                    {formatCleanShiftName(tpl.shiftName)}
+                                  </span>
+                                  {isCurrentlyActive && (
+                                    <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded bg-white border border-[#D8CDF2] text-[#5B41A1]">
+                                      กะเดิมวันนี้
+                                    </span>
+                                  )}
+                                </div>
+                                <span className="font-mono font-bold text-[12.5px] text-[#7359B4] tabular-nums shrink-0">
+                                  {tpl.startTime}–{tpl.endTime} น.
+                                  {isCross ? ' (+1 วัน)' : ''}
+                                </span>
+                              </div>
+                            </label>
+                          );
+                        })}
+                      </div>
+
+                      {/* กรณีพิเศษ: รายการ Assignment ที่ซ้ำ Template เดียวกันหรือแม่แบบถูกปิดใช้งาน (Requirement 6.2) */}
+                      {quickCellData.specialExistingAssignments.length > 0 && (
+                        <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-300 space-y-2">
+                          <div className="text-[12px] font-bold text-amber-900">
+                            รายการกะเพิ่มเติมที่มีอยู่เดิมในวันนี้ (จัดการแยกรายการเพื่อความปลอดภัย):
+                          </div>
+                          <div className="space-y-1.5">
+                            {quickCellData.specialExistingAssignments.map((sp) => {
+                              const aid = Number(sp.assignmentId);
+                              const kept = quickCellKeepSpecialIds.includes(aid);
+                              return (
+                                <label
+                                  key={sp.identityKey}
+                                  className="flex items-center gap-2.5 p-2 rounded-lg bg-white border border-amber-200 cursor-pointer text-[12.5px]"
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={kept}
+                                    disabled={!effectiveEditable || quickCellBusy}
+                                    onChange={() => toggleQuickCellSpecialAssignment(aid)}
+                                    className="w-4 h-4 rounded border-amber-400 text-[#7359B4] focus:ring-[#7359B4]"
+                                  />
+                                  <span className="font-semibold text-[#273244]">
+                                    {formatCleanShiftName(sp.shiftName)}
+                                  </span>
+                                  <span className="font-mono text-[#7359B4]">
+                                    {sp.startTime}–{sp.endTime} น.
+                                  </span>
+                                  <span className="font-mono text-[11px] text-slate-500 ml-auto">
+                                    #{aid}
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* ข้อความแนะนำเมื่อเอาติ๊กออกทั้งหมด */}
+                      {effectiveEditable &&
+                        quickCellSelectedIds.length === 0 &&
+                        quickCellKeepSpecialIds.length === 0 &&
+                        !hasConflicts && (
+                          <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-950 text-[12.5px]">
+                            ไม่ได้ติ๊กกะใดไว้ — เมื่อบันทึก ระบบจะกำหนดวันนี้เป็น{' '}
+                            <strong>ไม่มีเวร</strong> และจะไม่สร้างกะเริ่มต้นกลับมาอัตโนมัติ
+                          </div>
+                        )}
+
+                      {/* แจ้งเตือน Conflict หรือ Error */}
+                      {(hasConflicts || quickCellError) && (
+                        <div
+                          role="alert"
+                          className="p-3 rounded-xl bg-red-50 border border-red-300 text-red-950 text-[12.5px] space-y-1.5"
+                        >
+                          <div className="font-bold text-red-900 flex items-center gap-1.5">
+                            <AlertTriangle className="w-4 h-4 text-red-700 shrink-0" />
+                            <span>พบข้อขัดแย้งของเวลาปฏิบัติงาน — ไม่สามารถบันทึกได้</span>
+                          </div>
+                          {allConflictMessages.length > 0 ? (
+                            <ul className="list-disc pl-5 space-y-1 text-red-900">
+                              {allConflictMessages.map((msg, idx) => (
+                                <li key={idx}>{msg}</li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="text-red-900">{quickCellError}</p>
+                          )}
+                        </div>
+                      )}
+
+                      {/* ปุ่มหลักเพียง "บันทึกเวร" และปุ่มรอง "ยกเลิก" */}
+                      <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-[#E7E2F0]">
+                        <button
+                          type="button"
+                          disabled={quickCellBusy}
+                          onClick={closeQuickCellModal}
+                          className="h-10 px-4 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-[13px]"
+                        >
+                          {effectiveEditable ? 'ยกเลิก' : 'ปิด'}
+                        </button>
+                        {effectiveEditable && (
+                          <button
+                            type="button"
+                            disabled={!canProceedToConfirm}
+                            onClick={() => {
+                              setQuickCellError(null);
+                              setQuickCellConfirmStep(true);
+                            }}
+                            className="h-10 px-5 rounded-lg bg-[#7359B4] hover:bg-[#5F479C] disabled:opacity-40 text-white font-semibold text-[13px] inline-flex items-center gap-1.5 transition-colors"
+                          >
+                            <Check className="w-4 h-4" />
+                            <span>
+                              {quickCellPreviewLoading ? 'กำลังตรวจสอบ...' : 'บันทึกเวร'}
+                            </span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    /* ขั้นตอนที่ 2 (Inline Confirmation Preview): แสดงกะเดิม / กะหลังแก้ไข / สรุปการเปลี่ยนแปลง ก่อนกดยืนยันบันทึก */
+                    <div className="space-y-3.5">
+                      <div className="p-3.5 rounded-xl bg-[#FAF9FD] border border-[#D8CDF2] space-y-3">
+                        <div className="font-bold text-[#5B41A1] text-[14px]">
+                          สรุปการเปลี่ยนแปลงก่อนยืนยันบันทึก
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div className="p-2.5 rounded-lg bg-white border border-[#E7E2F0] space-y-1">
+                            <div className="text-[12px] font-bold text-slate-600">กะเดิม:</div>
+                            {quickCellPreview && quickCellPreview.existingEffectiveShifts.length > 0 ? (
+                              <ul className="space-y-1 text-[12.5px] text-[#273244]">
+                                {quickCellPreview.existingEffectiveShifts.map((s, idx) => (
+                                  <li key={idx} className="flex items-center justify-between gap-1">
+                                    <span>• {formatCleanShiftName(s.shiftName)}</span>
+                                    <span className="font-mono text-[11.5px] text-slate-500">
+                                      {s.startTime}–{s.endTime}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <div className="text-[12.5px] text-slate-500">— ไม่มีเวร</div>
+                            )}
+                          </div>
+
+                          <div className="p-2.5 rounded-lg bg-[#F3EEFC]/60 border border-[#8B73C7] space-y-1">
+                            <div className="text-[12px] font-bold text-[#5B41A1]">กะหลังแก้ไข:</div>
+                            {quickCellPreview && quickCellPreview.resultingShifts.length > 0 ? (
+                              <ul className="space-y-1 text-[12.5px] text-[#273244] font-semibold">
+                                {quickCellPreview.resultingShifts.map((s, idx) => (
+                                  <li key={idx} className="flex items-center justify-between gap-1">
+                                    <span>• {formatCleanShiftName(s.shiftName)}</span>
+                                    <span className="font-mono text-[11.5px] text-[#7359B4]">
+                                      {s.startTime}–{s.endTime}
+                                      {s.isCrossMidnight === 1 ? ' (+1)' : ''}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : (
+                              <div className="text-[12.5px] font-bold text-amber-800">
+                                — ไม่มีเวร (ตั้งใจยกเลิกทุกกะ)
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {quickCellPreview && (
+                          <div className="pt-2 border-t border-[#E7E2F0] space-y-1 text-[12.5px]">
+                            <div className="font-bold text-[#273244]">การเปลี่ยนแปลง:</div>
+                            <ul className="space-y-0.5">
+                              {quickCellPreview.shiftsToAdd.map((a, idx) => (
+                                <li key={`add-${idx}`} className="text-emerald-800 font-medium">
+                                  + เพิ่ม {formatCleanShiftName(a.shiftName)} ({a.startTime}–{a.endTime} น.) 1 กะ
+                                </li>
+                              ))}
+                              {quickCellPreview.shiftsToRemove.map((r, idx) => (
+                                <li key={`rem-${idx}`} className="text-red-800 font-medium">
+                                  − ลบ {formatCleanShiftName(r.shiftName)} ({r.startTime}–{r.endTime} น.) 1 กะ
+                                </li>
+                              ))}
+                              {quickCellPreview.shiftsToKeep.map((k, idx) => (
+                                <li key={`keep-${idx}`} className="text-slate-600">
+                                  • คง {formatCleanShiftName(k.shiftName)} ({k.startTime}–{k.endTime} น.) 1 กะ
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+
+                      <div>
+                        <input
+                          type="text"
+                          value={quickCellReason}
+                          onChange={(e) => setQuickCellReason(e.target.value)}
+                          placeholder="หมายเหตุการแก้ไข (ถ้ามี)..."
+                          className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-[13px] text-slate-800 focus:outline-none focus:border-[#7359B4]"
+                        />
+                      </div>
+
+                      {quickCellError && (
+                        <div
+                          role="alert"
+                          className="p-3 rounded-xl bg-red-50 border border-red-300 text-red-900 text-[12.5px] font-medium"
+                        >
+                          {quickCellError}
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-[#E7E2F0]">
+                        <button
+                          type="button"
+                          disabled={quickCellBusy}
+                          onClick={() => setQuickCellConfirmStep(false)}
+                          className="h-10 px-4 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-[13px]"
+                        >
+                          ยกเลิก
+                        </button>
+                        <button
+                          type="button"
+                          disabled={quickCellBusy || hasConflicts}
+                          onClick={handleConfirmQuickCellSync}
+                          className="h-10 px-5 rounded-lg bg-[#7359B4] hover:bg-[#5F479C] disabled:opacity-40 text-white font-semibold text-[13px] inline-flex items-center gap-1.5 transition-colors"
+                        >
+                          <Check className="w-4 h-4" />
+                          <span>{quickCellBusy ? 'กำลังบันทึก...' : 'ยืนยันบันทึก'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           );
         })()}

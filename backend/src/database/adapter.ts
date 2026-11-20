@@ -332,28 +332,47 @@ export async function dbTransaction<T>(
     }
   }
 
-  const db = getSqliteInstance();
-  db.exec('BEGIN IMMEDIATE TRANSACTION;');
-  try {
-    const txContext: DbTransactionContext = {
-      query: async <R = Record<string, unknown>>(sql: string, params: unknown[] = []) => {
-        return dbQuery<R>(sql, params);
-      },
-      execute: async (sql: string, params: unknown[] = []) => {
-        return dbExecute(sql, params);
-      },
-    };
-    const outcome = await work(txContext);
-    db.exec('COMMIT;');
-    return outcome;
-  } catch (err) {
+  return enqueueSqliteTransaction(async () => {
+    const db = getSqliteInstance();
+    db.exec('BEGIN IMMEDIATE TRANSACTION;');
     try {
-      db.exec('ROLLBACK;');
-    } catch {
-      // ignore rollback if already rolled back
+      const txContext: DbTransactionContext = {
+        query: async <R = Record<string, unknown>>(sql: string, params: unknown[] = []) => {
+          return dbQuery<R>(sql, params);
+        },
+        execute: async (sql: string, params: unknown[] = []) => {
+          return dbExecute(sql, params);
+        },
+      };
+      const outcome = await work(txContext);
+      db.exec('COMMIT;');
+      return outcome;
+    } catch (err) {
+      try {
+        db.exec('ROLLBACK;');
+      } catch {
+        // ignore rollback if already rolled back
+      }
+      throw err;
     }
-    throw err;
-  }
+  });
+}
+
+let sqliteTxTail: Promise<void> = Promise.resolve();
+
+function enqueueSqliteTransaction<T>(task: () => Promise<T>): Promise<T> {
+  const previous = sqliteTxTail;
+  let release!: () => void;
+  sqliteTxTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return previous.then(async () => {
+    try {
+      return await task();
+    } finally {
+      release();
+    }
+  });
 }
 
 export async function checkPendingMigrationsReadOnly(): Promise<{

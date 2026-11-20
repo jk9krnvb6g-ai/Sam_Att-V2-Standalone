@@ -26,6 +26,7 @@ import {
   dbTransaction,
   type DbTransactionContext,
 } from '../../database/adapter.ts';
+import { loadConfig } from '../../config/env.ts';
 import { requireAuth, requireRoles } from '../../middleware/auth.ts';
 import { writeAuditLog } from '../audit/service.ts';
 import {
@@ -422,6 +423,870 @@ export function findSelectedShiftsSelfOverlap(
     }
   }
   return null;
+}
+
+// ============================================================================
+// Per-Person In-Process Schedule Mutex (ป้องกัน Concurrent Updates ใน Process เดียวกัน
+// ควบคู่กับ MySQL SELECT ... FOR UPDATE และ SQLite Serialized Transaction)
+// ============================================================================
+const personScheduleLockQueues = new Map<string, Promise<void>>();
+
+export async function withPersonScheduleLock<T>(
+  personId: string,
+  work: () => Promise<T>
+): Promise<T> {
+  const key = String(personId || '').trim();
+  const prev = personScheduleLockQueues.get(key) || Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const chained = prev.then(() => gate);
+  personScheduleLockQueues.set(key, chained);
+
+  await prev;
+  try {
+    return await work();
+  } finally {
+    release();
+    if (personScheduleLockQueues.get(key) === chained) {
+      personScheduleLockQueues.delete(key);
+    }
+  }
+}
+
+export interface DailyCellShiftPreviewItem {
+  shiftId: number | null;
+  shiftCode: string;
+  shiftName: string;
+  workDate: string;
+  startTime: string;
+  endTime: string;
+  endDate: string;
+  isCrossMidnight: number;
+  graceMinutes?: number;
+  cutoffTime?: string;
+  source: 'EXISTING' | 'DEFAULT_IMPLICIT' | 'NEW';
+  startAbsMin: number;
+  endAbsMin: number;
+}
+
+export interface DailyCellConflict {
+  code:
+    | 'SELECTED_SHIFTS_OVERLAP'
+    | 'DUPLICATE_SAME_SHIFT'
+    | 'TIME_OVERLAP_CONFLICT'
+    | 'ADJACENT_DAY_OVERLAP';
+  shiftA: {
+    shiftCode: string;
+    shiftName: string;
+    workDate: string;
+    startTime: string;
+    endTime: string;
+    endDate: string;
+    isCrossMidnight: number;
+  };
+  shiftB: {
+    shiftCode: string;
+    shiftName: string;
+    workDate: string;
+    startTime: string;
+    endTime: string;
+    endDate: string;
+    isCrossMidnight: number;
+  };
+  message: string;
+}
+
+export interface DailyCellEvaluationResult {
+  canProceed: boolean;
+  action: 'ADD_SHIFT' | 'REPLACE_SHIFTS';
+  conflicts: DailyCellConflict[];
+  existingSameDayShifts: DailyCellShiftPreviewItem[];
+  shiftsToBeReplaced: DailyCellShiftPreviewItem[];
+  resultingShifts: DailyCellShiftPreviewItem[];
+  adjacentShifts: DailyCellShiftPreviewItem[];
+  defaultShiftToMaterialize: {
+    shiftCode: string;
+    shiftName: string;
+    startTime: string;
+    endTime: string;
+    graceMinutes: number;
+    cutoffTime: string;
+    isCrossMidnight: number;
+  } | null;
+}
+
+function formatShiftSpanLabel(item: {
+  shiftCode?: string;
+  shiftName: string;
+  workDate: string;
+  startTime: string;
+  endTime: string;
+  endDate: string;
+  isCrossMidnight: number;
+}): string {
+  const cleanName = String(item.shiftName || '').trim();
+  const codeSuffix = item.shiftCode ? ` [${item.shiftCode}]` : '';
+  if (item.isCrossMidnight === 1 || item.endDate !== item.workDate) {
+    return `${cleanName}${codeSuffix} (${item.workDate} ${item.startTime} – ${item.endDate} ${item.endTime} น.)`;
+  }
+  return `${cleanName}${codeSuffix} (${item.workDate} ${item.startTime}–${item.endTime} น.)`;
+}
+
+function toDailyCellShiftItem(params: {
+  shiftId: number | null;
+  shiftCode: string;
+  shiftName: string;
+  workDate: string;
+  startTime: string;
+  endTime: string;
+  isCrossMidnight: number;
+  graceMinutes?: number;
+  cutoffTime?: string;
+  source: 'EXISTING' | 'DEFAULT_IMPLICIT' | 'NEW';
+}): DailyCellShiftPreviewItem {
+  const startMin = parseTimeToMinutes(params.startTime);
+  const endMin = parseTimeToMinutes(params.endTime);
+  const cross = Number(params.isCrossMidnight) === 1 || endMin <= startMin ? 1 : 0;
+  const interval = computeAbsoluteIntervalMinutes(
+    params.workDate,
+    params.startTime,
+    params.endTime,
+    cross
+  );
+  const endDate = cross === 1 ? addDaysToDateString(params.workDate, 1) : params.workDate;
+  return {
+    shiftId: params.shiftId,
+    shiftCode: params.shiftCode,
+    shiftName: params.shiftName,
+    workDate: params.workDate,
+    startTime: params.startTime,
+    endTime: params.endTime,
+    endDate,
+    isCrossMidnight: cross,
+    graceMinutes: params.graceMinutes,
+    cutoffTime: params.cutoffTime,
+    source: params.source,
+    startAbsMin: interval.startAbsMin,
+    endAbsMin: interval.endAbsMin,
+  };
+}
+
+/**
+ * ประเมินการเพิ่มหรือแทนที่กะหลายกะพร้อมกันสำหรับ Quick Daily Shift Cell
+ * ใช้หลักการช่วงเวลา [start, end) จริงจากวันที่ + เวลา (รองรับกะข้ามวัน และวันก่อนหน้า/วันถัดไป)
+ */
+export function evaluateDailyCellChange(params: {
+  workDate: string;
+  action: 'ADD_SHIFT' | 'REPLACE_SHIFTS';
+  selectedShifts: ShiftRow[];
+  sameDayActive: ExistingAssignmentRow[];
+  adjacentDaysActive: ExistingAssignmentRow[];
+  dailyOverride: DailyOverrideRow | null;
+  defaultRule: PersonnelTypeRuleRow | null;
+}): DailyCellEvaluationResult {
+  const {
+    workDate,
+    action,
+    selectedShifts,
+    sameDayActive,
+    adjacentDaysActive,
+    dailyOverride,
+    defaultRule,
+  } = params;
+
+  const conflicts: DailyCellConflict[] = [];
+
+  // 1. สร้างรายการกะปัจจุบันในวันนั้น (รวมกรณี DEFAULT_FROM_TYPE ที่ยังไม่มีแถวใน shift_assignments)
+  const existingSameDayShifts: DailyCellShiftPreviewItem[] = sameDayActive.map((ex) =>
+    toDailyCellShiftItem({
+      shiftId: Number(ex.shift_id),
+      shiftCode: ex.snapshot_shift_code,
+      shiftName: ex.snapshot_shift_name,
+      workDate: ex.work_date,
+      startTime: ex.snapshot_start_time,
+      endTime: ex.snapshot_end_time,
+      isCrossMidnight: Number(ex.snapshot_is_cross_midnight),
+      graceMinutes: ex.snapshot_grace_minutes,
+      cutoffTime: ex.snapshot_cutoff_time,
+      source: 'EXISTING',
+    })
+  );
+
+  let defaultShiftToMaterialize: DailyCellEvaluationResult['defaultShiftToMaterialize'] = null;
+  const isCleared = dailyOverride?.override_state === 'CLEARED_ALL_SHIFTS';
+  const isCustomWithoutRows = dailyOverride?.override_state === 'CUSTOM_ASSIGNED';
+
+  if (
+    existingSameDayShifts.length === 0 &&
+    !isCleared &&
+    !isCustomWithoutRows &&
+    defaultRule &&
+    Number(defaultRule.is_active) === 1 &&
+    (!defaultRule.effective_from || workDate >= normalizeWorkDateString(defaultRule.effective_from))
+  ) {
+    const defStart = defaultRule.default_start_time || '08:00';
+    const defEnd = defaultRule.default_end_time || '16:00';
+    const defCode = defStart === '07:30' ? 'MOR-0730' : 'MOR-0816';
+    const defName = `กะเช้าเริ่มต้น (${defaultRule.personnel_type_name})`;
+    const defItem = toDailyCellShiftItem({
+      shiftId: null,
+      shiftCode: defCode,
+      shiftName: defName,
+      workDate,
+      startTime: defStart,
+      endTime: defEnd,
+      isCrossMidnight: 0,
+      graceMinutes: Number(defaultRule.default_grace_minutes ?? 15),
+      cutoffTime: defaultRule.default_cutoff_time || '11:00',
+      source: 'DEFAULT_IMPLICIT',
+    });
+    existingSameDayShifts.push(defItem);
+    if (action === 'ADD_SHIFT') {
+      defaultShiftToMaterialize = {
+        shiftCode: defCode,
+        shiftName: defName,
+        startTime: defStart,
+        endTime: defEnd,
+        graceMinutes: Number(defaultRule.default_grace_minutes ?? 15),
+        cutoffTime: defaultRule.default_cutoff_time || '11:00',
+        isCrossMidnight: 0,
+      };
+    }
+  }
+
+  // 2. รายการกะจากวันก่อนหน้าและวันถัดไปที่อาจข้ามวันมาทับซ้อน
+  const adjacentShifts: DailyCellShiftPreviewItem[] = adjacentDaysActive.map((adj) =>
+    toDailyCellShiftItem({
+      shiftId: Number(adj.shift_id),
+      shiftCode: adj.snapshot_shift_code,
+      shiftName: adj.snapshot_shift_name,
+      workDate: adj.work_date,
+      startTime: adj.snapshot_start_time,
+      endTime: adj.snapshot_end_time,
+      isCrossMidnight: Number(adj.snapshot_is_cross_midnight),
+      graceMinutes: adj.snapshot_grace_minutes,
+      cutoffTime: adj.snapshot_cutoff_time,
+      source: 'EXISTING',
+    })
+  );
+
+  // 3. รายการกะใหม่ที่ผู้ใช้ติ๊กเลือก
+  const candidateItems: DailyCellShiftPreviewItem[] = selectedShifts.map((s) =>
+    toDailyCellShiftItem({
+      shiftId: Number(s.id),
+      shiftCode: s.shift_code,
+      shiftName: s.shift_name,
+      workDate,
+      startTime: s.start_time,
+      endTime: s.end_time,
+      isCrossMidnight: Number(s.is_cross_midnight),
+      graceMinutes: s.grace_minutes,
+      cutoffTime: s.cutoff_time,
+      source: 'NEW',
+    })
+  );
+
+  const intervalsOverlap = (a: DailyCellShiftPreviewItem, b: DailyCellShiftPreviewItem) =>
+    Math.max(a.startAbsMin, b.startAbsMin) < Math.min(a.endAbsMin, b.endAbsMin);
+
+  const toRef = (x: DailyCellShiftPreviewItem) => ({
+    shiftCode: x.shiftCode,
+    shiftName: x.shiftName,
+    workDate: x.workDate,
+    startTime: x.startTime,
+    endTime: x.endTime,
+    endDate: x.endDate,
+    isCrossMidnight: x.isCrossMidnight,
+  });
+
+  // 4. ตรวจทับซ้อนระหว่างกะใหม่ที่เลือกพร้อมกันเอง (Multi-select self-overlap)
+  for (let i = 0; i < candidateItems.length; i++) {
+    for (let j = i + 1; j < candidateItems.length; j++) {
+      const a = candidateItems[i];
+      const b = candidateItems[j];
+      if (intervalsOverlap(a, b)) {
+        conflicts.push({
+          code: 'SELECTED_SHIFTS_OVERLAP',
+          shiftA: toRef(a),
+          shiftB: toRef(b),
+          message: `กะที่เลือกทับซ้อนกันเอง: ${formatShiftSpanLabel(a)} ทับซ้อนกับ ${formatShiftSpanLabel(b)}`,
+        });
+      }
+    }
+  }
+
+  // 5. โหมดเพิ่มกะ (ADD_SHIFT): ตรวจซ้ำกะเดิม และตรวจเวลาทับซ้อนกับกะเดิมในวันเดียวกัน
+  if (action === 'ADD_SHIFT') {
+    for (const cand of candidateItems) {
+      for (const ex of existingSameDayShifts) {
+        const isSameShift =
+          (ex.shiftId !== null && cand.shiftId !== null && ex.shiftId === cand.shiftId) ||
+          (ex.shiftCode && cand.shiftCode && ex.shiftCode === cand.shiftCode) ||
+          (ex.source === 'DEFAULT_IMPLICIT' &&
+            cand.startAbsMin === ex.startAbsMin &&
+            cand.endAbsMin === ex.endAbsMin);
+
+        if (isSameShift) {
+          conflicts.push({
+            code: 'DUPLICATE_SAME_SHIFT',
+            shiftA: toRef(cand),
+            shiftB: toRef(ex),
+            message: `ซ้ำกับกะที่มีอยู่แล้ว: ${formatShiftSpanLabel(cand)} ซ้ำกับ ${formatShiftSpanLabel(ex)}`,
+          });
+        } else if (intervalsOverlap(cand, ex)) {
+          conflicts.push({
+            code: 'TIME_OVERLAP_CONFLICT',
+            shiftA: toRef(cand),
+            shiftB: toRef(ex),
+            message: `เวลาทับซ้อนกับกะเดิมในวันนี้: ${formatShiftSpanLabel(cand)} ทับซ้อนกับ ${formatShiftSpanLabel(ex)}`,
+          });
+        }
+      }
+    }
+  }
+
+  // 6. ตรวจเวลาทับซ้อนกับกะของวันก่อนหน้าและวันถัดไป (ใช้ได้ทั้งโหมด ADD_SHIFT และ REPLACE_SHIFTS)
+  for (const cand of candidateItems) {
+    for (const adj of adjacentShifts) {
+      if (intervalsOverlap(cand, adj)) {
+        const relationLabel = adj.workDate < workDate ? 'วันก่อนหน้า' : 'วันถัดไป';
+        conflicts.push({
+          code: 'ADJACENT_DAY_OVERLAP',
+          shiftA: toRef(cand),
+          shiftB: toRef(adj),
+          message: `เวลาทับซ้อนกับกะข้ามวันของ${relationLabel}: ${formatShiftSpanLabel(cand)} ทับซ้อนกับ ${formatShiftSpanLabel(adj)}`,
+        });
+      }
+    }
+  }
+
+  const shiftsToBeReplaced = action === 'REPLACE_SHIFTS' ? [...existingSameDayShifts] : [];
+  const resultingShifts = (
+    action === 'ADD_SHIFT'
+      ? [...existingSameDayShifts, ...candidateItems]
+      : [...candidateItems]
+  ).sort((a, b) => a.startAbsMin - b.startAbsMin || a.endAbsMin - b.endAbsMin);
+
+  return {
+    canProceed: conflicts.length === 0,
+    action,
+    conflicts,
+    existingSameDayShifts,
+    shiftsToBeReplaced,
+    resultingShifts,
+    adjacentShifts,
+    defaultShiftToMaterialize,
+  };
+}
+
+export interface DailyCellEffectiveShift {
+  identityKey: string;
+  assignmentId: number | null;
+  templateId: number | null;
+  shiftCode: string;
+  shiftName: string;
+  shiftCategory: string;
+  workDate: string;
+  startTime: string;
+  endTime: string;
+  endDate: string;
+  isCrossMidnight: number;
+  graceMinutes: number;
+  cutoffTime: string;
+  source: 'ASSIGNMENT' | 'DEFAULT_IMPLICIT';
+  isSpecialAssignment: boolean;
+  specialReason: 'UNMATCHED_TEMPLATE' | 'DUPLICATE_TEMPLATE' | null;
+  startAbsMin: number;
+  endAbsMin: number;
+}
+
+export interface DailyCellCarryoverShift {
+  assignmentId: number | null;
+  shiftCode: string;
+  shiftName: string;
+  workDate: string;
+  startTime: string;
+  endTime: string;
+  endDate: string;
+  isCrossMidnight: number;
+  startAbsMin: number;
+  endAbsMin: number;
+  noticeText: string;
+}
+
+export interface DailyCellSyncEvaluationResult {
+  canProceed: boolean;
+  hasChanges: boolean;
+  willClearAll: boolean;
+  effectiveState: DailyScheduleOverrideState;
+  conflicts: DailyCellConflict[];
+  existingEffectiveShifts: DailyCellEffectiveShift[];
+  selectedTemplateIds: number[];
+  shiftsToKeep: DailyCellEffectiveShift[];
+  shiftsToAdd: DailyCellShiftPreviewItem[];
+  shiftsToRemove: DailyCellEffectiveShift[];
+  resultingShifts: DailyCellShiftPreviewItem[];
+  carryoverFromPrevDay: DailyCellCarryoverShift[];
+  nextDayShifts: DailyCellShiftPreviewItem[];
+  specialExistingAssignments: DailyCellEffectiveShift[];
+  defaultShiftToMaterialize: {
+    templateId: number | null;
+    shiftCode: string;
+    shiftName: string;
+    startTime: string;
+    endTime: string;
+    graceMinutes: number;
+    cutoffTime: string;
+    isCrossMidnight: number;
+  } | null;
+}
+
+/**
+ * จับคู่กะที่มีผลจริง (Assignment หรือ Default Rule) กับ Template ID ที่ใช้งานอยู่ในตาราง shifts
+ */
+export function matchShiftTemplateId(
+  shift: {
+    shiftId?: number | null;
+    shiftCode?: string | null;
+    startTime?: string | null;
+    endTime?: string | null;
+    isCrossMidnight?: number | null;
+  },
+  availableTemplates: ShiftRow[]
+): ShiftRow | null {
+  if (shift.shiftId && Number(shift.shiftId) > 0) {
+    const byId = availableTemplates.find((t) => Number(t.id) === Number(shift.shiftId));
+    if (byId) return byId;
+  }
+  const code = String(shift.shiftCode || '').trim().toUpperCase();
+  if (code) {
+    const byCode = availableTemplates.find(
+      (t) => String(t.shift_code || '').trim().toUpperCase() === code
+    );
+    if (byCode) return byCode;
+  }
+  const st = String(shift.startTime || '').trim();
+  const et = String(shift.endTime || '').trim();
+  const cross = Number(shift.isCrossMidnight ?? (et <= st ? 1 : 0));
+  if (st && et) {
+    const byTime = availableTemplates.find((t) => {
+      const tCross = Number(t.is_cross_midnight) === 1 || t.end_time <= t.start_time ? 1 : 0;
+      return t.start_time === st && t.end_time === et && tCross === cross;
+    });
+    if (byTime) return byTime;
+  }
+  return null;
+}
+
+/**
+ * ประเมินการซิงค์กะที่เลือกทั้งหมดในวันเดียว (Synchronize Selected Shifts)
+ * - Selected Template IDs = สถานะกะทั้งหมดที่ผู้ใช้ต้องการให้มีในวันนั้นหลังบันทึก
+ * - รักษา Assignment ID ของกะเดิมที่ยังคงไว้ ไม่ลบแล้วสร้างใหม่โดยไม่จำเป็น
+ * - จัดการกะเริ่มต้นตามประเภทบุคลากร (Derived Default), CLEARED_ALL_SHIFTS,
+ *   กะข้ามวันจากวันก่อนหน้า/วันถัดไป, และกรณีพิเศษที่มี Template เดียวกันหลายรายการ
+ */
+export function evaluateDailyCellSync(params: {
+  workDate: string;
+  selectedTemplateIds: number[];
+  availableTemplates: ShiftRow[];
+  sameDayActive: ExistingAssignmentRow[];
+  adjacentDaysActive: ExistingAssignmentRow[];
+  dailyOverride: DailyOverrideRow | null;
+  defaultRule: PersonnelTypeRuleRow | null;
+  nextDayDefaultRule?: PersonnelTypeRuleRow | null;
+  nextDayOverride?: DailyOverrideRow | null;
+  keepSpecialAssignmentIds?: number[];
+}): DailyCellSyncEvaluationResult {
+  const {
+    workDate,
+    availableTemplates,
+    sameDayActive,
+    adjacentDaysActive,
+    dailyOverride,
+    defaultRule,
+    nextDayDefaultRule,
+    nextDayOverride,
+  } = params;
+
+  const uniqueSelectedIds: number[] = [];
+  for (const id of params.selectedTemplateIds || []) {
+    const n = Number(id);
+    if (n > 0 && !uniqueSelectedIds.includes(n)) uniqueSelectedIds.push(n);
+  }
+  const selectedIdSet = new Set(uniqueSelectedIds);
+  const templateById = new Map<number, ShiftRow>(
+    availableTemplates.map((t) => [Number(t.id), t])
+  );
+
+  // 1. สร้างรายการ Effective Shifts ปัจจุบัน พร้อมจับคู่ Template ID และตรวจ duplicate/unmatched
+  const existingEffectiveShifts: DailyCellEffectiveShift[] = [];
+  const seenTemplateIds = new Set<number>();
+
+  for (const ex of sameDayActive) {
+    const matchedTpl = matchShiftTemplateId(
+      {
+        shiftId: Number(ex.shift_id),
+        shiftCode: ex.snapshot_shift_code,
+        startTime: ex.snapshot_start_time,
+        endTime: ex.snapshot_end_time,
+        isCrossMidnight: Number(ex.snapshot_is_cross_midnight),
+      },
+      availableTemplates
+    );
+    const tplId = matchedTpl ? Number(matchedTpl.id) : null;
+    const isDuplicateTpl = tplId !== null && seenTemplateIds.has(tplId);
+    if (tplId !== null) seenTemplateIds.add(tplId);
+
+    const previewItem = toDailyCellShiftItem({
+      shiftId: tplId ?? Number(ex.shift_id),
+      shiftCode: ex.snapshot_shift_code,
+      shiftName: ex.snapshot_shift_name,
+      workDate: ex.work_date,
+      startTime: ex.snapshot_start_time,
+      endTime: ex.snapshot_end_time,
+      isCrossMidnight: Number(ex.snapshot_is_cross_midnight),
+      graceMinutes: ex.snapshot_grace_minutes,
+      cutoffTime: ex.snapshot_cutoff_time,
+      source: 'EXISTING',
+    });
+
+    const specialReason: 'UNMATCHED_TEMPLATE' | 'DUPLICATE_TEMPLATE' | null =
+      tplId === null ? 'UNMATCHED_TEMPLATE' : isDuplicateTpl ? 'DUPLICATE_TEMPLATE' : null;
+
+    existingEffectiveShifts.push({
+      identityKey: `assign:${ex.id}`,
+      assignmentId: Number(ex.id),
+      templateId: tplId,
+      shiftCode: previewItem.shiftCode,
+      shiftName: previewItem.shiftName,
+      shiftCategory: matchedTpl?.shift_category || 'SPECIAL',
+      workDate: previewItem.workDate,
+      startTime: previewItem.startTime,
+      endTime: previewItem.endTime,
+      endDate: previewItem.endDate,
+      isCrossMidnight: previewItem.isCrossMidnight,
+      graceMinutes: Number(ex.snapshot_grace_minutes ?? 15),
+      cutoffTime: ex.snapshot_cutoff_time || '11:00',
+      source: 'ASSIGNMENT',
+      isSpecialAssignment: specialReason !== null,
+      specialReason,
+      startAbsMin: previewItem.startAbsMin,
+      endAbsMin: previewItem.endAbsMin,
+    });
+  }
+
+  const isCleared =
+    dailyOverride?.override_state === 'CLEARED_ALL_SHIFTS' && existingEffectiveShifts.length === 0;
+  const isCustomWithoutRows =
+    dailyOverride?.override_state === 'CUSTOM_ASSIGNED' && existingEffectiveShifts.length === 0;
+
+  let effectiveState: DailyScheduleOverrideState = 'UNCONFIGURED_DEFAULT_RULE';
+  if (isCleared) {
+    effectiveState = 'CLEARED_ALL_SHIFTS';
+  } else if (existingEffectiveShifts.length > 0) {
+    effectiveState = 'CUSTOM_ASSIGNED';
+  } else if (
+    !isCustomWithoutRows &&
+    defaultRule &&
+    Number(defaultRule.is_active) === 1 &&
+    (!defaultRule.effective_from || workDate >= normalizeWorkDateString(defaultRule.effective_from))
+  ) {
+    effectiveState =
+      dailyOverride?.override_state === 'RESTORED_DEFAULT'
+        ? 'RESTORED_DEFAULT'
+        : 'DEFAULT_FROM_TYPE';
+
+    const defStart = defaultRule.default_start_time || '08:00';
+    const defEnd = defaultRule.default_end_time || '16:00';
+    const defCode = defStart === '07:30' ? 'MOR-0730' : 'MOR-0816';
+    const matchedDefTpl = matchShiftTemplateId(
+      { shiftCode: defCode, startTime: defStart, endTime: defEnd, isCrossMidnight: 0 },
+      availableTemplates
+    );
+    const defName = matchedDefTpl
+      ? matchedDefTpl.shift_name
+      : `กะเช้าเริ่มต้น (${defaultRule.personnel_type_name})`;
+    const previewItem = toDailyCellShiftItem({
+      shiftId: matchedDefTpl ? Number(matchedDefTpl.id) : null,
+      shiftCode: matchedDefTpl?.shift_code || defCode,
+      shiftName: defName,
+      workDate,
+      startTime: defStart,
+      endTime: defEnd,
+      isCrossMidnight: 0,
+      graceMinutes: Number(defaultRule.default_grace_minutes ?? 15),
+      cutoffTime: defaultRule.default_cutoff_time || '11:00',
+      source: 'DEFAULT_IMPLICIT',
+    });
+    existingEffectiveShifts.push({
+      identityKey: `default:${defaultRule.personnel_type_code}`,
+      assignmentId: null,
+      templateId: matchedDefTpl ? Number(matchedDefTpl.id) : null,
+      shiftCode: previewItem.shiftCode,
+      shiftName: previewItem.shiftName,
+      shiftCategory: matchedDefTpl?.shift_category || 'MORNING',
+      workDate,
+      startTime: defStart,
+      endTime: defEnd,
+      endDate: workDate,
+      isCrossMidnight: 0,
+      graceMinutes: Number(defaultRule.default_grace_minutes ?? 15),
+      cutoffTime: defaultRule.default_cutoff_time || '11:00',
+      source: 'DEFAULT_IMPLICIT',
+      isSpecialAssignment: false,
+      specialReason: null,
+      startAbsMin: previewItem.startAbsMin,
+      endAbsMin: previewItem.endAbsMin,
+    });
+  }
+
+  const specialExistingAssignments = existingEffectiveShifts.filter((e) => e.isSpecialAssignment);
+  const keepSpecialSet =
+    params.keepSpecialAssignmentIds !== undefined
+      ? new Set(params.keepSpecialAssignmentIds.map(Number))
+      : new Set(
+          specialExistingAssignments
+            .map((e) => e.assignmentId)
+            .filter((id): id is number => id !== null)
+        );
+
+  // 2. คำนวณ Diff: shiftsToKeep / shiftsToRemove / shiftsToAdd
+  const shiftsToKeep: DailyCellEffectiveShift[] = [];
+  const shiftsToRemove: DailyCellEffectiveShift[] = [];
+  const keptPrimaryTemplateIds = new Set<number>();
+
+  for (const ex of existingEffectiveShifts) {
+    if (ex.isSpecialAssignment) {
+      if (ex.assignmentId !== null && keepSpecialSet.has(ex.assignmentId)) {
+        shiftsToKeep.push(ex);
+      } else {
+        shiftsToRemove.push(ex);
+      }
+      continue;
+    }
+
+    if (ex.templateId !== null && selectedIdSet.has(ex.templateId)) {
+      shiftsToKeep.push(ex);
+      keptPrimaryTemplateIds.add(ex.templateId);
+    } else if (ex.templateId === null && ex.source === 'DEFAULT_IMPLICIT' && uniqueSelectedIds.length === 0) {
+      shiftsToRemove.push(ex);
+    } else {
+      shiftsToRemove.push(ex);
+    }
+  }
+
+  const shiftsToAdd: DailyCellShiftPreviewItem[] = [];
+  for (const sid of uniqueSelectedIds) {
+    if (keptPrimaryTemplateIds.has(sid)) continue;
+    const tpl = templateById.get(sid);
+    if (!tpl) continue;
+    shiftsToAdd.push(
+      toDailyCellShiftItem({
+        shiftId: Number(tpl.id),
+        shiftCode: tpl.shift_code,
+        shiftName: tpl.shift_name,
+        workDate,
+        startTime: tpl.start_time,
+        endTime: tpl.end_time,
+        isCrossMidnight: Number(tpl.is_cross_midnight),
+        graceMinutes: tpl.grace_minutes,
+        cutoffTime: tpl.cutoff_time,
+        source: 'NEW',
+      })
+    );
+  }
+
+  // กรณี DEFAULT_FROM_TYPE ที่ผู้ใช้เก็บกะเช้าเริ่มต้นไว้ + เพิ่มกะอื่น -> ต้อง Materialize กะเช้าเริ่มต้นลง shift_assignments
+  let defaultShiftToMaterialize: DailyCellSyncEvaluationResult['defaultShiftToMaterialize'] = null;
+  const keptDefault = shiftsToKeep.find((k) => k.source === 'DEFAULT_IMPLICIT');
+  if (keptDefault && shiftsToAdd.length > 0) {
+    defaultShiftToMaterialize = {
+      templateId: keptDefault.templateId,
+      shiftCode: keptDefault.shiftCode,
+      shiftName: keptDefault.shiftName,
+      startTime: keptDefault.startTime,
+      endTime: keptDefault.endTime,
+      graceMinutes: keptDefault.graceMinutes,
+      cutoffTime: keptDefault.cutoffTime,
+      isCrossMidnight: keptDefault.isCrossMidnight,
+    };
+  }
+
+  const resultingShifts: DailyCellShiftPreviewItem[] = [
+    ...shiftsToKeep.map((k) => ({
+      shiftId: k.templateId,
+      shiftCode: k.shiftCode,
+      shiftName: k.shiftName,
+      workDate: k.workDate,
+      startTime: k.startTime,
+      endTime: k.endTime,
+      endDate: k.endDate,
+      isCrossMidnight: k.isCrossMidnight,
+      graceMinutes: k.graceMinutes,
+      cutoffTime: k.cutoffTime,
+      source: (k.source === 'DEFAULT_IMPLICIT' ? 'DEFAULT_IMPLICIT' : 'EXISTING') as
+        | 'EXISTING'
+        | 'DEFAULT_IMPLICIT'
+        | 'NEW',
+      startAbsMin: k.startAbsMin,
+      endAbsMin: k.endAbsMin,
+    })),
+    ...shiftsToAdd,
+  ].sort((a, b) => a.startAbsMin - b.startAbsMin || a.endAbsMin - b.endAbsMin);
+
+  // 3. จำแนกกะต่อเนื่องจากวันก่อนหน้า (Carryover) และกะของวันถัดไป (Next Day)
+  const workDateStartAbsMin = computeAbsoluteIntervalMinutes(workDate, '00:00', '00:01', 0).startAbsMin;
+  const nextDate = addDaysToDateString(workDate, 1);
+
+  const adjacentPreviewItems: DailyCellShiftPreviewItem[] = adjacentDaysActive.map((adj) =>
+    toDailyCellShiftItem({
+      shiftId: Number(adj.shift_id),
+      shiftCode: adj.snapshot_shift_code,
+      shiftName: adj.snapshot_shift_name,
+      workDate: adj.work_date,
+      startTime: adj.snapshot_start_time,
+      endTime: adj.snapshot_end_time,
+      isCrossMidnight: Number(adj.snapshot_is_cross_midnight),
+      graceMinutes: adj.snapshot_grace_minutes,
+      cutoffTime: adj.snapshot_cutoff_time,
+      source: 'EXISTING',
+    })
+  );
+
+  // รวมกะเช้าเริ่มต้นของวันถัดไป (ถ้าวันถัดไปไม่มี Assignment เฉพาะ และไม่ได้ CLEARED_ALL_SHIFTS)
+  const nextDayHasExplicit = adjacentPreviewItems.some((a) => a.workDate === nextDate);
+  const nextDayCleared = nextDayOverride?.override_state === 'CLEARED_ALL_SHIFTS';
+  if (
+    !nextDayHasExplicit &&
+    !nextDayCleared &&
+    nextDayDefaultRule &&
+    Number(nextDayDefaultRule.is_active) === 1 &&
+    (!nextDayDefaultRule.effective_from ||
+      nextDate >= normalizeWorkDateString(nextDayDefaultRule.effective_from))
+  ) {
+    const ndStart = nextDayDefaultRule.default_start_time || '08:00';
+    const ndEnd = nextDayDefaultRule.default_end_time || '16:00';
+    const ndCode = ndStart === '07:30' ? 'MOR-0730' : 'MOR-0816';
+    adjacentPreviewItems.push(
+      toDailyCellShiftItem({
+        shiftId: null,
+        shiftCode: ndCode,
+        shiftName: `กะเช้าเริ่มต้น (${nextDayDefaultRule.personnel_type_name})`,
+        workDate: nextDate,
+        startTime: ndStart,
+        endTime: ndEnd,
+        isCrossMidnight: 0,
+        graceMinutes: Number(nextDayDefaultRule.default_grace_minutes ?? 15),
+        cutoffTime: nextDayDefaultRule.default_cutoff_time || '11:00',
+        source: 'DEFAULT_IMPLICIT',
+      })
+    );
+  }
+
+  const carryoverFromPrevDay: DailyCellCarryoverShift[] = [];
+  for (const adj of adjacentDaysActive) {
+    if (adj.work_date >= workDate) continue;
+    const iv = toDailyCellShiftItem({
+      shiftId: Number(adj.shift_id),
+      shiftCode: adj.snapshot_shift_code,
+      shiftName: adj.snapshot_shift_name,
+      workDate: adj.work_date,
+      startTime: adj.snapshot_start_time,
+      endTime: adj.snapshot_end_time,
+      isCrossMidnight: Number(adj.snapshot_is_cross_midnight),
+      source: 'EXISTING',
+    });
+    // เฉพาะกะที่เวลาสิ้นสุดจริงข้ามเข้ามาในวัน workDate (endAbsMin > 00:00 ของ workDate)
+    if (iv.endAbsMin > workDateStartAbsMin) {
+      carryoverFromPrevDay.push({
+        assignmentId: Number(adj.id),
+        shiftCode: iv.shiftCode,
+        shiftName: iv.shiftName,
+        workDate: iv.workDate,
+        startTime: iv.startTime,
+        endTime: iv.endTime,
+        endDate: iv.endDate,
+        isCrossMidnight: iv.isCrossMidnight,
+        startAbsMin: iv.startAbsMin,
+        endAbsMin: iv.endAbsMin,
+        noticeText: `กะนี้เริ่มจากวันที่ ${iv.workDate} (${iv.startTime}–${iv.endTime} น. ข้ามวัน)`,
+      });
+    }
+  }
+
+  const nextDayShifts = adjacentPreviewItems.filter((a) => a.workDate > workDate);
+
+  // 4. ตรวจสอบเวลาทับซ้อนแบบ Half-open [start, end)
+  const intervalsOverlap = (
+    a: { startAbsMin: number; endAbsMin: number },
+    b: { startAbsMin: number; endAbsMin: number }
+  ): boolean => Math.max(a.startAbsMin, b.startAbsMin) < Math.min(a.endAbsMin, b.endAbsMin);
+
+  const conflicts: DailyCellConflict[] = [];
+  const toRef = (x: DailyCellShiftPreviewItem) => ({
+    shiftCode: x.shiftCode,
+    shiftName: x.shiftName,
+    workDate: x.workDate,
+    startTime: x.startTime,
+    endTime: x.endTime,
+    endDate: x.endDate,
+    isCrossMidnight: x.isCrossMidnight,
+  });
+
+  // 4.1 ตรวจทับซ้อนภายในวัน (ระหว่างกะทั้งหมดใน resultingShifts)
+  for (let i = 0; i < resultingShifts.length; i++) {
+    for (let j = i + 1; j < resultingShifts.length; j++) {
+      const a = resultingShifts[i];
+      const b = resultingShifts[j];
+      if (intervalsOverlap(a, b)) {
+        conflicts.push({
+          code: 'SELECTED_SHIFTS_OVERLAP',
+          shiftA: toRef(a),
+          shiftB: toRef(b),
+          message: `ช่วงเวลาทับซ้อนภายในวัน: ${formatShiftSpanLabel(a)} ทับซ้อนกับ ${formatShiftSpanLabel(b)}`,
+        });
+      }
+    }
+  }
+
+  // 4.2 ตรวจทับซ้อนกับกะจากวันก่อนหน้าและวันถัดไป
+  for (const resShift of resultingShifts) {
+    for (const adj of adjacentPreviewItems) {
+      if (intervalsOverlap(resShift, adj)) {
+        const relationLabel = adj.workDate < workDate ? 'วันก่อนหน้า' : 'วันถัดไป';
+        conflicts.push({
+          code: 'ADJACENT_DAY_OVERLAP',
+          shiftA: toRef(resShift),
+          shiftB: toRef(adj),
+          message: `เวลาทับซ้อนกับกะข้ามวันของ${relationLabel}: ${formatShiftSpanLabel(resShift)} ทับซ้อนกับ ${formatShiftSpanLabel(adj)}`,
+        });
+      }
+    }
+  }
+
+  const willClearAll = resultingShifts.length === 0;
+  const hasChanges =
+    shiftsToAdd.length > 0 || shiftsToRemove.length > 0 || (willClearAll && !isCleared);
+
+  return {
+    canProceed: conflicts.length === 0,
+    hasChanges,
+    willClearAll,
+    effectiveState,
+    conflicts,
+    existingEffectiveShifts,
+    selectedTemplateIds: uniqueSelectedIds,
+    shiftsToKeep,
+    shiftsToAdd,
+    shiftsToRemove,
+    resultingShifts,
+    carryoverFromPrevDay,
+    nextDayShifts,
+    specialExistingAssignments,
+    defaultShiftToMaterialize,
+  };
 }
 
 export async function evaluateBulkShiftAssignments(
@@ -1560,8 +2425,889 @@ shiftsRouter.get(
 );
 
 /**
- * 4. จัดการเวรรายช่องตารางของบุคลากร 1 คนโดยตรง (Single-Person Quick Cell Action)
- * รองรับ: ADD_SHIFT | REPLACE_SHIFTS | REMOVE_MORNING | REMOVE_AFTERNOON | CLEAR_ALL_SHIFTS | RESTORE_DEFAULT
+ * 4.0 โหลดข้อมูลสถานะเวรล่าสุดของบุคลากร 1 คนใน 1 วัน (Authoritative Daily Cell State)
+ * แยกข้อมูลชัดเจน:
+ * 1. effectiveShifts — กะที่มีผลจริง (Assignment + Default จากประเภทบุคลากร)
+ * 2. availableTemplates — แม่แบบกะที่ใช้งานได้ทั้งหมดจากฐานข้อมูลจริง
+ * 3. dailyOverride — การกำหนดเฉพาะวัน
+ * 4. clearedAll — วันที่ตั้งใจยกเลิกทุกกะ
+ * 5. carryoverFromPrevDay — กะข้ามวันจากวันก่อนหน้าที่ต่อเนื่องมาถึงวันนี้ (Read-only info)
+ */
+shiftsRouter.get(
+  '/shift-assignments/daily-cell',
+  requireAuth,
+  async (req, res, next) => {
+    try {
+      const personId = String(req.query.personId || '').trim();
+      const workDate = normalizeWorkDateString(req.query.workDate);
+
+      if (!personId || !/^\d{4}-\d{2}-\d{2}$/.test(workDate)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'กรุณาระบุรหัสบุคลากรและวันที่ (YYYY-MM-DD) ให้ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const role = req.user!.role;
+      const canEdit = role === 'ADMIN' || role === 'RESPONSIBLE_STAFF';
+      if (!canEdit) {
+        const ownPersonId = String(req.user!.approvedPersonId || '').trim();
+        if (!ownPersonId || ownPersonId !== personId) {
+          res.status(403).json({
+            error: 'FORBIDDEN',
+            message: 'คุณไม่มีสิทธิ์ดูข้อมูลตารางเวรของบุคลากรท่านอื่น',
+            requestId: req.requestId,
+          });
+          return;
+        }
+      }
+
+      const personRows = await dbQuery<{
+        person_id: string;
+        full_name: string;
+        department_name: string;
+        personnel_type_code: string;
+        personnel_type_name: string;
+      }>(
+        'SELECT person_id, full_name, department_name, personnel_type_code, personnel_type_name FROM personnel WHERE person_id = ? LIMIT 1',
+        [personId]
+      );
+      if (personRows.length === 0) {
+        res.status(404).json({
+          error: 'PERSONNEL_NOT_FOUND',
+          message: 'ไม่พบรหัสบุคลากรที่เลือกในระบบ',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const prevDate = addDaysToDateString(workDate, -1);
+      const nextDate = addDaysToDateString(workDate, 1);
+
+      const [availableTemplates, nearbyAssignments, overrides, allTypeRules] = await Promise.all([
+        dbQuery<ShiftRow>('SELECT * FROM shifts WHERE is_active = 1 ORDER BY start_time ASC, id ASC'),
+        dbQuery<ExistingAssignmentRow>(
+          `SELECT id, person_id, shift_id, work_date,
+                  snapshot_shift_code, snapshot_shift_name,
+                  snapshot_start_time, snapshot_end_time,
+                  snapshot_grace_minutes, snapshot_cutoff_time,
+                  snapshot_is_cross_midnight, status
+           FROM shift_assignments
+           WHERE person_id = ?
+             AND work_date >= ?
+             AND work_date <= ?
+             AND status = 'ACTIVE'
+           ORDER BY work_date ASC, snapshot_start_time ASC, id ASC`,
+          [personId, prevDate, nextDate]
+        ),
+        dbQuery<DailyOverrideRow>(
+          'SELECT * FROM shift_daily_overrides WHERE person_id = ? AND work_date IN (?, ?)',
+          [personId, workDate, nextDate]
+        ),
+        dbQuery<PersonnelTypeRuleRow>('SELECT * FROM personnel_type_rules ORDER BY id ASC'),
+      ]);
+
+      const normalizedNearby = nearbyAssignments.map((a) => ({
+        ...a,
+        person_id: String(a.person_id ?? '').trim(),
+        work_date: normalizeWorkDateString(a.work_date),
+      }));
+      const sameDayActive = normalizedNearby.filter((a) => a.work_date === workDate);
+      const adjacentDaysActive = normalizedNearby.filter((a) => a.work_date !== workDate);
+
+      const normalizedOverrides = overrides.map((o) => ({
+        ...o,
+        work_date: normalizeWorkDateString(o.work_date),
+      }));
+      const todayOverride = normalizedOverrides.find((o) => o.work_date === workDate) || null;
+      const nextDayOverride = normalizedOverrides.find((o) => o.work_date === nextDate) || null;
+
+      const rulesByCode = new Map<string, PersonnelTypeRuleRow>();
+      for (const r of allTypeRules) {
+        rulesByCode.set(String(r.personnel_type_code || '').trim().toUpperCase(), r);
+      }
+      const normTypeCode = normalizePersonnelTypeCodeForDefaultShift(
+        personRows[0].personnel_type_code,
+        personRows[0].personnel_type_name
+      );
+      const defaultRule = normTypeCode ? rulesByCode.get(normTypeCode) || null : null;
+
+      // คำนวณสถานะปัจจุบันก่อน เพื่อดึง selectedTemplateIds ที่ตรงกับกะที่มีผลจริง 100%
+      const initialEval = evaluateDailyCellSync({
+        workDate,
+        selectedTemplateIds: [],
+        availableTemplates,
+        sameDayActive,
+        adjacentDaysActive,
+        dailyOverride: todayOverride,
+        defaultRule,
+        nextDayDefaultRule: defaultRule,
+        nextDayOverride,
+      });
+
+      const currentSelectedTemplateIds: number[] = [];
+      for (const eff of initialEval.existingEffectiveShifts) {
+        if (!eff.isSpecialAssignment && eff.templateId !== null) {
+          if (!currentSelectedTemplateIds.includes(eff.templateId)) {
+            currentSelectedTemplateIds.push(eff.templateId);
+          }
+        }
+      }
+
+      const clearedAll =
+        todayOverride?.override_state === 'CLEARED_ALL_SHIFTS' && sameDayActive.length === 0;
+
+      res.json({
+        status: 'OK',
+        canEdit,
+        person: personRows[0],
+        workDate,
+        effectiveState: initialEval.effectiveState,
+        effectiveShifts: initialEval.existingEffectiveShifts,
+        availableTemplates: availableTemplates.map((t) => ({
+          id: Number(t.id),
+          shiftCode: t.shift_code,
+          shiftName: t.shift_name,
+          shiftCategory: t.shift_category,
+          startTime: t.start_time,
+          endTime: t.end_time,
+          graceMinutes: Number(t.grace_minutes),
+          cutoffTime: t.cutoff_time,
+          isCrossMidnight: Number(t.is_cross_midnight) === 1 || t.end_time <= t.start_time ? 1 : 0,
+        })),
+        selectedTemplateIds: currentSelectedTemplateIds,
+        dailyOverride: todayOverride
+          ? {
+              overrideState: todayOverride.override_state,
+              reason: todayOverride.reason,
+              updatedBy: todayOverride.updated_by,
+              updatedAt: todayOverride.updated_at || null,
+            }
+          : null,
+        clearedAll,
+        defaultRule: defaultRule
+          ? {
+              personnelTypeCode: defaultRule.personnel_type_code,
+              personnelTypeName: defaultRule.personnel_type_name,
+              defaultStartTime: defaultRule.default_start_time,
+              defaultEndTime: defaultRule.default_end_time,
+              defaultGraceMinutes: Number(defaultRule.default_grace_minutes ?? 15),
+              defaultCutoffTime: defaultRule.default_cutoff_time,
+              isActive: Number(defaultRule.is_active),
+            }
+          : null,
+        carryoverFromPrevDay: initialEval.carryoverFromPrevDay,
+        nextDayShifts: initialEval.nextDayShifts,
+        specialExistingAssignments: initialEval.specialExistingAssignments,
+        requestId: req.requestId,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * 4.1 ตรวจสอบ Preview และ Conflict ล่วงหน้าสำหรับโหมด Synchronize Selected Shifts
+ * รับ selectedTemplateIds[] = ชุดกะทั้งหมดที่ผู้ใช้ต้องการให้มีในวันนั้น
+ */
+shiftsRouter.post(
+  '/shift-assignments/daily-cell-sync-preview',
+  requireAuth,
+  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
+  async (req, res, next) => {
+    try {
+      const personId = String(req.body?.personId || '').trim();
+      const workDate = normalizeWorkDateString(req.body?.workDate);
+
+      if (!personId || !/^\d{4}-\d{2}-\d{2}$/.test(workDate)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'กรุณาระบุรหัสบุคลากรและวันที่ (YYYY-MM-DD) ให้ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (!Array.isArray(req.body?.selectedTemplateIds)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'รูปแบบรายการกะที่เลือก (selectedTemplateIds) ไม่ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const rawSelectedIds: number[] = [];
+      for (const id of req.body.selectedTemplateIds) {
+        const n = Number(id);
+        if (n > 0 && !rawSelectedIds.includes(n)) rawSelectedIds.push(n);
+      }
+
+      const keepSpecialAssignmentIds: number[] | undefined = Array.isArray(
+        req.body?.keepSpecialAssignmentIds
+      )
+        ? req.body.keepSpecialAssignmentIds
+            .map((x: unknown) => Number(x))
+            .filter((n: number) => n > 0)
+        : undefined;
+
+      const personRows = await dbQuery<{
+        person_id: string;
+        full_name: string;
+        personnel_type_code: string;
+        personnel_type_name: string;
+      }>(
+        'SELECT person_id, full_name, personnel_type_code, personnel_type_name FROM personnel WHERE person_id = ? LIMIT 1',
+        [personId]
+      );
+      if (personRows.length === 0) {
+        res.status(404).json({
+          error: 'PERSONNEL_NOT_FOUND',
+          message: 'ไม่พบรหัสบุคลากรที่เลือกในระบบ',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const prevDate = addDaysToDateString(workDate, -1);
+      const nextDate = addDaysToDateString(workDate, 1);
+
+      const [availableTemplates, nearbyAssignments, overrides, allTypeRules] = await Promise.all([
+        dbQuery<ShiftRow>('SELECT * FROM shifts WHERE is_active = 1 ORDER BY start_time ASC, id ASC'),
+        dbQuery<ExistingAssignmentRow>(
+          `SELECT id, person_id, shift_id, work_date,
+                  snapshot_shift_code, snapshot_shift_name,
+                  snapshot_start_time, snapshot_end_time,
+                  snapshot_grace_minutes, snapshot_cutoff_time,
+                  snapshot_is_cross_midnight, status
+           FROM shift_assignments
+           WHERE person_id = ?
+             AND work_date >= ?
+             AND work_date <= ?
+             AND status = 'ACTIVE'
+           ORDER BY work_date ASC, snapshot_start_time ASC, id ASC`,
+          [personId, prevDate, nextDate]
+        ),
+        dbQuery<DailyOverrideRow>(
+          'SELECT * FROM shift_daily_overrides WHERE person_id = ? AND work_date IN (?, ?)',
+          [personId, workDate, nextDate]
+        ),
+        dbQuery<PersonnelTypeRuleRow>('SELECT * FROM personnel_type_rules ORDER BY id ASC'),
+      ]);
+
+      const validIdSet = new Set(availableTemplates.map((t) => Number(t.id)));
+      const invalidId = rawSelectedIds.find((id) => !validIdSet.has(id));
+      if (invalidId !== undefined) {
+        res.status(404).json({
+          error: 'SHIFT_NOT_FOUND',
+          message: 'ไม่พบแม่แบบกะทำงานบางรายการที่เลือก หรือแม่แบบกะถูกปิดใช้งาน',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const normalizedNearby = nearbyAssignments.map((a) => ({
+        ...a,
+        person_id: String(a.person_id ?? '').trim(),
+        work_date: normalizeWorkDateString(a.work_date),
+      }));
+      const sameDayActive = normalizedNearby.filter((a) => a.work_date === workDate);
+      const adjacentDaysActive = normalizedNearby.filter((a) => a.work_date !== workDate);
+
+      const normalizedOverrides = overrides.map((o) => ({
+        ...o,
+        work_date: normalizeWorkDateString(o.work_date),
+      }));
+      const todayOverride = normalizedOverrides.find((o) => o.work_date === workDate) || null;
+      const nextDayOverride = normalizedOverrides.find((o) => o.work_date === nextDate) || null;
+
+      const rulesByCode = new Map<string, PersonnelTypeRuleRow>();
+      for (const r of allTypeRules) {
+        rulesByCode.set(String(r.personnel_type_code || '').trim().toUpperCase(), r);
+      }
+      const normTypeCode = normalizePersonnelTypeCodeForDefaultShift(
+        personRows[0].personnel_type_code,
+        personRows[0].personnel_type_name
+      );
+      const defaultRule = normTypeCode ? rulesByCode.get(normTypeCode) || null : null;
+
+      const evalResult = evaluateDailyCellSync({
+        workDate,
+        selectedTemplateIds: rawSelectedIds,
+        availableTemplates,
+        sameDayActive,
+        adjacentDaysActive,
+        dailyOverride: todayOverride,
+        defaultRule,
+        nextDayDefaultRule: defaultRule,
+        nextDayOverride,
+        keepSpecialAssignmentIds,
+      });
+
+      res.json({
+        status: 'OK',
+        personId,
+        workDate,
+        ...evalResult,
+        requestId: req.requestId,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * 4.2 บันทึกชุดกะทั้งหมดของวันเดียวแบบ Synchronize Selected Shifts (All-or-Nothing Transaction)
+ * - เปรียบเทียบ Existing Effective Shifts vs Selected Template IDs ภายใน Transaction
+ * - คง Assignment ID ของกะที่ไม่เปลี่ยน, ยกเลิกเฉพาะกะที่เอาออก, เพิ่มเฉพาะกะที่ติ๊กเพิ่ม
+ * - หากเอาติ๊กออกทั้งหมด -> บันทึก shift_daily_overrides = CLEARED_ALL_SHIFTS (ไม่กลับมาเอง)
+ * - หากเกิด Conflict -> 409 และ Rollback ทั้งรายการ
+ * - ป้องกัน Double Submit และ Concurrent Updates ด้วย withPersonScheduleLock + MySQL FOR UPDATE
+ */
+shiftsRouter.post(
+  '/shift-assignments/daily-cell-sync',
+  requireAuth,
+  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
+  async (req, res, next) => {
+    try {
+      const personId = String(req.body?.personId || '').trim();
+      const workDate = normalizeWorkDateString(req.body?.workDate);
+      const reason = String(
+        req.body?.reason || 'ปรับปรุงตารางเวรรายวันจากหน้าต่างเลือกกะ'
+      ).trim();
+
+      if (!personId || !/^\d{4}-\d{2}-\d{2}$/.test(workDate)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'กรุณาระบุรหัสบุคลากรและวันที่ (YYYY-MM-DD) ให้ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (!Array.isArray(req.body?.selectedTemplateIds)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'กรุณาส่งรายการกะที่ต้องการ (selectedTemplateIds) เป็นอาเรย์',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const rawSelectedIds: number[] = [];
+      for (const id of req.body.selectedTemplateIds) {
+        const n = Number(id);
+        if (n > 0 && !rawSelectedIds.includes(n)) rawSelectedIds.push(n);
+      }
+
+      const keepSpecialAssignmentIds: number[] | undefined = Array.isArray(
+        req.body?.keepSpecialAssignmentIds
+      )
+        ? req.body.keepSpecialAssignmentIds
+            .map((x: unknown) => Number(x))
+            .filter((n: number) => n > 0)
+        : undefined;
+
+      const personRows = await dbQuery<{
+        person_id: string;
+        full_name: string;
+        personnel_type_code: string;
+        personnel_type_name: string;
+      }>(
+        'SELECT person_id, full_name, personnel_type_code, personnel_type_name FROM personnel WHERE person_id = ? LIMIT 1',
+        [personId]
+      );
+      if (personRows.length === 0) {
+        res.status(404).json({
+          error: 'PERSONNEL_NOT_FOUND',
+          message: 'ไม่พบรหัสบุคลากรที่เลือกในระบบ',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const prevDate = addDaysToDateString(workDate, -1);
+      const nextDate = addDaysToDateString(workDate, 1);
+
+      const txResult = await withPersonScheduleLock(personId, () =>
+        dbTransaction(async (tx: DbTransactionContext) => {
+          if (loadConfig().dbEngine === 'mysql') {
+            await tx.query('SELECT person_id FROM personnel WHERE person_id = ? FOR UPDATE', [
+              personId,
+            ]);
+          }
+
+          const availableTemplates = await tx.query<ShiftRow>(
+            'SELECT * FROM shifts WHERE is_active = 1 ORDER BY start_time ASC, id ASC'
+          );
+          const validIdSet = new Set(availableTemplates.map((t) => Number(t.id)));
+          const missingId = rawSelectedIds.find((id) => !validIdSet.has(id));
+          if (missingId !== undefined) {
+            return {
+              notFoundShift: true as const,
+              conflictError: null,
+              changed: false,
+              overrideState: 'CUSTOM_ASSIGNED' as DailyScheduleOverrideState,
+              addedCount: 0,
+              removedCount: 0,
+              keptCount: 0,
+              previousShiftsSummary: [] as string[],
+              newShiftsSummary: [] as string[],
+              addedSummary: [] as string[],
+              removedSummary: [] as string[],
+              keptSummary: [] as string[],
+            };
+          }
+
+          const nearbyAssignments = await tx.query<ExistingAssignmentRow>(
+            `SELECT id, person_id, shift_id, work_date,
+                    snapshot_shift_code, snapshot_shift_name,
+                    snapshot_start_time, snapshot_end_time,
+                    snapshot_grace_minutes, snapshot_cutoff_time,
+                    snapshot_is_cross_midnight, status
+             FROM shift_assignments
+             WHERE person_id = ?
+               AND work_date >= ?
+               AND work_date <= ?
+               AND status = 'ACTIVE'
+             ORDER BY work_date ASC, snapshot_start_time ASC, id ASC`,
+            [personId, prevDate, nextDate]
+          );
+
+          const overridesInTx = await tx.query<DailyOverrideRow>(
+            'SELECT * FROM shift_daily_overrides WHERE person_id = ? AND work_date IN (?, ?)',
+            [personId, workDate, nextDate]
+          );
+          const allRulesInTx = await tx.query<PersonnelTypeRuleRow>(
+            'SELECT * FROM personnel_type_rules ORDER BY id ASC'
+          );
+
+          const normalizedNearby = nearbyAssignments.map((a) => ({
+            ...a,
+            person_id: String(a.person_id ?? '').trim(),
+            work_date: normalizeWorkDateString(a.work_date),
+          }));
+          const sameDayActive = normalizedNearby.filter((a) => a.work_date === workDate);
+          const adjacentDaysActive = normalizedNearby.filter((a) => a.work_date !== workDate);
+
+          const normalizedOverrides = overridesInTx.map((o) => ({
+            ...o,
+            work_date: normalizeWorkDateString(o.work_date),
+          }));
+          const todayOverride = normalizedOverrides.find((o) => o.work_date === workDate) || null;
+          const nextDayOverride = normalizedOverrides.find((o) => o.work_date === nextDate) || null;
+
+          const rulesByCodeInTx = new Map<string, PersonnelTypeRuleRow>();
+          for (const r of allRulesInTx) {
+            rulesByCodeInTx.set(String(r.personnel_type_code || '').trim().toUpperCase(), r);
+          }
+          const normTypeCode = normalizePersonnelTypeCodeForDefaultShift(
+            personRows[0].personnel_type_code,
+            personRows[0].personnel_type_name
+          );
+          const defaultRuleInTx = normTypeCode ? rulesByCodeInTx.get(normTypeCode) || null : null;
+
+          const evalResult = evaluateDailyCellSync({
+            workDate,
+            selectedTemplateIds: rawSelectedIds,
+            availableTemplates,
+            sameDayActive,
+            adjacentDaysActive,
+            dailyOverride: todayOverride,
+            defaultRule: defaultRuleInTx,
+            nextDayDefaultRule: defaultRuleInTx,
+            nextDayOverride,
+            keepSpecialAssignmentIds,
+          });
+
+          if (!evalResult.canProceed) {
+            const primary = evalResult.conflicts[0];
+            return {
+              notFoundShift: false as const,
+              conflictError: {
+                code: primary.code,
+                message: evalResult.conflicts.map((c) => c.message).join(' | '),
+                conflicts: evalResult.conflicts,
+              },
+              changed: false,
+              overrideState: evalResult.effectiveState,
+              addedCount: 0,
+              removedCount: 0,
+              keptCount: evalResult.shiftsToKeep.length,
+              previousShiftsSummary: [] as string[],
+              newShiftsSummary: [] as string[],
+              addedSummary: [] as string[],
+              removedSummary: [] as string[],
+              keptSummary: [] as string[],
+            };
+          }
+
+          const formatSummary = (x: {
+            shiftCode: string;
+            shiftName: string;
+            startTime: string;
+            endTime: string;
+          }) => `${x.shiftName} [${x.shiftCode}] (${x.startTime}–${x.endTime})`;
+
+          const previousShiftsSummary = evalResult.existingEffectiveShifts.map(formatSummary);
+          const newShiftsSummary = evalResult.resultingShifts.map(formatSummary);
+          const addedSummary = evalResult.shiftsToAdd.map(formatSummary);
+          const removedSummary = evalResult.shiftsToRemove.map(formatSummary);
+          const keptSummary = evalResult.shiftsToKeep.map(formatSummary);
+
+          // ป้องกัน Double Submit / No-op: หากสถานะตรงกับข้อมูลเดิมทุกประการ ไม่ต้องเขียนซ้ำ
+          if (!evalResult.hasChanges) {
+            return {
+              notFoundShift: false as const,
+              conflictError: null,
+              changed: false,
+              overrideState: evalResult.effectiveState,
+              addedCount: 0,
+              removedCount: 0,
+              keptCount: evalResult.shiftsToKeep.length,
+              previousShiftsSummary,
+              newShiftsSummary,
+              addedSummary,
+              removedSummary,
+              keptSummary,
+            };
+          }
+
+          // 1. ยกเลิกเฉพาะ Assignment ที่เอาออก (ไม่แตะกะเดิมที่ยังคงไว้ เพื่อรักษา Assignment ID และประวัติ)
+          let removedCount = 0;
+          for (const rem of evalResult.shiftsToRemove) {
+            if (rem.source === 'ASSIGNMENT' && rem.assignmentId !== null) {
+              await tx.execute(
+                "UPDATE shift_assignments SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [rem.assignmentId]
+              );
+              await tx.execute(
+                `INSERT INTO shift_cancellation_logs (
+                  shift_assignment_id, person_id, work_date, shift_code, cancel_reason, cancelled_by
+                ) VALUES (?, ?, ?, ?, ?, ?)`,
+                [rem.assignmentId, personId, workDate, rem.shiftCode, reason, req.user!.username]
+              );
+            }
+            removedCount++;
+          }
+
+          // 2. หากเดิมเป็น DEFAULT_FROM_TYPE และผู้ใช้ยังคงกะเช้าเริ่มต้นไว้พร้อมเพิ่มกะอื่น ให้ Materialize กะเช้าเริ่มต้นไว้ด้วย
+          if (evalResult.defaultShiftToMaterialize) {
+            const defMat = evalResult.defaultShiftToMaterialize;
+            const matchedTplId =
+              defMat.templateId ??
+              availableTemplates.find(
+                (t) =>
+                  t.shift_code === defMat.shiftCode ||
+                  (t.start_time === defMat.startTime && t.end_time === defMat.endTime)
+              )?.id ??
+              evalResult.shiftsToAdd[0]?.shiftId ??
+              availableTemplates[0]?.id;
+
+            if (matchedTplId) {
+              await tx.execute(
+                `INSERT INTO shift_assignments (
+                  person_id, shift_id, work_date, snapshot_shift_code, snapshot_shift_name,
+                  snapshot_start_time, snapshot_end_time, snapshot_grace_minutes, snapshot_cutoff_time,
+                  snapshot_is_cross_midnight, status, assigned_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)`,
+                [
+                  personId,
+                  matchedTplId,
+                  workDate,
+                  defMat.shiftCode,
+                  defMat.shiftName,
+                  defMat.startTime,
+                  defMat.endTime,
+                  defMat.graceMinutes,
+                  defMat.cutoffTime,
+                  defMat.isCrossMidnight,
+                  req.user!.username,
+                ]
+              );
+            }
+          }
+
+          // 3. เพิ่มเฉพาะกะใหม่ที่ติ๊กเพิ่ม
+          const templateByIdInTx = new Map(availableTemplates.map((t) => [Number(t.id), t]));
+          let addedCount = 0;
+          for (const addItem of evalResult.shiftsToAdd) {
+            const tpl = addItem.shiftId ? templateByIdInTx.get(Number(addItem.shiftId)) : null;
+            if (!tpl) continue;
+            await tx.execute(
+              `INSERT INTO shift_assignments (
+                person_id, shift_id, work_date, snapshot_shift_code, snapshot_shift_name,
+                snapshot_start_time, snapshot_end_time, snapshot_grace_minutes, snapshot_cutoff_time,
+                snapshot_is_cross_midnight, status, assigned_by
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)`,
+              [
+                personId,
+                tpl.id,
+                workDate,
+                tpl.shift_code,
+                tpl.shift_name,
+                tpl.start_time,
+                tpl.end_time,
+                tpl.grace_minutes,
+                tpl.cutoff_time,
+                tpl.is_cross_midnight,
+                req.user!.username,
+              ]
+            );
+            addedCount++;
+          }
+
+          // 4. บันทึก Daily Override:
+          //    - เอาติ๊กออกทั้งหมด -> CLEARED_ALL_SHIFTS (ไม่สร้างกะเริ่มต้นกลับมาเอง)
+          //    - มีกะที่เลือกอย่างน้อย 1 กะ -> CUSTOM_ASSIGNED
+          const nextOverrideState: 'CLEARED_ALL_SHIFTS' | 'CUSTOM_ASSIGNED' =
+            evalResult.willClearAll ? 'CLEARED_ALL_SHIFTS' : 'CUSTOM_ASSIGNED';
+
+          await upsertDailyOverrideRecord(tx.execute, tx.query, {
+            personId,
+            workDate,
+            overrideState: nextOverrideState,
+            reason,
+            actorUsername: req.user!.username,
+          });
+
+          return {
+            notFoundShift: false as const,
+            conflictError: null,
+            changed: true,
+            overrideState: nextOverrideState as DailyScheduleOverrideState,
+            addedCount,
+            removedCount,
+            keptCount: evalResult.shiftsToKeep.length,
+            previousShiftsSummary,
+            newShiftsSummary,
+            addedSummary,
+            removedSummary,
+            keptSummary,
+          };
+        })
+      );
+
+      if (txResult.notFoundShift) {
+        res.status(404).json({
+          error: 'SHIFT_NOT_FOUND',
+          message: 'ไม่พบแม่แบบกะทำงานบางรายการที่เลือก หรือแม่แบบกะถูกปิดใช้งาน',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (txResult.conflictError) {
+        res.status(409).json({
+          error: txResult.conflictError.code,
+          message: txResult.conflictError.message,
+          conflicts: txResult.conflictError.conflicts,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (txResult.changed) {
+        await writeAuditLog({
+          requestId: req.requestId,
+          actorUsername: req.user!.username,
+          actorRole: req.user!.role,
+          ipAddress: req.ip || '127.0.0.1',
+          action: 'SHIFT_CELL_SYNC',
+          targetType: 'SHIFT_DAILY_OVERRIDE',
+          targetId: `${personId}:${workDate}`,
+          result: 'SUCCESS',
+          detail: {
+            actorUsername: req.user!.username,
+            personId,
+            workDate,
+            previousShifts: txResult.previousShiftsSummary,
+            newShifts: txResult.newShiftsSummary,
+            addedShifts: txResult.addedSummary,
+            removedShifts: txResult.removedSummary,
+            keptShifts: txResult.keptSummary,
+            overrideState: txResult.overrideState,
+            reason,
+            operatedAt: new Date().toISOString(),
+          },
+        });
+      }
+
+      const actionMsg = !txResult.changed
+        ? 'ไม่มีการเปลี่ยนแปลงกะทำงานในวันนี้'
+        : txResult.overrideState === 'CLEARED_ALL_SHIFTS'
+          ? 'บันทึกเป็นไม่มีเวรในวันนี้สำเร็จ (ระบบจะไม่สร้างกะเริ่มต้นกลับมาอัตโนมัติ)'
+          : `บันทึกตารางเวรสำเร็จ (เพิ่ม ${txResult.addedCount} กะ, ลบ ${txResult.removedCount} กะ, คงไว้ ${txResult.keptCount} กะ)`;
+
+      res.json({
+        status: 'OK',
+        changed: txResult.changed,
+        personId,
+        workDate,
+        overrideState: txResult.overrideState,
+        addedCount: txResult.addedCount,
+        removedCount: txResult.removedCount,
+        keptCount: txResult.keptCount,
+        previousShifts: txResult.previousShiftsSummary,
+        newShifts: txResult.newShiftsSummary,
+        message: actionMsg,
+        requestId: req.requestId,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * 4A. ตรวจสอบ Preview และ Conflict ล่วงหน้าสำหรับ Quick Daily Shift Cell
+ * รองรับ Multi-select (shiftIds[]) + ADD_SHIFT / REPLACE_SHIFTS + ตรวจวันก่อนหน้า/วันถัดไป
+ */
+shiftsRouter.post(
+  '/shift-assignments/daily-cell-preview',
+  requireAuth,
+  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
+  async (req, res, next) => {
+    try {
+      const personId = String(req.body?.personId || '').trim();
+      const workDate = normalizeWorkDateString(req.body?.workDate);
+      const rawAction = String(req.body?.action || 'ADD_SHIFT').trim().toUpperCase();
+      const action: 'ADD_SHIFT' | 'REPLACE_SHIFTS' =
+        rawAction === 'REPLACE_SHIFTS' ? 'REPLACE_SHIFTS' : 'ADD_SHIFT';
+
+      if (!personId || !/^\d{4}-\d{2}-\d{2}$/.test(workDate)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'กรุณาระบุบุคลากรและวันที่ (YYYY-MM-DD) ให้ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const personRows = await dbQuery<{
+        person_id: string;
+        full_name: string;
+        personnel_type_code: string;
+        personnel_type_name: string;
+      }>(
+        'SELECT person_id, full_name, personnel_type_code, personnel_type_name FROM personnel WHERE person_id = ? LIMIT 1',
+        [personId]
+      );
+      if (personRows.length === 0) {
+        res.status(404).json({
+          error: 'PERSONNEL_NOT_FOUND',
+          message: 'ไม่พบรหัสบุคลากรที่เลือกในระบบ',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const rawShiftIds: number[] = [];
+      if (req.body?.shiftId) {
+        const n = Number(req.body.shiftId);
+        if (n > 0) rawShiftIds.push(n);
+      }
+      if (Array.isArray(req.body?.shiftIds)) {
+        for (const id of req.body.shiftIds) {
+          const n = Number(id);
+          if (n > 0 && !rawShiftIds.includes(n)) rawShiftIds.push(n);
+        }
+      }
+
+      let selectedShifts: ShiftRow[] = [];
+      if (rawShiftIds.length > 0) {
+        const placeholders = rawShiftIds.map(() => '?').join(', ');
+        const fetched = await dbQuery<ShiftRow>(
+          `SELECT * FROM shifts WHERE id IN (${placeholders}) AND is_active = 1`,
+          rawShiftIds
+        );
+        if (fetched.length !== rawShiftIds.length) {
+          res.status(404).json({
+            error: 'SHIFT_NOT_FOUND',
+            message: 'ไม่พบแม่แบบกะทำงานบางรายการที่เลือก หรือแม่แบบกะถูกปิดใช้งาน',
+            requestId: req.requestId,
+          });
+          return;
+        }
+        const byId = new Map(fetched.map((s) => [Number(s.id), s]));
+        selectedShifts = rawShiftIds.map((id) => byId.get(id)!).filter(Boolean);
+      }
+
+      const prevDate = addDaysToDateString(workDate, -1);
+      const nextDate = addDaysToDateString(workDate, 1);
+
+      const [nearbyAssignments, overrides, allTypeRules] = await Promise.all([
+        dbQuery<ExistingAssignmentRow>(
+          `SELECT id, person_id, shift_id, work_date,
+                  snapshot_shift_code, snapshot_shift_name,
+                  snapshot_start_time, snapshot_end_time,
+                  snapshot_grace_minutes, snapshot_cutoff_time,
+                  snapshot_is_cross_midnight, status
+           FROM shift_assignments
+           WHERE person_id = ?
+             AND work_date >= ?
+             AND work_date <= ?
+             AND status = 'ACTIVE'
+           ORDER BY work_date ASC, snapshot_start_time ASC`,
+          [personId, prevDate, nextDate]
+        ),
+        dbQuery<DailyOverrideRow>(
+          'SELECT * FROM shift_daily_overrides WHERE person_id = ? AND work_date = ? LIMIT 1',
+          [personId, workDate]
+        ),
+        dbQuery<PersonnelTypeRuleRow>('SELECT * FROM personnel_type_rules ORDER BY id ASC'),
+      ]);
+
+      const normalizedNearby = nearbyAssignments.map((a) => ({
+        ...a,
+        person_id: String(a.person_id ?? '').trim(),
+        work_date: normalizeWorkDateString(a.work_date),
+      }));
+      const sameDayActive = normalizedNearby.filter((a) => a.work_date === workDate);
+      const adjacentDaysActive = normalizedNearby.filter((a) => a.work_date !== workDate);
+
+      const rulesByCode = new Map<string, PersonnelTypeRuleRow>();
+      for (const r of allTypeRules) {
+        rulesByCode.set(String(r.personnel_type_code || '').trim().toUpperCase(), r);
+      }
+      const normTypeCode = normalizePersonnelTypeCodeForDefaultShift(
+        personRows[0].personnel_type_code,
+        personRows[0].personnel_type_name
+      );
+      const defaultRule = normTypeCode ? rulesByCode.get(normTypeCode) || null : null;
+
+      const evalResult = evaluateDailyCellChange({
+        workDate,
+        action,
+        selectedShifts,
+        sameDayActive,
+        adjacentDaysActive,
+        dailyOverride: overrides[0] || null,
+        defaultRule,
+      });
+
+      res.json({
+        status: 'OK',
+        personId,
+        workDate,
+        ...evalResult,
+        requestId: req.requestId,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * 4B. จัดการเวรรายช่องตารางของบุคลากร 1 คนโดยตรง (Single-Person Quick Cell Action)
+ * รองรับ: ADD_SHIFT / ADD_SHIFTS | REPLACE_SHIFTS | REMOVE_MORNING | REMOVE_AFTERNOON | CLEAR_ALL_SHIFTS | RESTORE_DEFAULT
+ * - รองรับ Multi-select (shiftIds[]) ทั้งโหมดเพิ่มกะและแทนที่กะเดิม
+ * - ตรวจ Conflict ซ้ำภายใน Database Transaction (All-or-Nothing) + ป้องกัน Concurrent Updates
  */
 shiftsRouter.post(
   '/shift-assignments/daily-cell-action',
@@ -1571,7 +3317,9 @@ shiftsRouter.post(
     try {
       const personId = String(req.body?.personId || '').trim();
       const workDate = normalizeWorkDateString(req.body?.workDate);
-      const action = String(req.body?.action || '').trim().toUpperCase();
+      const rawAction = String(req.body?.action || '').trim().toUpperCase();
+      const action = rawAction === 'ADD_SHIFTS' ? 'ADD_SHIFT' : rawAction;
+      const confirmReplace = req.body?.confirmReplace;
       const reason = String(
         req.body?.reason || 'แก้ไขตารางเวรรายวันจากช่องตารางโดยตรง'
       ).trim();
@@ -1589,6 +3337,15 @@ shiftsRouter.post(
         res.status(400).json({
           error: 'VALIDATION_ERROR',
           message: 'กรุณาระบุบุคลากร วันที่ (YYYY-MM-DD) และคำสั่งจัดการเวรรายวันที่ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (action === 'REPLACE_SHIFTS' && confirmReplace === false) {
+        res.status(400).json({
+          error: 'CONFIRMATION_REQUIRED',
+          message: 'กรุณายืนยันการแทนที่กะเดิมก่อนบันทึก',
           requestId: req.requestId,
         });
         return;
@@ -1615,7 +3372,8 @@ shiftsRouter.post(
       // เตรียมรายการ shiftIds กรณี ADD_SHIFT หรือ REPLACE_SHIFTS
       const rawShiftIds: number[] = [];
       if (req.body?.shiftId) {
-        rawShiftIds.push(Number(req.body.shiftId));
+        const n = Number(req.body.shiftId);
+        if (n > 0) rawShiftIds.push(n);
       }
       if (Array.isArray(req.body?.shiftIds)) {
         for (const id of req.body.shiftIds) {
@@ -1635,11 +3393,11 @@ shiftsRouter.post(
           return;
         }
         const placeholders = rawShiftIds.map(() => '?').join(', ');
-        selectedShifts = await dbQuery<ShiftRow>(
+        const fetchedShifts = await dbQuery<ShiftRow>(
           `SELECT * FROM shifts WHERE id IN (${placeholders}) AND is_active = 1`,
           rawShiftIds
         );
-        if (selectedShifts.length !== rawShiftIds.length) {
+        if (fetchedShifts.length !== rawShiftIds.length) {
           res.status(404).json({
             error: 'SHIFT_NOT_FOUND',
             message: 'ไม่พบแม่แบบกะทำงานที่เลือก หรือแม่แบบกะถูกปิดใช้งาน',
@@ -1647,228 +3405,304 @@ shiftsRouter.post(
           });
           return;
         }
-
-        // ตรวจว่ากะที่เลือกหลายกะในวันเดียวกันทับซ้อนกันเองหรือไม่
-        for (let i = 0; i < selectedShifts.length; i++) {
-          for (let j = i + 1; j < selectedShifts.length; j++) {
-            const intA = computeAbsoluteIntervalMinutes(
-              workDate,
-              selectedShifts[i].start_time,
-              selectedShifts[i].end_time,
-              selectedShifts[i].is_cross_midnight
-            );
-            const intB = computeAbsoluteIntervalMinutes(
-              workDate,
-              selectedShifts[j].start_time,
-              selectedShifts[j].end_time,
-              selectedShifts[j].is_cross_midnight
-            );
-            if (Math.max(intA.startAbsMin, intB.startAbsMin) < Math.min(intA.endAbsMin, intB.endAbsMin)) {
-              res.status(409).json({
-                error: 'TIME_OVERLAP_CONFLICT',
-                message: `กะ ${selectedShifts[i].shift_name} และ ${selectedShifts[j].shift_name} มีช่วงเวลาทับซ้อนกัน`,
-                requestId: req.requestId,
-              });
-              return;
-            }
-          }
-        }
+        const shiftById = new Map(fetchedShifts.map((s) => [Number(s.id), s]));
+        selectedShifts = rawShiftIds.map((id) => shiftById.get(id)!).filter(Boolean);
       }
 
       const prevDate = addDaysToDateString(workDate, -1);
       const nextDate = addDaysToDateString(workDate, 1);
 
-      const txResult = await dbTransaction(async (tx: DbTransactionContext) => {
-        const nearbyAssignments = await tx.query<ExistingAssignmentRow>(
-          `SELECT id, person_id, shift_id, work_date,
-                  snapshot_shift_code, snapshot_shift_name,
-                  snapshot_start_time, snapshot_end_time,
-                  snapshot_grace_minutes, snapshot_cutoff_time,
-                  snapshot_is_cross_midnight, status
-           FROM shift_assignments
-           WHERE person_id = ?
-             AND work_date >= ?
-             AND work_date <= ?
-             AND status = 'ACTIVE'
-           ORDER BY work_date ASC, snapshot_start_time ASC`,
-          [personId, prevDate, nextDate]
-        );
-
-        const normalizedNearby = nearbyAssignments.map((a) => ({
-          ...a,
-          person_id: String(a.person_id ?? '').trim(),
-          work_date: normalizeWorkDateString(a.work_date),
-        }));
-        const sameDayActive = normalizedNearby.filter((a) => a.work_date === workDate);
-        const adjacentDaysActive = normalizedNearby.filter((a) => a.work_date !== workDate);
-
-        if (action === 'CLEAR_ALL_SHIFTS') {
-          for (const ex of sameDayActive) {
-            await tx.execute(
-              "UPDATE shift_assignments SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-              [ex.id]
-            );
-            await tx.execute(
-              `INSERT INTO shift_cancellation_logs (
-                shift_assignment_id, person_id, work_date, shift_code, cancel_reason, cancelled_by
-              ) VALUES (?, ?, ?, ?, ?, ?)`,
-              [ex.id, personId, workDate, ex.snapshot_shift_code, reason, req.user!.username]
-            );
+      // ใช้ Per-Person Lock + Database Transaction (All-or-Nothing) + Row Lock บน MySQL
+      const txResult = await withPersonScheduleLock(personId, () =>
+        dbTransaction(async (tx: DbTransactionContext) => {
+          if (loadConfig().dbEngine === 'mysql') {
+            await tx.query('SELECT person_id FROM personnel WHERE person_id = ? FOR UPDATE', [
+              personId,
+            ]);
           }
 
-          await upsertDailyOverrideRecord(tx.execute, tx.query, {
-            personId,
-            workDate,
-            overrideState: 'CLEARED_ALL_SHIFTS',
-            reason,
-            actorUsername: req.user!.username,
-          });
+          const nearbyAssignments = await tx.query<ExistingAssignmentRow>(
+            `SELECT id, person_id, shift_id, work_date,
+                    snapshot_shift_code, snapshot_shift_name,
+                    snapshot_start_time, snapshot_end_time,
+                    snapshot_grace_minutes, snapshot_cutoff_time,
+                    snapshot_is_cross_midnight, status
+             FROM shift_assignments
+             WHERE person_id = ?
+               AND work_date >= ?
+               AND work_date <= ?
+               AND status = 'ACTIVE'
+             ORDER BY work_date ASC, snapshot_start_time ASC`,
+            [personId, prevDate, nextDate]
+          );
 
-          return {
-            overrideState: 'CLEARED_ALL_SHIFTS' as const,
-            cancelledCount: sameDayActive.length,
-            insertedCount: 0,
-            conflictError: null as { code: string; message: string } | null,
-          };
-        }
+          const currentOverrides = await tx.query<DailyOverrideRow>(
+            'SELECT * FROM shift_daily_overrides WHERE person_id = ? AND work_date = ? LIMIT 1',
+            [personId, workDate]
+          );
+          const allRulesInTx = await tx.query<PersonnelTypeRuleRow>(
+            'SELECT * FROM personnel_type_rules ORDER BY id ASC'
+          );
 
-        if (action === 'RESTORE_DEFAULT') {
-          for (const ex of sameDayActive) {
-            await tx.execute(
-              "UPDATE shift_assignments SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-              [ex.id]
-            );
-            await tx.execute(
-              `INSERT INTO shift_cancellation_logs (
-                shift_assignment_id, person_id, work_date, shift_code, cancel_reason, cancelled_by
-              ) VALUES (?, ?, ?, ?, ?, ?)`,
-              [
-                ex.id,
-                personId,
-                workDate,
-                ex.snapshot_shift_code,
-                reason || 'คืนค่ากะเริ่มต้นตามประเภทบุคลากร',
-                req.user!.username,
-              ]
-            );
-          }
+          const normalizedNearby = nearbyAssignments.map((a) => ({
+            ...a,
+            person_id: String(a.person_id ?? '').trim(),
+            work_date: normalizeWorkDateString(a.work_date),
+          }));
+          const sameDayActive = normalizedNearby.filter((a) => a.work_date === workDate);
+          const adjacentDaysActive = normalizedNearby.filter((a) => a.work_date !== workDate);
 
-          await upsertDailyOverrideRecord(tx.execute, tx.query, {
-            personId,
-            workDate,
-            overrideState: 'RESTORED_DEFAULT',
-            reason: reason || 'คืนค่ากะเริ่มต้นตามประเภทบุคลากร',
-            actorUsername: req.user!.username,
-          });
-
-          return {
-            overrideState: 'RESTORED_DEFAULT' as const,
-            cancelledCount: sameDayActive.length,
-            insertedCount: 0,
-            conflictError: null,
-          };
-        }
-
-        if (action === 'REMOVE_MORNING' || action === 'REMOVE_AFTERNOON') {
-          const isTargetShift = (a: ExistingAssignmentRow) => {
-            const startMin = parseTimeToMinutes(a.snapshot_start_time);
-            if (action === 'REMOVE_MORNING') {
-              return startMin >= 360 && startMin < 720; // 06:00 - 11:59
+          if (action === 'CLEAR_ALL_SHIFTS') {
+            for (const ex of sameDayActive) {
+              await tx.execute(
+                "UPDATE shift_assignments SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [ex.id]
+              );
+              await tx.execute(
+                `INSERT INTO shift_cancellation_logs (
+                  shift_assignment_id, person_id, work_date, shift_code, cancel_reason, cancelled_by
+                ) VALUES (?, ?, ?, ?, ?, ?)`,
+                [ex.id, personId, workDate, ex.snapshot_shift_code, reason, req.user!.username]
+              );
             }
-            return startMin >= 720 && startMin < 1140; // 12:00 - 18:59
-          };
 
-          const toCancel = sameDayActive.filter(isTargetShift);
-          const remaining = sameDayActive.filter((a) => !isTargetShift(a));
-
-          for (const ex of toCancel) {
-            await tx.execute(
-              "UPDATE shift_assignments SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-              [ex.id]
-            );
-            await tx.execute(
-              `INSERT INTO shift_cancellation_logs (
-                shift_assignment_id, person_id, work_date, shift_code, cancel_reason, cancelled_by
-              ) VALUES (?, ?, ?, ?, ?, ?)`,
-              [ex.id, personId, workDate, ex.snapshot_shift_code, reason, req.user!.username]
-            );
-          }
-
-          // หากลบกะเช้าหรือกะบ่ายแล้วไม่เหลือกะอื่นในวันนั้น ให้บันทึกเป็น CLEARED_ALL_SHIFTS เพื่อไม่ให้กะเริ่มต้นกลับมาเอง
-          const nextState =
-            remaining.length > 0 ? ('CUSTOM_ASSIGNED' as const) : ('CLEARED_ALL_SHIFTS' as const);
-
-          await upsertDailyOverrideRecord(tx.execute, tx.query, {
-            personId,
-            workDate,
-            overrideState: nextState,
-            reason,
-            actorUsername: req.user!.username,
-          });
-
-          return {
-            overrideState: nextState,
-            cancelledCount: toCancel.length,
-            insertedCount: 0,
-            conflictError: null,
-          };
-        }
-
-        if (action === 'REPLACE_SHIFTS') {
-          // ตรวจว่ากะใหม่ทับซ้อนกับเวรข้ามวันของวันข้างเคียงหรือไม่
-          for (const s of selectedShifts) {
-            const candInt = computeAbsoluteIntervalMinutes(
+            await upsertDailyOverrideRecord(tx.execute, tx.query, {
+              personId,
               workDate,
-              s.start_time,
-              s.end_time,
-              s.is_cross_midnight
-            );
-            const adjConflict = adjacentDaysActive.find((adj) => {
-              const adjInt = computeAbsoluteIntervalMinutes(
-                adj.work_date,
-                adj.snapshot_start_time,
-                adj.snapshot_end_time,
-                adj.snapshot_is_cross_midnight
-              );
-              return (
-                Math.max(candInt.startAbsMin, adjInt.startAbsMin) <
-                Math.min(candInt.endAbsMin, adjInt.endAbsMin)
-              );
+              overrideState: 'CLEARED_ALL_SHIFTS',
+              reason,
+              actorUsername: req.user!.username,
             });
-            if (adjConflict) {
-              return {
-                overrideState: 'CUSTOM_ASSIGNED' as const,
-                cancelledCount: 0,
-                insertedCount: 0,
-                conflictError: {
-                  code: 'TIME_OVERLAP_CONFLICT',
-                  message: `เวลาทับซ้อนกับเวรข้ามวัน ${adjConflict.snapshot_shift_name} (${adjConflict.snapshot_start_time}–${adjConflict.snapshot_end_time} น. วันที่ ${adjConflict.work_date})`,
-                },
-              };
-            }
+
+            return {
+              overrideState: 'CLEARED_ALL_SHIFTS' as const,
+              cancelledCount: sameDayActive.length,
+              insertedCount: 0,
+              conflictError: null as {
+                code: string;
+                message: string;
+                conflicts: DailyCellConflict[];
+              } | null,
+            };
           }
 
-          for (const ex of sameDayActive) {
-            await tx.execute(
-              "UPDATE shift_assignments SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-              [ex.id]
+          if (action === 'RESTORE_DEFAULT') {
+            for (const ex of sameDayActive) {
+              await tx.execute(
+                "UPDATE shift_assignments SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [ex.id]
+              );
+              await tx.execute(
+                `INSERT INTO shift_cancellation_logs (
+                  shift_assignment_id, person_id, work_date, shift_code, cancel_reason, cancelled_by
+                ) VALUES (?, ?, ?, ?, ?, ?)`,
+                [
+                  ex.id,
+                  personId,
+                  workDate,
+                  ex.snapshot_shift_code,
+                  reason || 'คืนค่ากะเริ่มต้นตามประเภทบุคลากร',
+                  req.user!.username,
+                ]
+              );
+            }
+
+            await upsertDailyOverrideRecord(tx.execute, tx.query, {
+              personId,
+              workDate,
+              overrideState: 'RESTORED_DEFAULT',
+              reason: reason || 'คืนค่ากะเริ่มต้นตามประเภทบุคลากร',
+              actorUsername: req.user!.username,
+            });
+
+            return {
+              overrideState: 'RESTORED_DEFAULT' as const,
+              cancelledCount: sameDayActive.length,
+              insertedCount: 0,
+              conflictError: null,
+            };
+          }
+
+          if (action === 'REMOVE_MORNING' || action === 'REMOVE_AFTERNOON') {
+            const isTargetShift = (a: ExistingAssignmentRow) => {
+              const startMin = parseTimeToMinutes(a.snapshot_start_time);
+              if (action === 'REMOVE_MORNING') {
+                return startMin >= 360 && startMin < 720; // 06:00 - 11:59
+              }
+              return startMin >= 720 && startMin < 1140; // 12:00 - 18:59
+            };
+
+            const toCancel = sameDayActive.filter(isTargetShift);
+            const remaining = sameDayActive.filter((a) => !isTargetShift(a));
+
+            for (const ex of toCancel) {
+              await tx.execute(
+                "UPDATE shift_assignments SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [ex.id]
+              );
+              await tx.execute(
+                `INSERT INTO shift_cancellation_logs (
+                  shift_assignment_id, person_id, work_date, shift_code, cancel_reason, cancelled_by
+                ) VALUES (?, ?, ?, ?, ?, ?)`,
+                [ex.id, personId, workDate, ex.snapshot_shift_code, reason, req.user!.username]
+              );
+            }
+
+            // หากลบกะเช้าหรือกะบ่ายแล้วไม่เหลือกะอื่นในวันนั้น ให้บันทึกเป็น CLEARED_ALL_SHIFTS เพื่อไม่ให้กะเริ่มต้นกลับมาเอง
+            const nextState =
+              remaining.length > 0 ? ('CUSTOM_ASSIGNED' as const) : ('CLEARED_ALL_SHIFTS' as const);
+
+            await upsertDailyOverrideRecord(tx.execute, tx.query, {
+              personId,
+              workDate,
+              overrideState: nextState,
+              reason,
+              actorUsername: req.user!.username,
+            });
+
+            return {
+              overrideState: nextState,
+              cancelledCount: toCancel.length,
+              insertedCount: 0,
+              conflictError: null,
+            };
+          }
+
+          // ตรวจสอบ Conflict ซ้ำภายใน Transaction สำหรับทั้ง ADD_SHIFT และ REPLACE_SHIFTS
+          const rulesByCodeInTx = new Map<string, PersonnelTypeRuleRow>();
+          for (const r of allRulesInTx) {
+            rulesByCodeInTx.set(String(r.personnel_type_code || '').trim().toUpperCase(), r);
+          }
+          const normTypeCode = normalizePersonnelTypeCodeForDefaultShift(
+            personRows[0].personnel_type_code,
+            personRows[0].personnel_type_name
+          );
+          const defaultRuleInTx = normTypeCode ? rulesByCodeInTx.get(normTypeCode) || null : null;
+
+          const evalResult = evaluateDailyCellChange({
+            workDate,
+            action: action === 'REPLACE_SHIFTS' ? 'REPLACE_SHIFTS' : 'ADD_SHIFT',
+            selectedShifts,
+            sameDayActive,
+            adjacentDaysActive,
+            dailyOverride: currentOverrides[0] || null,
+            defaultRule: defaultRuleInTx,
+          });
+
+          if (!evalResult.canProceed) {
+            const primary = evalResult.conflicts[0];
+            return {
+              overrideState: 'CUSTOM_ASSIGNED' as const,
+              cancelledCount: 0,
+              insertedCount: 0,
+              conflictError: {
+                code: primary.code,
+                message: evalResult.conflicts.map((c) => c.message).join(' | '),
+                conflicts: evalResult.conflicts,
+              },
+            };
+          }
+
+          if (action === 'REPLACE_SHIFTS') {
+            for (const ex of sameDayActive) {
+              await tx.execute(
+                "UPDATE shift_assignments SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                [ex.id]
+              );
+              await tx.execute(
+                `INSERT INTO shift_cancellation_logs (
+                  shift_assignment_id, person_id, work_date, shift_code, cancel_reason, cancelled_by
+                ) VALUES (?, ?, ?, ?, ?, ?)`,
+                [
+                  ex.id,
+                  personId,
+                  workDate,
+                  ex.snapshot_shift_code,
+                  reason || 'เปลี่ยนกะทำงานรายวัน',
+                  req.user!.username,
+                ]
+              );
+            }
+
+            let insertedCount = 0;
+            for (const s of selectedShifts) {
+              await tx.execute(
+                `INSERT INTO shift_assignments (
+                  person_id, shift_id, work_date, snapshot_shift_code, snapshot_shift_name,
+                  snapshot_start_time, snapshot_end_time, snapshot_grace_minutes, snapshot_cutoff_time,
+                  snapshot_is_cross_midnight, status, assigned_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)`,
+                [
+                  personId,
+                  s.id,
+                  workDate,
+                  s.shift_code,
+                  s.shift_name,
+                  s.start_time,
+                  s.end_time,
+                  s.grace_minutes,
+                  s.cutoff_time,
+                  s.is_cross_midnight,
+                  req.user!.username,
+                ]
+              );
+              insertedCount++;
+            }
+
+            await upsertDailyOverrideRecord(tx.execute, tx.query, {
+              personId,
+              workDate,
+              overrideState: 'CUSTOM_ASSIGNED',
+              reason,
+              actorUsername: req.user!.username,
+            });
+
+            return {
+              overrideState: 'CUSTOM_ASSIGNED' as const,
+              cancelledCount: sameDayActive.length,
+              insertedCount,
+              conflictError: null,
+            };
+          }
+
+          // ADD_SHIFT: รักษากะเดิมไว้ทั้งหมด (รวมกรณีเดิมเป็นกะเช้าเริ่มต้นตามประเภทบุคลากร -> บันทึกคงไว้ด้วย)
+          let insertedCount = 0;
+          if (evalResult.defaultShiftToMaterialize) {
+            const defMat = evalResult.defaultShiftToMaterialize;
+            const matchedMorningTemplates = await tx.query<{ id: number }>(
+              `SELECT id FROM shifts
+               WHERE is_active = 1
+                 AND (shift_code = ? OR (start_time = ? AND end_time = ?))
+               ORDER BY id ASC LIMIT 1`,
+              [defMat.shiftCode, defMat.startTime, defMat.endTime]
             );
+            const fallbackAnyShift =
+              matchedMorningTemplates.length > 0
+                ? matchedMorningTemplates[0].id
+                : selectedShifts[0].id;
+
             await tx.execute(
-              `INSERT INTO shift_cancellation_logs (
-                shift_assignment_id, person_id, work_date, shift_code, cancel_reason, cancelled_by
-              ) VALUES (?, ?, ?, ?, ?, ?)`,
+              `INSERT INTO shift_assignments (
+                person_id, shift_id, work_date, snapshot_shift_code, snapshot_shift_name,
+                snapshot_start_time, snapshot_end_time, snapshot_grace_minutes, snapshot_cutoff_time,
+                snapshot_is_cross_midnight, status, assigned_by
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)`,
               [
-                ex.id,
                 personId,
+                fallbackAnyShift,
                 workDate,
-                ex.snapshot_shift_code,
-                reason || 'เปลี่ยนกะทำงานรายวัน',
+                defMat.shiftCode,
+                defMat.shiftName,
+                defMat.startTime,
+                defMat.endTime,
+                defMat.graceMinutes,
+                defMat.cutoffTime,
+                defMat.isCrossMidnight,
                 req.user!.username,
               ]
             );
           }
 
-          let insertedCount = 0;
           for (const s of selectedShifts) {
             await tx.execute(
               `INSERT INTO shift_assignments (
@@ -1903,104 +3737,18 @@ shiftsRouter.post(
 
           return {
             overrideState: 'CUSTOM_ASSIGNED' as const,
-            cancelledCount: sameDayActive.length,
+            cancelledCount: 0,
             insertedCount,
             conflictError: null,
           };
-        }
-
-        // ADD_SHIFT: เพิ่มกะโดยเก็บเวรที่มีอยู่แล้วในวันนั้น (ตรวจซ้ำและเวลาทับซ้อน)
-        for (const s of selectedShifts) {
-          const sameDup = sameDayActive.find((ex) => Number(ex.shift_id) === Number(s.id));
-          if (sameDup) {
-            return {
-              overrideState: 'CUSTOM_ASSIGNED' as const,
-              cancelledCount: 0,
-              insertedCount: 0,
-              conflictError: {
-                code: 'DUPLICATE_SAME_SHIFT',
-                message: `บุคลากรมีเวร ${sameDup.snapshot_shift_name} ในวันที่ ${workDate} อยู่แล้ว`,
-              },
-            };
-          }
-
-          const candInt = computeAbsoluteIntervalMinutes(
-            workDate,
-            s.start_time,
-            s.end_time,
-            s.is_cross_midnight
-          );
-          const overlapEx = normalizedNearby.find((ex) => {
-            const exInt = computeAbsoluteIntervalMinutes(
-              ex.work_date,
-              ex.snapshot_start_time,
-              ex.snapshot_end_time,
-              ex.snapshot_is_cross_midnight
-            );
-            return (
-              Math.max(candInt.startAbsMin, exInt.startAbsMin) <
-              Math.min(candInt.endAbsMin, exInt.endAbsMin)
-            );
-          });
-
-          if (overlapEx) {
-            return {
-              overrideState: 'CUSTOM_ASSIGNED' as const,
-              cancelledCount: 0,
-              insertedCount: 0,
-              conflictError: {
-                code: 'TIME_OVERLAP_CONFLICT',
-                message: `เวลาทับซ้อนกับ ${overlapEx.snapshot_shift_name} (${overlapEx.snapshot_start_time}–${overlapEx.snapshot_end_time} น. วันที่ ${overlapEx.work_date})`,
-              },
-            };
-          }
-        }
-
-        let insertedCount = 0;
-        for (const s of selectedShifts) {
-          await tx.execute(
-            `INSERT INTO shift_assignments (
-              person_id, shift_id, work_date, snapshot_shift_code, snapshot_shift_name,
-              snapshot_start_time, snapshot_end_time, snapshot_grace_minutes, snapshot_cutoff_time,
-              snapshot_is_cross_midnight, status, assigned_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?)`,
-            [
-              personId,
-              s.id,
-              workDate,
-              s.shift_code,
-              s.shift_name,
-              s.start_time,
-              s.end_time,
-              s.grace_minutes,
-              s.cutoff_time,
-              s.is_cross_midnight,
-              req.user!.username,
-            ]
-          );
-          insertedCount++;
-        }
-
-        await upsertDailyOverrideRecord(tx.execute, tx.query, {
-          personId,
-          workDate,
-          overrideState: 'CUSTOM_ASSIGNED',
-          reason,
-          actorUsername: req.user!.username,
-        });
-
-        return {
-          overrideState: 'CUSTOM_ASSIGNED' as const,
-          cancelledCount: 0,
-          insertedCount,
-          conflictError: null,
-        };
-      });
+        })
+      );
 
       if (txResult.conflictError) {
         res.status(409).json({
           error: txResult.conflictError.code,
           message: txResult.conflictError.message,
+          conflicts: txResult.conflictError.conflicts,
           requestId: req.requestId,
         });
         return;
@@ -2019,6 +3767,7 @@ shiftsRouter.post(
           personId,
           workDate,
           action,
+          shiftIds: rawShiftIds,
           overrideState: txResult.overrideState,
           cancelledCount: txResult.cancelledCount,
           insertedCount: txResult.insertedCount,
@@ -2077,8 +3826,8 @@ shiftsRouter.post(
         RESTORE_DEFAULT: 'คืนค่ากะเช้าเริ่มต้นตามประเภทบุคลากรเรียบร้อยแล้ว',
         REMOVE_MORNING: 'ลบกะเช้าในวันที่เลือกเรียบร้อยแล้ว',
         REMOVE_AFTERNOON: 'ลบกะบ่ายในวันที่เลือกเรียบร้อยแล้ว',
-        REPLACE_SHIFTS: 'เปลี่ยนกะทำงานรายวันเรียบร้อยแล้ว',
-        ADD_SHIFT: 'เพิ่มกะทำงานรายวันเรียบร้อยแล้ว',
+        REPLACE_SHIFTS: `แทนที่กะเดิมด้วยกะที่เลือก (${txResult.insertedCount} กะ) เรียบร้อยแล้ว`,
+        ADD_SHIFT: `เพิ่มกะที่เลือก (${txResult.insertedCount} กะ) โดยเก็บกะเดิมไว้เรียบร้อยแล้ว`,
       };
 
       res.json({

@@ -31,6 +31,8 @@ import {
 } from '../src/modules/personnel/routes.ts';
 import {
   evaluateBulkShiftAssignments,
+  evaluateDailyCellChange,
+  evaluateDailyCellSync,
   findSelectedShiftsSelfOverlap,
   normalizeWorkDateString,
 } from '../src/modules/shifts/routes.ts';
@@ -38,6 +40,8 @@ import {
   classifyShiftIconKind,
   buildCompactMonthlyCellViewModel,
   findClientSelectedShiftsOverlap,
+  computeClientShiftInterval,
+  intervalsOverlapHalfOpen,
 } from '../../frontend/src/utils/shiftDisplay.ts';
 import {
   setScannerExeTestDouble,
@@ -2556,7 +2560,1177 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       'CLEARED_ALL_SHIFTS day must NOT auto-revert to personnel-type default morning shift'
     );
   });
+
+  test('Test 26: Quick Daily Shift Cell Multi-Select, Half-Open [start, end) Overnight & Adjacent-Day Overlap, Transactional All-or-Nothing, Concurrent Race Protection, Icon-Only Weekly/Monthly, and HOSOffice Sync Non-Reversion', async () => {
+    const login = await apiCall('/api/Sam_Att/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'Admin@SamAtt2026' },
+    });
+    assert.equal(login.status, 200);
+    const token = login.data.token as string;
+
+    // Fetch real DB shift templates
+    const shiftsRes = await apiCall('/api/Sam_Att/shifts', { token });
+    assert.equal(shiftsRes.status, 200);
+    const allShifts = shiftsRes.data.items as Array<{
+      id: number;
+      shift_code: string;
+      shift_name: string;
+      shift_category: string;
+      start_time: string;
+      end_time: string;
+      grace_minutes: number;
+      cutoff_time: string;
+      is_cross_midnight: number;
+      is_active: number;
+    }>;
+
+    const morShift = allShifts.find((s) => s.shift_code === 'MOR-0816')!;
+    const aftShift = allShifts.find((s) => s.shift_code === 'AFT-1600')!;
+    const nigShift = allShifts.find((s) => s.shift_code === 'NIG-0008')!;
+    const extShift = allShifts.find((s) => s.shift_code === 'EXT-2008')!;
+    assert.ok(morShift && aftShift && nigShift && extShift, 'Baseline shifts must exist');
+
+    // Ensure overlapping 08:00-20:00 shift (MA-0820) exists for overlap tests
+    let maShift = allShifts.find((s) => s.shift_code === 'MA-0820');
+    if (!maShift) {
+      const createMa = await apiCall('/api/Sam_Att/shifts', {
+        method: 'POST',
+        token,
+        body: {
+          shiftCode: 'MA-0820',
+          shiftName: 'เวรเช้า-บ่าย (08:00-20:00)',
+          shiftCategory: 'MORNING_AFTERNOON',
+          startTime: '08:00',
+          endTime: '20:00',
+          graceMinutes: 15,
+          cutoffTime: '22:00',
+          isCrossMidnight: false,
+        },
+      });
+      assert.equal(createMa.status, 201);
+      const reloadShifts = await apiCall('/api/Sam_Att/shifts', { token });
+      maShift = reloadShifts.data.items.find((s: any) => s.shift_code === 'MA-0820');
+    }
+    assert.ok(maShift, 'MA-0820 shift must exist');
+
+    // ------------------------------------------------------------------
+    // A. UNIT TESTS: Half-open [start, end) + Real Datetime Overnight
+    // ------------------------------------------------------------------
+    const morIv = computeClientShiftInterval('2026-08-10', '08:00', '16:00', 0);
+    const aftIv = computeClientShiftInterval('2026-08-10', '16:00', '00:00', 1);
+    assert.equal(
+      intervalsOverlapHalfOpen(morIv, aftIv),
+      false,
+      '[08:00, 16:00) and [16:00, 24:00) must NOT overlap (half-open boundary)'
+    );
+    assert.equal(aftIv.endDate, '2026-08-11', 'AFT 16:00-00:00 must end on next date 2026-08-11');
+
+    const overlapIv = computeClientShiftInterval('2026-08-10', '15:59', '20:00', 0);
+    assert.equal(
+      intervalsOverlapHalfOpen(morIv, overlapIv),
+      true,
+      '[08:00, 16:00) and [15:59, 20:00) MUST overlap'
+    );
+
+    const extDay1 = computeClientShiftInterval('2026-08-10', '20:00', '08:00', 1);
+    const morDay2 = computeClientShiftInterval('2026-08-11', '08:00', '16:00', 0);
+    const nigDay2 = computeClientShiftInterval('2026-08-11', '00:00', '08:00', 0);
+    const earlyDay2 = computeClientShiftInterval('2026-08-11', '07:30', '16:00', 0);
+    assert.equal(extDay1.endDate, '2026-08-11');
+    assert.equal(
+      intervalsOverlapHalfOpen(extDay1, morDay2),
+      false,
+      'Overnight 20:00–08:00 (+1) touching 08:00–16:00 next day must NOT overlap'
+    );
+    assert.equal(
+      intervalsOverlapHalfOpen(extDay1, nigDay2),
+      true,
+      'Overnight 20:00–08:00 (+1) MUST overlap 00:00–08:00 next day'
+    );
+    assert.equal(
+      intervalsOverlapHalfOpen(extDay1, earlyDay2),
+      true,
+      'Overnight 20:00–08:00 (+1) MUST overlap 07:30–16:00 next day'
+    );
+
+    // Pure unit check on evaluateDailyCellChange (self-overlap + prev-day + default materialization)
+    const unitSelfOverlap = evaluateDailyCellChange({
+      workDate: '2026-08-05',
+      action: 'ADD_SHIFT',
+      selectedShifts: [morShift, maShift],
+      sameDayActive: [],
+      adjacentDaysActive: [],
+      dailyOverride: null,
+      defaultRule: null,
+    });
+    assert.equal(unitSelfOverlap.canProceed, false);
+    assert.ok(unitSelfOverlap.conflicts.some((c) => c.code === 'SELECTED_SHIFTS_OVERLAP'));
+
+    const unitDefaultMaterialize = evaluateDailyCellChange({
+      workDate: '2026-08-05',
+      action: 'ADD_SHIFT',
+      selectedShifts: [aftShift],
+      sameDayActive: [],
+      adjacentDaysActive: [],
+      dailyOverride: null,
+      defaultRule: {
+        id: 1,
+        personnel_type_code: 'CIVIL_SERVANT',
+        personnel_type_name: 'ข้าราชการ',
+        default_start_time: '08:00',
+        default_end_time: '16:00',
+        default_grace_minutes: 15,
+        default_cutoff_time: '18:00',
+        is_active: 1,
+        effective_from: '2020-01-01',
+        CheckinWindowBeforeMinutes: 120,
+        CheckoutWindowAfterMinutes: 240,
+        require_checkout: 1,
+        allow_overlapping_shifts: 0,
+        rule_version: 'v1',
+      },
+    });
+    assert.equal(unitDefaultMaterialize.canProceed, true);
+    assert.ok(
+      unitDefaultMaterialize.defaultShiftToMaterialize,
+      'ADD_SHIFT on DEFAULT_FROM_TYPE day must preserve default morning shift for materialization'
+    );
+    assert.equal(unitDefaultMaterialize.resultingShifts.length, 2);
+
+    // Unit check: Weekly (maxVisible=4) & Monthly (maxVisible=2) Icon-Only view-models
+    const multiDayEffective = {
+      mode: 'CUSTOM_ASSIGNED' as const,
+      activeItems: [
+        {
+          id: 1,
+          snapshot_shift_code: morShift.shift_code,
+          snapshot_shift_name: morShift.shift_name,
+          snapshot_start_time: morShift.start_time,
+          snapshot_end_time: morShift.end_time,
+          snapshot_is_cross_midnight: morShift.is_cross_midnight,
+        },
+        {
+          id: 2,
+          snapshot_shift_code: aftShift.shift_code,
+          snapshot_shift_name: aftShift.shift_name,
+          snapshot_start_time: aftShift.start_time,
+          snapshot_end_time: aftShift.end_time,
+          snapshot_is_cross_midnight: aftShift.is_cross_midnight,
+        },
+        {
+          id: 3,
+          snapshot_shift_code: nigShift.shift_code,
+          snapshot_shift_name: nigShift.shift_name,
+          snapshot_start_time: nigShift.start_time,
+          snapshot_end_time: nigShift.end_time,
+          snapshot_is_cross_midnight: nigShift.is_cross_midnight,
+        },
+      ],
+    };
+    const weeklyIconVm = buildCompactMonthlyCellViewModel(multiDayEffective, '1 ส.ค. 2569', 4);
+    assert.equal(weeklyIconVm.visibleIcons.length, 3, 'Weekly Icon-Only must show all 3 icons');
+    assert.equal(weeklyIconVm.overflowCount, 0);
+    assert.ok(weeklyIconVm.tooltipText.includes('08:00–16:00') && weeklyIconVm.tooltipText.includes('16:00–00:00'));
+
+    const monthlyIconVm = buildCompactMonthlyCellViewModel(multiDayEffective, '1 ส.ค. 2569', 2);
+    assert.equal(monthlyIconVm.visibleIcons.length, 2, 'Monthly Icon-Only shows up to 2 icons');
+    assert.equal(monthlyIconVm.overflowCount, 1, 'Monthly Icon-Only shows +1 overflow indicator');
+
+    // ------------------------------------------------------------------
+    // B. INTEGRATION: Multi-select ADD_SHIFT preserving DEFAULT_FROM_TYPE
+    // ------------------------------------------------------------------
+    // SAM-CIVIL-01 has default morning shift 08:00-16:00 on 2026-08-01
+    const previewAddOnDefault = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-preview', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-01',
+        action: 'ADD_SHIFT',
+        shiftIds: [aftShift.id],
+      },
+    });
+    assert.equal(previewAddOnDefault.status, 200);
+    assert.equal(previewAddOnDefault.data.canProceed, true);
+    assert.equal(previewAddOnDefault.data.existingSameDayShifts.length, 1);
+    assert.equal(previewAddOnDefault.data.resultingShifts.length, 2);
+
+    const execAddOnDefault = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-01',
+        action: 'ADD_SHIFT',
+        shiftIds: [aftShift.id],
+        reason: 'เพิ่มกะบ่ายโดยเก็บกะเช้าเริ่มต้นไว้',
+      },
+    });
+    assert.equal(execAddOnDefault.status, 200);
+    assert.equal(
+      execAddOnDefault.data.insertedCount,
+      1,
+      'Must report 1 newly added shift while preserving existing default morning shift in DB'
+    );
+
+    const activeAug1 = await dbQuery<{ snapshot_shift_code: string }>(
+      `SELECT snapshot_shift_code FROM shift_assignments
+       WHERE person_id = 'SAM-CIVIL-01' AND work_date = '2026-08-01' AND status = 'ACTIVE'
+       ORDER BY snapshot_start_time ASC`
+    );
+    assert.equal(activeAug1.length, 2);
+    assert.deepEqual(
+      activeAug1.map((r) => r.snapshot_shift_code),
+      ['MOR-0816', 'AFT-1600']
+    );
+
+    // ------------------------------------------------------------------
+    // C. INTEGRATION: Duplicate Shift Rejection (409)
+    // ------------------------------------------------------------------
+    const previewDup = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-preview', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-01',
+        action: 'ADD_SHIFT',
+        shiftIds: [aftShift.id],
+      },
+    });
+    assert.equal(previewDup.status, 200);
+    assert.equal(previewDup.data.canProceed, false);
+    assert.ok(previewDup.data.conflicts.some((c: any) => c.code === 'DUPLICATE_SAME_SHIFT'));
+
+    const execDup = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-01',
+        action: 'ADD_SHIFT',
+        shiftIds: [aftShift.id],
+      },
+    });
+    assert.equal(execDup.status, 409);
+    assert.equal(execDup.data.error, 'DUPLICATE_SAME_SHIFT');
+
+    // ------------------------------------------------------------------
+    // D. INTEGRATION: Multi-Select ADD_SHIFT (>1 shift at once) & All-or-Nothing Rollback on Conflict
+    // ------------------------------------------------------------------
+    // First clear 2026-08-02 so we start clean
+    const clearAug2 = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-02',
+        action: 'CLEAR_ALL_SHIFTS',
+      },
+    });
+    assert.equal(clearAug2.status, 200);
+
+    // Try adding [MOR-0816, MA-0820] -> conflict -> 409 and 0 rows inserted (All-or-Nothing)
+    const execSelfOverlap = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-02',
+        action: 'ADD_SHIFT',
+        shiftIds: [morShift.id, maShift.id],
+      },
+    });
+    assert.equal(execSelfOverlap.status, 409);
+    assert.equal(execSelfOverlap.data.error, 'SELECTED_SHIFTS_OVERLAP');
+    const aug2AfterFailed = await dbQuery<{ id: number }>(
+      `SELECT id FROM shift_assignments WHERE person_id = 'SAM-CIVIL-01' AND work_date = '2026-08-02' AND status = 'ACTIVE'`
+    );
+    assert.equal(aug2AfterFailed.length, 0, 'All-or-Nothing: zero shifts inserted when any conflict exists');
+
+    // Now add valid multi-shifts [MOR-0816, AFT-1600] together (touching at 16:00 -> valid)
+    const execMultiValid = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-02',
+        action: 'ADD_SHIFT',
+        shiftIds: [morShift.id, aftShift.id],
+      },
+    });
+    assert.equal(execMultiValid.status, 200);
+    assert.equal(execMultiValid.data.insertedCount, 2);
+
+    // ------------------------------------------------------------------
+    // E. INTEGRATION: Previous-Day & Next-Day Overnight Conflict Detection
+    // ------------------------------------------------------------------
+    // Put EXT-2008 (20:00-08:00 next day) on 2026-08-10 (replace default morning first)
+    const putExtDay10 = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-10',
+        action: 'REPLACE_SHIFTS',
+        shiftIds: [extShift.id],
+        confirmReplace: true,
+      },
+    });
+    assert.equal(putExtDay10.status, 200);
+
+    // On 2026-08-11: trying to ADD NIG-0008 (00:00-08:00) MUST conflict with EXT-2008 on 2026-08-10
+    const clearDay11 = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: { personId: 'SAM-CIVIL-01', workDate: '2026-08-11', action: 'CLEAR_ALL_SHIFTS' },
+    });
+    assert.equal(clearDay11.status, 200);
+
+    const prevDayConflictPreview = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-preview', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-11',
+        action: 'ADD_SHIFT',
+        shiftIds: [nigShift.id],
+      },
+    });
+    assert.equal(prevDayConflictPreview.status, 200);
+    assert.equal(prevDayConflictPreview.data.canProceed, false);
+    assert.ok(
+      prevDayConflictPreview.data.conflicts.some(
+        (c: any) =>
+          c.code === 'ADJACENT_DAY_OVERLAP' &&
+          String(c.message).includes('2026-08-10') &&
+          String(c.message).includes('EXT-2008')
+      ),
+      'Conflict message must clearly state overlapping shift code and date from previous day'
+    );
+
+    const prevDayConflictAction = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-11',
+        action: 'ADD_SHIFT',
+        shiftIds: [nigShift.id],
+      },
+    });
+    assert.equal(prevDayConflictAction.status, 409);
+    assert.equal(prevDayConflictAction.data.error, 'ADJACENT_DAY_OVERLAP');
+
+    // On 2026-08-11: MOR-0816 (08:00-16:00) touches EXT-2008 end (08:00) -> MUST SUCCEED
+    const touchBoundaryOk = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-11',
+        action: 'ADD_SHIFT',
+        shiftIds: [morShift.id],
+      },
+    });
+    assert.equal(touchBoundaryOk.status, 200);
+
+    // Next-day conflict: put NIG-0008 (00:00-08:00) on 2026-08-15, then try EXT-2008 (20:00-08:00) on 2026-08-14
+    const putNigDay15 = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-15',
+        action: 'REPLACE_SHIFTS',
+        shiftIds: [nigShift.id],
+        confirmReplace: true,
+      },
+    });
+    assert.equal(putNigDay15.status, 200);
+
+    const nextDayConflictAction = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-14',
+        action: 'REPLACE_SHIFTS',
+        shiftIds: [extShift.id],
+        confirmReplace: true,
+      },
+    });
+    assert.equal(nextDayConflictAction.status, 409);
+    assert.equal(nextDayConflictAction.data.error, 'ADJACENT_DAY_OVERLAP');
+    assert.ok(
+      String(nextDayConflictAction.data.message).includes('2026-08-15'),
+      'Next-day overlap warning must mention next date 2026-08-15'
+    );
+
+    // ------------------------------------------------------------------
+    // F. INTEGRATION: REPLACE_SHIFTS Preview + Explicit Confirmation + Audit Trail
+    // ------------------------------------------------------------------
+    const replacePreview = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-preview', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-02',
+        action: 'REPLACE_SHIFTS',
+        shiftIds: [nigShift.id, aftShift.id],
+      },
+    });
+    assert.equal(replacePreview.status, 200);
+    assert.equal(replacePreview.data.canProceed, true);
+    assert.equal(replacePreview.data.shiftsToBeReplaced.length, 2, 'Must list exact 2 existing shifts to be replaced');
+    assert.equal(replacePreview.data.resultingShifts.length, 2, 'Must preview exact 2 resulting shifts');
+
+    // Must reject when confirmReplace === false
+    const replaceBlocked = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-02',
+        action: 'REPLACE_SHIFTS',
+        shiftIds: [nigShift.id, aftShift.id],
+        confirmReplace: false,
+      },
+    });
+    assert.equal(replaceBlocked.status, 400);
+    assert.equal(replaceBlocked.data.error, 'CONFIRMATION_REQUIRED');
+
+    // Execute with confirmReplace === true
+    const replaceConfirmed = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-02',
+        action: 'REPLACE_SHIFTS',
+        shiftIds: [nigShift.id, aftShift.id],
+        confirmReplace: true,
+        reason: 'เปลี่ยนเป็นเวรดึก+บ่ายตามคำสั่งหัวหน้าตึก',
+      },
+    });
+    assert.equal(replaceConfirmed.status, 200);
+    assert.equal(replaceConfirmed.data.cancelledCount, 2);
+    assert.equal(replaceConfirmed.data.insertedCount, 2);
+
+    const cancelLogsAug2 = await dbQuery<{ id: number }>(
+      `SELECT id FROM shift_cancellation_logs WHERE person_id = 'SAM-CIVIL-01' AND work_date = '2026-08-02'`
+    );
+    assert.ok(cancelLogsAug2.length >= 2, 'Replace must record cancellation audit logs');
+
+    // ------------------------------------------------------------------
+    // G. CONCURRENCY: Simultaneous Overlapping Updates Race Protection
+    // ------------------------------------------------------------------
+    const clearRaceDay = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: { personId: 'SAM-CIVIL-01', workDate: '2026-08-20', action: 'CLEAR_ALL_SHIFTS' },
+    });
+    assert.equal(clearRaceDay.status, 200);
+
+    // Fire two concurrent overlapping ADD_SHIFT requests (MOR 08:00-16:00 vs MA 08:00-20:00)
+    const [raceResA, raceResB] = await Promise.all([
+      apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+        method: 'POST',
+        token,
+        body: {
+          personId: 'SAM-CIVIL-01',
+          workDate: '2026-08-20',
+          action: 'ADD_SHIFT',
+          shiftIds: [morShift.id],
+        },
+      }),
+      apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+        method: 'POST',
+        token,
+        body: {
+          personId: 'SAM-CIVIL-01',
+          workDate: '2026-08-20',
+          action: 'ADD_SHIFT',
+          shiftIds: [maShift.id],
+        },
+      }),
+    ]);
+
+    const raceStatuses = [raceResA.status, raceResB.status].sort((a, b) => a - b);
+    assert.deepEqual(
+      raceStatuses,
+      [200, 409],
+      `Concurrent overlapping writes MUST produce exactly one 200 and one 409 (got ${raceStatuses.join(', ')})`
+    );
+    const raceActiveRows = await dbQuery<{ snapshot_shift_code: string }>(
+      `SELECT snapshot_shift_code FROM shift_assignments
+       WHERE person_id = 'SAM-CIVIL-01' AND work_date = '2026-08-20' AND status = 'ACTIVE'`
+    );
+    assert.equal(
+      raceActiveRows.length,
+      1,
+      'Concurrent race guard must guarantee exactly 1 active shift with zero overlapping duplicates'
+    );
+
+    // ------------------------------------------------------------------
+    // H. REGRESSION: Clear All + HOSOffice Personnel Sync + Attendance Reprocess Non-Reversion
+    // ------------------------------------------------------------------
+    const clearAug22 = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-action', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-08-22',
+        action: 'CLEAR_ALL_SHIFTS',
+        reason: 'ยกเลิกกะทั้งหมดวันที่ 22 ส.ค.',
+      },
+    });
+    assert.equal(clearAug22.status, 200);
+
+    // Run HOSOffice personnel sync touching SAM-CIVIL-01
+    setHosOfficeTestDouble([
+      {
+        PERSON_ID: 'SAM-CIVIL-01',
+        FINGLE_ID: '1001',
+        TITLE_NAME: 'นาย',
+        FIRST_NAME: 'สมชาย',
+        LAST_NAME: 'ข้าราชการ',
+        POSITION_NAME: 'นายแพทย์ชำนาญการ',
+        DEPARTMENT_CODE: 'DEP-MED',
+        DEPARTMENT_NAME: 'กลุ่มงานการแพทย์',
+        WORK_GROUP_NAME: 'กลุ่มงานการแพทย์',
+        PERSONNEL_TYPE_CODE: 'CIVIL_SERVANT',
+        PERSONNEL_TYPE_NAME: 'ข้าราชการ',
+        IS_ACTIVE: 1,
+      },
+    ]);
+    try {
+      const syncRes = await apiCall('/api/Sam_Att/personnel/sync', {
+        method: 'POST',
+        token,
+        body: { effectiveDate: '2026-08-22' },
+      });
+      assert.equal(syncRes.status, 200);
+    } finally {
+      setHosOfficeTestDouble(null);
+    }
+
+    // Run Attendance Reprocess on 2026-08-22
+    await reprocessAttendanceRange({
+      dateFrom: '2026-08-22',
+      dateTo: '2026-08-22',
+      referenceNowBkk: '2026-08-22 18:00:00',
+      actorUsername: 'admin',
+    });
+
+    // Verify override remains CLEARED_ALL_SHIFTS, 0 active shifts, 0 attendance rows
+    const overrideAug22 = await dbQuery<{ override_state: string }>(
+      `SELECT override_state FROM shift_daily_overrides
+       WHERE person_id = 'SAM-CIVIL-01' AND work_date = '2026-08-22'`
+    );
+    assert.equal(overrideAug22.length, 1);
+    assert.equal(overrideAug22[0].override_state, 'CLEARED_ALL_SHIFTS');
+
+    const activeAug22 = await dbQuery<{ id: number }>(
+      `SELECT id FROM shift_assignments
+       WHERE person_id = 'SAM-CIVIL-01' AND work_date = '2026-08-22' AND status = 'ACTIVE'`
+    );
+    assert.equal(activeAug22.length, 0);
+
+    const attAug22 = await dbQuery<{ id: number }>(
+      `SELECT id FROM attendance
+       WHERE person_id = 'SAM-CIVIL-01' AND work_date = '2026-08-22'`
+    );
+    assert.equal(
+      attAug22.length,
+      0,
+      'HOSOffice sync and Attendance Reprocess must NEVER revert CLEARED_ALL_SHIFTS back to default shift'
+    );
+  });
+
+  test('Test 27: Final UX/UI Refactoring — Daily Shift Checkbox Synchronize (20 Required Scenarios: Load State, Add/Remove/Change/Clear, Carryover, Overnight Conflicts, Rollback, Double Submit, RBAC, Icon-Only, History Safety)', async () => {
+    const adminLogin = await apiCall('/api/Sam_Att/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'Admin@SamAtt2026' },
+    });
+    assert.equal(adminLogin.status, 200);
+    const token = adminLogin.data.token as string;
+
+    const genLogin = await apiCall('/api/Sam_Att/auth/login', {
+      method: 'POST',
+      body: { username: 'user1003', password: 'User@SamAtt2026' },
+    });
+    assert.equal(genLogin.status, 200);
+    const genToken = genLogin.data.token as string;
+
+    // Fetch real active shift templates + ensure EARLY-0614 (06:00-14:00) exists for Nov 2/Nov 3 overnight test
+    const shiftsRes = await apiCall('/api/Sam_Att/shifts', { token });
+    assert.equal(shiftsRes.status, 200);
+    let allShifts = shiftsRes.data.items as Array<any>;
+    const morShift = allShifts.find((s) => s.shift_code === 'MOR-0816')!;
+    const aftShift = allShifts.find((s) => s.shift_code === 'AFT-1600')!;
+    const nigShift = allShifts.find((s) => s.shift_code === 'NIG-0008')!;
+    const extShift = allShifts.find((s) => s.shift_code === 'EXT-2008')!;
+    const maShift = allShifts.find((s) => s.shift_code === 'MA-0820')!;
+    assert.ok(morShift && aftShift && nigShift && extShift && maShift);
+
+    let earlyShift = allShifts.find((s) => s.shift_code === 'EARLY-0614');
+    if (!earlyShift) {
+      const createEarly = await apiCall('/api/Sam_Att/shifts', {
+        method: 'POST',
+        token,
+        body: {
+          shiftCode: 'EARLY-0614',
+          shiftName: 'เวรเช้าตรู่',
+          shiftCategory: 'MORNING',
+          startTime: '06:00',
+          endTime: '14:00',
+          graceMinutes: 15,
+          cutoffTime: '09:00',
+          isCrossMidnight: false,
+        },
+      });
+      assert.equal(createEarly.status, 201);
+      const reload = await apiCall('/api/Sam_Att/shifts', { token });
+      allShifts = reload.data.items;
+      earlyShift = allShifts.find((s) => s.shift_code === 'EARLY-0614');
+    }
+    assert.ok(earlyShift);
+
+    // -------------------------------------------------------------------------
+    // Scenario 1: เปิด Modal (GET /daily-cell) แล้ว Checkbox ตรงกับกะเดิม (DEFAULT_FROM_TYPE)
+    // -------------------------------------------------------------------------
+    const openDefault = await apiCall(
+      '/api/Sam_Att/shift-assignments/daily-cell?personId=SAM-CIVIL-01&workDate=2026-11-01',
+      { token }
+    );
+    assert.equal(openDefault.status, 200);
+    assert.equal(openDefault.data.effectiveState, 'DEFAULT_FROM_TYPE');
+    assert.equal(openDefault.data.clearedAll, false);
+    assert.deepEqual(
+      openDefault.data.selectedTemplateIds,
+      [morShift.id],
+      'Scenario 1: Opening DEFAULT_FROM_TYPE day MUST pre-check morning template ID'
+    );
+    assert.ok(openDefault.data.availableTemplates.length >= 5);
+    assert.equal(openDefault.data.effectiveShifts.length, 1);
+
+    // -------------------------------------------------------------------------
+    // Scenario 2 & 14: เพิ่มกะใหม่โดยเก็บกะเดิม (ติ๊กบ่ายเพิ่ม -> เหลือเช้า+บ่าย) + เปิดซ้ำตรง Backend
+    // -------------------------------------------------------------------------
+    const syncAddAft = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-11-01',
+        selectedTemplateIds: [morShift.id, aftShift.id],
+        reason: 'เพิ่มกะบ่ายโดยเก็บกะเช้าเดิม',
+      },
+    });
+    assert.equal(syncAddAft.status, 200);
+    assert.equal(syncAddAft.data.changed, true);
+    assert.equal(syncAddAft.data.addedCount, 1);
+    assert.equal(syncAddAft.data.keptCount, 1);
+
+    // Scenario 14: Re-open modal -> checkboxes MUST match [MOR, AFT]
+    const reopenAfterAdd = await apiCall(
+      '/api/Sam_Att/shift-assignments/daily-cell?personId=SAM-CIVIL-01&workDate=2026-11-01',
+      { token }
+    );
+    assert.equal(reopenAfterAdd.status, 200);
+    assert.equal(reopenAfterAdd.data.effectiveState, 'CUSTOM_ASSIGNED');
+    assert.deepEqual(
+      [...reopenAfterAdd.data.selectedTemplateIds].sort((a: number, b: number) => a - b),
+      [morShift.id, aftShift.id].sort((a, b) => a - b),
+      'Scenario 14: Re-opened modal must pre-check BOTH Morning and Afternoon shifts'
+    );
+
+    const morningAssignBeforeRemove = reopenAfterAdd.data.effectiveShifts.find(
+      (s: any) => s.templateId === morShift.id
+    );
+    assert.ok(morningAssignBeforeRemove?.assignmentId, 'Morning shift must have real assignmentId');
+
+    // -------------------------------------------------------------------------
+    // Scenario 3: ลบกะเดียวโดยไม่กระทบกะอื่น (เอาติ๊กกะบ่ายออก -> คง Assignment ID กะเช้าไว้!)
+    // -------------------------------------------------------------------------
+    const syncRemoveAft = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-11-01',
+        selectedTemplateIds: [morShift.id],
+        reason: 'เอาติ๊กกะบ่ายออก เก็บกะเช้าไว้',
+      },
+    });
+    assert.equal(syncRemoveAft.status, 200);
+    assert.equal(syncRemoveAft.data.removedCount, 1);
+    assert.equal(syncRemoveAft.data.keptCount, 1);
+
+    const reopenAfterRemove = await apiCall(
+      '/api/Sam_Att/shift-assignments/daily-cell?personId=SAM-CIVIL-01&workDate=2026-11-01',
+      { token }
+    );
+    assert.deepEqual(reopenAfterRemove.data.selectedTemplateIds, [morShift.id]);
+    assert.equal(
+      reopenAfterRemove.data.effectiveShifts[0].assignmentId,
+      morningAssignBeforeRemove.assignmentId,
+      'Scenario 3: Kept shift MUST preserve its original assignmentId (no unnecessary delete+recreate)'
+    );
+
+    // -------------------------------------------------------------------------
+    // Scenario 4: เปลี่ยนกะด้วยการเอาติ๊กออกและติ๊กใหม่ (เอาเช้าออก + ติ๊กดึก -> เหลือเฉพาะดึก)
+    // -------------------------------------------------------------------------
+    const previewChangeToNight = await apiCall(
+      '/api/Sam_Att/shift-assignments/daily-cell-sync-preview',
+      {
+        method: 'POST',
+        token,
+        body: {
+          personId: 'SAM-CIVIL-01',
+          workDate: '2026-11-01',
+          selectedTemplateIds: [nigShift.id],
+        },
+      }
+    );
+    assert.equal(previewChangeToNight.status, 200);
+    assert.equal(previewChangeToNight.data.canProceed, true);
+    assert.equal(previewChangeToNight.data.shiftsToAdd.length, 1);
+    assert.equal(previewChangeToNight.data.shiftsToRemove.length, 1);
+    assert.equal(previewChangeToNight.data.shiftsToKeep.length, 0);
+
+    const syncChangeToNight = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-11-01',
+        selectedTemplateIds: [nigShift.id],
+        reason: 'เปลี่ยนจากกะเช้าเป็นกะดึก',
+      },
+    });
+    assert.equal(syncChangeToNight.status, 200);
+    const reopenNight = await apiCall(
+      '/api/Sam_Att/shift-assignments/daily-cell?personId=SAM-CIVIL-01&workDate=2026-11-01',
+      { token }
+    );
+    assert.deepEqual(reopenNight.data.selectedTemplateIds, [nigShift.id]);
+
+    // -------------------------------------------------------------------------
+    // Scenario 5: เลือกหลายกะพร้อมกัน (เช้า + บ่าย ในครั้งเดียว)
+    // -------------------------------------------------------------------------
+    const syncMulti = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-11-05',
+        selectedTemplateIds: [morShift.id, aftShift.id],
+      },
+    });
+    assert.equal(syncMulti.status, 200);
+    const reopenMulti = await apiCall(
+      '/api/Sam_Att/shift-assignments/daily-cell?personId=SAM-CIVIL-01&workDate=2026-11-05',
+      { token }
+    );
+    assert.equal(reopenMulti.data.selectedTemplateIds.length, 2);
+
+    // -------------------------------------------------------------------------
+    // Scenario 6, 7, 8, 9: ลบทุกกะ -> Refresh ไม่กลับมา -> HOSOffice Sync ไม่กลับมา -> Reprocess ไม่กลับมา
+    // -------------------------------------------------------------------------
+    const syncClearAll = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-11-06',
+        selectedTemplateIds: [],
+        reason: 'ตั้งใจเอาติ๊กออกทั้งหมด (วันหยุด)',
+      },
+    });
+    assert.equal(syncClearAll.status, 200);
+    assert.equal(syncClearAll.data.overrideState, 'CLEARED_ALL_SHIFTS');
+
+    // Scenario 7: Refresh / Re-open modal -> must remain cleared with []
+    const reopenCleared = await apiCall(
+      '/api/Sam_Att/shift-assignments/daily-cell?personId=SAM-CIVIL-01&workDate=2026-11-06',
+      { token }
+    );
+    assert.equal(reopenCleared.status, 200);
+    assert.equal(reopenCleared.data.clearedAll, true);
+    assert.deepEqual(reopenCleared.data.selectedTemplateIds, []);
+
+    // Scenario 8: HOSOffice Sync must NOT revert CLEARED_ALL_SHIFTS
+    setHosOfficeTestDouble([
+      {
+        PERSON_ID: 'SAM-CIVIL-01',
+        FINGLE_ID: '1001',
+        TITLE_NAME: 'นาย',
+        FIRST_NAME: 'สมชาย',
+        LAST_NAME: 'ข้าราชการ',
+        POSITION_NAME: 'นายแพทย์ชำนาญการ',
+        DEPARTMENT_CODE: 'DEP-MED',
+        DEPARTMENT_NAME: 'กลุ่มงานการแพทย์',
+        WORK_GROUP_NAME: 'กลุ่มงานการแพทย์',
+        PERSONNEL_TYPE_CODE: 'CIVIL_SERVANT',
+        PERSONNEL_TYPE_NAME: 'ข้าราชการ',
+        IS_ACTIVE: 1,
+      },
+    ]);
+    try {
+      const syncHos = await apiCall('/api/Sam_Att/personnel/sync', {
+        method: 'POST',
+        token,
+        body: { effectiveDate: '2026-11-06' },
+      });
+      assert.equal(syncHos.status, 200);
+    } finally {
+      setHosOfficeTestDouble(null);
+    }
+
+    // Scenario 9: Attendance Reprocess must NOT revert CLEARED_ALL_SHIFTS
+    await reprocessAttendanceRange({
+      dateFrom: '2026-11-06',
+      dateTo: '2026-11-06',
+      referenceNowBkk: '2026-11-06 18:00:00',
+      actorUsername: 'admin',
+    });
+
+    const reopenAfterSyncAndReprocess = await apiCall(
+      '/api/Sam_Att/shift-assignments/daily-cell?personId=SAM-CIVIL-01&workDate=2026-11-06',
+      { token }
+    );
+    assert.equal(reopenAfterSyncAndReprocess.data.clearedAll, true);
+    assert.deepEqual(reopenAfterSyncAndReprocess.data.selectedTemplateIds, []);
+    const attNov6 = await dbQuery<{ id: number }>(
+      `SELECT id FROM attendance WHERE person_id = 'SAM-CIVIL-01' AND work_date = '2026-11-06'`
+    );
+    assert.equal(attNov6.length, 0);
+
+    // -------------------------------------------------------------------------
+    // Scenario 10 & 15: ตรวจ Conflict ภายในวัน + Rollback All-or-Nothing เมื่อผิดพลาด
+    // -------------------------------------------------------------------------
+    const activeBeforeConflict = await dbQuery<{ id: number; snapshot_shift_code: string }>(
+      `SELECT id, snapshot_shift_code FROM shift_assignments
+       WHERE person_id = 'SAM-CIVIL-01' AND work_date = '2026-11-05' AND status = 'ACTIVE'`
+    );
+    assert.equal(activeBeforeConflict.length, 2);
+
+    const sameDayConflict = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-11-05',
+        selectedTemplateIds: [morShift.id, maShift.id], // 08:00-16:00 overlaps 08:00-20:00
+      },
+    });
+    assert.equal(sameDayConflict.status, 409);
+    assert.equal(sameDayConflict.data.error, 'SELECTED_SHIFTS_OVERLAP');
+
+    // Scenario 15: Original shifts on 2026-11-05 must remain 100% untouched (Rollback)
+    const activeAfterConflict = await dbQuery<{ id: number; snapshot_shift_code: string }>(
+      `SELECT id, snapshot_shift_code FROM shift_assignments
+       WHERE person_id = 'SAM-CIVIL-01' AND work_date = '2026-11-05' AND status = 'ACTIVE'`
+    );
+    assert.deepEqual(
+      activeAfterConflict.map((r) => r.id),
+      activeBeforeConflict.map((r) => r.id),
+      'Scenario 15: Failed sync due to conflict must NOT alter or delete existing assignments'
+    );
+
+    // -------------------------------------------------------------------------
+    // Scenario 11, 12, 13 & 19: กะข้ามวัน Nov 2 (20:00-08:00) vs Nov 3 (06:00-14:00 Conflict / 08:00-16:00 OK) + Carryover Info
+    // -------------------------------------------------------------------------
+    // Set Nov 2 to EXT-2008 (20:00–08:00 next day)
+    const setNov2Ext = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-11-02',
+        selectedTemplateIds: [extShift.id],
+      },
+    });
+    assert.equal(
+      setNov2Ext.status,
+      200,
+      'Scenario 13: Nov 2 20:00-08:00 touching Nov 3 default 08:00-16:00 must succeed under [start, end)'
+    );
+
+    // Scenario 19: Open Nov 3 -> carryoverFromPrevDay MUST show Nov 2 EXT-2008, NOT in selectedTemplateIds!
+    const openNov3 = await apiCall(
+      '/api/Sam_Att/shift-assignments/daily-cell?personId=SAM-CIVIL-01&workDate=2026-11-03',
+      { token }
+    );
+    assert.equal(openNov3.status, 200);
+    assert.equal(openNov3.data.carryoverFromPrevDay.length, 1);
+    assert.equal(openNov3.data.carryoverFromPrevDay[0].shiftCode, 'EXT-2008');
+    assert.equal(openNov3.data.carryoverFromPrevDay[0].workDate, '2026-11-02');
+    assert.ok(
+      String(openNov3.data.carryoverFromPrevDay[0].noticeText).includes('2026-11-02'),
+      'Scenario 19: Carryover notice must clearly state start date from previous day'
+    );
+    assert.ok(
+      !openNov3.data.selectedTemplateIds.includes(extShift.id),
+      'Scenario 19: Previous-day carryover shift must NOT be placed in today checkbox selection'
+    );
+
+    // Scenario 12: On Nov 3, selecting EARLY-0614 (06:00–14:00) MUST conflict with Nov 2 EXT-2008 (20:00–08:00)
+    const prevDayOverlap = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-11-03',
+        selectedTemplateIds: [earlyShift.id],
+      },
+    });
+    assert.equal(prevDayOverlap.status, 409);
+    assert.equal(prevDayOverlap.data.error, 'ADJACENT_DAY_OVERLAP');
+
+    // Scenario 13: On Nov 3, selecting MOR-0816 (08:00–16:00) + AFT-1600 (16:00–00:00) touches 08:00 and 16:00 -> MUST SUCCEED
+    const boundaryTouchOk = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-11-03',
+        selectedTemplateIds: [morShift.id, aftShift.id],
+      },
+    });
+    assert.equal(boundaryTouchOk.status, 200);
+
+    // Scenario 11: Next-day conflict — set Nov 9 to EARLY-0614 (06:00–14:00), then try EXT-2008 (20:00–08:00) on Nov 8 -> 409!
+    const setNov9Early = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-11-09',
+        selectedTemplateIds: [earlyShift.id],
+      },
+    });
+    assert.equal(setNov9Early.status, 200);
+
+    const nextDayOverlap = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-11-08',
+        selectedTemplateIds: [extShift.id],
+      },
+    });
+    assert.equal(nextDayOverlap.status, 409);
+    assert.equal(nextDayOverlap.data.error, 'ADJACENT_DAY_OVERLAP');
+    assert.ok(String(nextDayOverlap.data.message).includes('2026-11-09'));
+
+    // -------------------------------------------------------------------------
+    // Scenario 16: กดบันทึกซ้ำ (Double Submit / Concurrent Identical Sync) ต้องไม่สร้างข้อมูลซ้ำ
+    // -------------------------------------------------------------------------
+    const [dupSubmitA, dupSubmitB] = await Promise.all([
+      apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+        method: 'POST',
+        token,
+        body: {
+          personId: 'SAM-CIVIL-01',
+          workDate: '2026-11-10',
+          selectedTemplateIds: [morShift.id, aftShift.id],
+        },
+      }),
+      apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+        method: 'POST',
+        token,
+        body: {
+          personId: 'SAM-CIVIL-01',
+          workDate: '2026-11-10',
+          selectedTemplateIds: [morShift.id, aftShift.id],
+        },
+      }),
+    ]);
+    assert.equal(dupSubmitA.status, 200);
+    assert.equal(dupSubmitB.status, 200);
+    const activeNov10 = await dbQuery<{ snapshot_shift_code: string }>(
+      `SELECT snapshot_shift_code FROM shift_assignments
+       WHERE person_id = 'SAM-CIVIL-01' AND work_date = '2026-11-10' AND status = 'ACTIVE'`
+    );
+    assert.equal(
+      activeNov10.length,
+      2,
+      'Scenario 16: Simultaneous double submit MUST NOT create duplicate shift rows'
+    );
+    const changedFlags = [dupSubmitA.data.changed, dupSubmitB.data.changed].sort();
+    assert.deepEqual(changedFlags, [false, true], 'Second identical submit must be a safe no-op');
+
+    // -------------------------------------------------------------------------
+    // Scenario 17: GENERAL_USER ไม่สามารถแก้ไขกะ (แต่ดูของตนเองได้แบบ Read-Only)
+    // -------------------------------------------------------------------------
+    const genEditBlocked = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+      method: 'POST',
+      token: genToken,
+      body: {
+        personId: 'SAM-P003',
+        workDate: '2026-11-10',
+        selectedTemplateIds: [aftShift.id],
+      },
+    });
+    assert.equal(genEditBlocked.status, 403);
+
+    const genPreviewBlocked = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync-preview', {
+      method: 'POST',
+      token: genToken,
+      body: {
+        personId: 'SAM-P003',
+        workDate: '2026-11-10',
+        selectedTemplateIds: [aftShift.id],
+      },
+    });
+    assert.equal(genPreviewBlocked.status, 403);
+
+    const genReadOtherBlocked = await apiCall(
+      '/api/Sam_Att/shift-assignments/daily-cell?personId=SAM-CIVIL-01&workDate=2026-11-10',
+      { token: genToken }
+    );
+    assert.equal(genReadOtherBlocked.status, 403);
+
+    const genReadOwnOk = await apiCall(
+      '/api/Sam_Att/shift-assignments/daily-cell?personId=SAM-P003&workDate=2026-11-10',
+      { token: genToken }
+    );
+    assert.equal(genReadOwnOk.status, 200);
+    assert.equal(genReadOwnOk.data.canEdit, false);
+
+    // -------------------------------------------------------------------------
+    // Scenario 18: Icon-Only Calendar แสดงหลายกะถูกต้อง (maxVisible=2 + +N + MoonStar SPECIAL)
+    // -------------------------------------------------------------------------
+    assert.equal(
+      classifyShiftIconKind({
+        shiftCode: 'EXT-2008',
+        shiftName: 'เวรพิเศษข้ามคืน',
+        shiftCategory: 'SPECIAL',
+        startTime: '20:00',
+        endTime: '08:00',
+        isCrossMidnight: 1,
+      }),
+      'SPECIAL'
+    );
+    const iconVm3 = buildCompactMonthlyCellViewModel(
+      {
+        mode: 'CUSTOM_ASSIGNED',
+        activeItems: [
+          {
+            id: 1,
+            snapshot_shift_code: morShift.shift_code,
+            snapshot_shift_name: morShift.shift_name,
+            snapshot_start_time: morShift.start_time,
+            snapshot_end_time: morShift.end_time,
+            snapshot_is_cross_midnight: 0,
+          },
+          {
+            id: 2,
+            snapshot_shift_code: aftShift.shift_code,
+            snapshot_shift_name: aftShift.shift_name,
+            snapshot_start_time: aftShift.start_time,
+            snapshot_end_time: aftShift.end_time,
+            snapshot_is_cross_midnight: 1,
+          },
+          {
+            id: 3,
+            snapshot_shift_code: extShift.shift_code,
+            snapshot_shift_name: extShift.shift_name,
+            snapshot_start_time: extShift.start_time,
+            snapshot_end_time: extShift.end_time,
+            snapshot_is_cross_midnight: 1,
+          },
+        ],
+      },
+      '10 พ.ย. 2569',
+      2
+    );
+    assert.equal(iconVm3.visibleIcons.length, 2);
+    assert.equal(iconVm3.overflowCount, 1);
+
+    // -------------------------------------------------------------------------
+    // Scenario 20: การเปลี่ยนกะไม่ทำให้ Attendance History หรือ Raw Scan เสียหาย + บันทึก Audit Log ครบ
+    // -------------------------------------------------------------------------
+    const rawCountBefore = (await dbQuery<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM raw_scans'))[0].cnt;
+    const attCountBefore = (await dbQuery<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM attendance'))[0].cnt;
+
+    const syncForAudit = await apiCall('/api/Sam_Att/shift-assignments/daily-cell-sync', {
+      method: 'POST',
+      token,
+      body: {
+        personId: 'SAM-CIVIL-01',
+        workDate: '2026-11-12',
+        selectedTemplateIds: [nigShift.id],
+        reason: 'ทดสอบตรวจ Audit และความปลอดภัยของ Raw Scan/Attendance',
+      },
+    });
+    assert.equal(syncForAudit.status, 200);
+
+    const rawCountAfter = (await dbQuery<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM raw_scans'))[0].cnt;
+    const attCountAfter = (await dbQuery<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM attendance'))[0].cnt;
+    assert.equal(rawCountAfter, rawCountBefore, 'raw_scans must remain completely untouched');
+    assert.equal(attCountAfter, attCountBefore, 'historical attendance rows must remain untouched');
+
+    const auditRows = await dbQuery<{ action: string; target_id: string; detail_json: string }>(
+      `SELECT action, target_id, detail_json FROM audit_logs
+       WHERE action = 'SHIFT_CELL_SYNC' AND target_id = 'SAM-CIVIL-01:2026-11-12'
+       ORDER BY id DESC LIMIT 1`
+    );
+    assert.equal(auditRows.length, 1, 'Audit log must be written for SHIFT_CELL_SYNC');
+    const detail = JSON.parse(auditRows[0].detail_json);
+    assert.equal(detail.actorUsername, 'admin');
+    assert.equal(detail.personId, 'SAM-CIVIL-01');
+    assert.equal(detail.workDate, '2026-11-12');
+    assert.ok(Array.isArray(detail.previousShifts) && detail.previousShifts.length === 1);
+    assert.ok(Array.isArray(detail.newShifts) && detail.newShifts.length === 1);
+
+    // Bonus Unit Check (Requirement 6.2): Duplicate same-template rows must be surfaced as specialExistingAssignments so single checkbox never wipes both unintentionally
+    const dupEval = evaluateDailyCellSync({
+      workDate: '2026-11-20',
+      selectedTemplateIds: [morShift.id],
+      availableTemplates: [morShift, aftShift],
+      sameDayActive: [
+        {
+          id: 9001,
+          person_id: 'SAM-CIVIL-01',
+          shift_id: morShift.id,
+          work_date: '2026-11-20',
+          snapshot_shift_code: morShift.shift_code,
+          snapshot_shift_name: morShift.shift_name,
+          snapshot_start_time: morShift.start_time,
+          snapshot_end_time: morShift.end_time,
+          snapshot_is_cross_midnight: 0,
+          status: 'ACTIVE',
+        },
+        {
+          id: 9002,
+          person_id: 'SAM-CIVIL-01',
+          shift_id: morShift.id,
+          work_date: '2026-11-20',
+          snapshot_shift_code: morShift.shift_code,
+          snapshot_shift_name: morShift.shift_name,
+          snapshot_start_time: morShift.start_time,
+          snapshot_end_time: morShift.end_time,
+          snapshot_is_cross_midnight: 0,
+          status: 'ACTIVE',
+        },
+      ],
+      adjacentDaysActive: [],
+      dailyOverride: null,
+      defaultRule: null,
+      keepSpecialAssignmentIds: [9002],
+    });
+    assert.equal(dupEval.specialExistingAssignments.length, 1);
+    assert.equal(dupEval.specialExistingAssignments[0].assignmentId, 9002);
+    assert.equal(dupEval.specialExistingAssignments[0].specialReason, 'DUPLICATE_TEMPLATE');
+  });
 });
+
+
 
 
 

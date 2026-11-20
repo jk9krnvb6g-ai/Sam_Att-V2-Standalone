@@ -376,3 +376,45 @@ export function findClientSelectedShiftsOverlap(
   }
   return null;
 }
+
+export function addDaysYmd(ymd: string, offsetDays: number): string {
+  const [yStr, mStr, dStr] = String(ymd || '').split('-');
+  const dt = new Date(Date.UTC(Number(yStr || 1970), Number(mStr || 1) - 1, Number(dStr || 1) + offsetDays));
+  const y = dt.getUTCFullYear();
+  const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(dt.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+export function computeClientShiftInterval(
+  workDate: string,
+  startTime: string,
+  endTime: string,
+  isCrossMidnight?: number | boolean | null
+): { startAbsMin: number; endAbsMin: number; endDate: string; isCrossMidnight: boolean } {
+  const [yStr, mStr, dStr] = String(workDate || '').split('-');
+  const dayIndex = Math.floor(
+    Date.UTC(Number(yStr || 1970), Number(mStr || 1) - 1, Number(dStr || 1)) / 86_400_000
+  );
+  const startMin = parseHhmmMinutes(startTime) ?? 0;
+  const endMin = parseHhmmMinutes(endTime) ?? 0;
+  const cross =
+    Number(isCrossMidnight) === 1 || isCrossMidnight === true || endMin <= startMin;
+  return {
+    startAbsMin: dayIndex * 1440 + startMin,
+    endAbsMin: dayIndex * 1440 + endMin + (cross ? 1440 : 0),
+    endDate: cross ? addDaysYmd(workDate, 1) : workDate,
+    isCrossMidnight: cross,
+  };
+}
+
+/**
+ * หลักการช่วงเวลา [start, end):
+ * เช่น กะเช้า [08:00, 16:00) และกะบ่าย [16:00, 24:00) -> max(480, 960) = 960 ไม่น้อยกว่า min(960, 1440) = 960 -> ไม่ทับซ้อน
+ */
+export function intervalsOverlapHalfOpen(
+  a: { startAbsMin: number; endAbsMin: number },
+  b: { startAbsMin: number; endAbsMin: number }
+): boolean {
+  return Math.max(a.startAbsMin, b.startAbsMin) < Math.min(a.endAbsMin, b.endAbsMin);
+}
