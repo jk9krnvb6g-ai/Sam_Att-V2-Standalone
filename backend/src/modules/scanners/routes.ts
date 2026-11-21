@@ -12,8 +12,6 @@
  * 5. ทดสอบและจัดการกรณีเครื่องสแกนไม่ตอบสนอง, Timeout, JSON ผิดรูปแบบ และการซิงก์ซ้ำ (แก้ไข P1 ข้อ 18)
  */
 import fs from 'fs';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { Router, type Request, type Response, type NextFunction } from 'express';
 import { loadConfig } from '../../config/env.ts';
 import { dbQuery, dbExecute } from '../../database/adapter.ts';
@@ -42,8 +40,16 @@ import {
   type ScannerSyncRangeInput,
   type ResolvedScannerSyncRange,
 } from './syncRange.ts';
-
-const execFileAsync = promisify(execFile);
+import {
+  buildScannerExeArgs,
+  runScannerExeProcess,
+  parseScannerExeJsonOutput,
+  extractScannerContractPayload,
+  sanitizeScannerErrorMessage,
+  emitScannerSyncDiagnostic,
+  hasScannerExeProcessRunnerForTests,
+  ScannerExeError,
+} from './exeRunner.ts';
 
 // Test Double hook strictly for automated integration tests (never active in production)
 let testDoubleScannerOutput: string | Error | null = null;
@@ -349,6 +355,7 @@ export async function executeScannerReaderSync(options: {
   actorRole: string;
   machineNo?: number | null;
   requestId?: string;
+  jobId?: string | null;
   ipAddress?: string;
   rangeInput?: ScannerSyncRangeInput;
   referenceDate?: Date;
@@ -368,16 +375,21 @@ export async function executeScannerReaderSync(options: {
   });
 
   if (scannerSyncMutexLocked) {
-    const conflictErr = new Error(
-      'SYNC_ALREADY_RUNNING: ระบบกำลังดึงข้อมูลจากเครื่องสแกนอยู่ในขณะนี้ กรุณารอให้รอบปัจจุบันเสร็จสิ้นก่อน'
+    const conflictErr = new ScannerExeError(
+      'SYNC_ALREADY_RUNNING',
+      'SYNC_ALREADY_RUNNING: ระบบกำลังดึงข้อมูลจากเครื่องสแกนอยู่ในขณะนี้ กรุณารอให้รอบปัจจุบันเสร็จสิ้นก่อน',
+      409
     );
-    (conflictErr as Error & { code?: string; statusCode?: number }).code = 'SYNC_ALREADY_RUNNING';
-    (conflictErr as Error & { code?: string; statusCode?: number }).statusCode = 409;
     throw conflictErr;
   }
 
   scannerSyncMutexLocked = true;
   const machineNo = options.machineNo ?? null;
+  const syncStartedAt = Date.now();
+  let lastExitCode: number | null = null;
+  let lastSignal: string | null = null;
+  let lastStdoutBytes = 0;
+  let lastStderrBytes = 0;
 
   try {
     let stdoutText: string;
@@ -393,155 +405,95 @@ export async function executeScannerReaderSync(options: {
         throw testDoubleScannerOutput;
       }
       stdoutText = testDoubleScannerOutput;
-    } else {
-      if (!cfg.scanner.syncEnabled) {
-        const err = new Error(
-          'BLOCKED_BY_EXTERNAL_CONTRACT: ปิดการเรียก ScannerReader.exe อัตโนมัติไว้ (SCANNER_SYNC_ENABLED=false) กรุณาตั้งค่า Path ของไฟล์ EXE เดิมบนเครื่อง Windows Server ก่อนเปิดใช้งานจริง'
+      lastExitCode = 0;
+      lastStdoutBytes = Buffer.byteLength(stdoutText, 'utf8');
+      if (lastStdoutBytes > cfg.scanner.maxBufferBytes) {
+        const limitMb = (cfg.scanner.maxBufferBytes / (1024 * 1024)).toFixed(1);
+        throw new ScannerExeError(
+          'SCANNER_OUTPUT_TOO_LARGE',
+          `SCANNER_OUTPUT_TOO_LARGE: ข้อมูลจากโปรแกรมดึงสแกนมีขนาดเกินขีดจำกัด Buffer ที่ปลอดภัย (${limitMb} MB) กรุณาลดช่วงวันที่ที่เลือกหรือปรับค่า SCANNER_READER_MAX_BUFFER_BYTES`,
+          413,
+          {
+            exitCode: 0,
+            signal: null,
+            stdoutBytes: lastStdoutBytes,
+            stderrBytes: 0,
+            durationMs: Date.now() - syncStartedAt,
+          }
         );
-        (err as Error & { code?: string }).code = 'BLOCKED_BY_EXTERNAL_CONTRACT';
-        throw err;
       }
-      if (!fs.existsSync(cfg.scanner.readerExePath)) {
-        const err = new Error(
-          `SCANNER_EXE_NOT_FOUND: ไม่พบไฟล์โปรแกรมดึงข้อมูลสแกนนิ้วที่ ${cfg.scanner.readerExePath}`
+    } else {
+      if (!cfg.scanner.syncEnabled && !hasScannerExeProcessRunnerForTests()) {
+        throw new ScannerExeError(
+          'BLOCKED_BY_EXTERNAL_CONTRACT',
+          'BLOCKED_BY_EXTERNAL_CONTRACT: ปิดการเรียก ScannerReader.exe อัตโนมัติไว้ (SCANNER_SYNC_ENABLED=false) กรุณาตั้งค่า Path ของไฟล์ EXE เดิมบนเครื่อง Windows Server ก่อนเปิดใช้งานจริง',
+          503
         );
-        (err as Error & { code?: string }).code = 'SCANNER_EXE_NOT_FOUND';
-        throw err;
       }
 
-      const args: string[] = [];
-      if (isScannerSyncCli) {
-        args.push('--days', String(resolvedRange.exeDaysArg));
-        if (cfg.scanner.previewMode) {
-          args.push('--preview');
-        }
-      }
-      if (machineNo) {
-        args.push('--machine', String(machineNo));
-      }
+      const args = buildScannerExeArgs({
+        isScannerSyncCli,
+        exeDaysArg: resolvedRange.exeDaysArg,
+        previewMode: cfg.scanner.previewMode,
+        machineNo,
+      });
 
       const exeWorkingDir = cfg.scanner.readerExePath.replace(/[\\/][^\\/]+$/, '') || process.cwd();
-      try {
-        const { stdout } = await execFileAsync(cfg.scanner.readerExePath, args, {
-          cwd: exeWorkingDir,
-          timeout: cfg.scanner.timeoutMs,
-          env: {
-            ...process.env,
-            SCANNER_MYSQL_CONNECTION_STRING: cfg.scanner.mysqlConnectionString,
-          },
-        });
-        stdoutText = stdout;
-      } catch (execErr: any) {
-        if (execErr?.killed || execErr?.signal === 'SIGTERM' || String(execErr?.code) === 'ETIMEDOUT') {
-          const timeoutErr = new Error(
-            `SCANNER_TIMEOUT: เครื่องสแกนนิ้วหรือโปรแกรมดึงสแกนไม่ตอบสนองภายในเวลาที่กำหนด (${cfg.scanner.timeoutMs} ms)`
+      const execResult = await runScannerExeProcess({
+        exePath: cfg.scanner.readerExePath,
+        args,
+        cwd: exeWorkingDir,
+        timeoutMs: cfg.scanner.timeoutMs,
+        maxBufferBytes: cfg.scanner.maxBufferBytes,
+        mysqlConnectionString: cfg.scanner.mysqlConnectionString,
+      });
+
+      stdoutText = execResult.stdout;
+      lastExitCode = execResult.exitCode;
+      lastSignal = execResult.signal;
+      lastStdoutBytes = execResult.stdoutBytes;
+      lastStderrBytes = execResult.stderrBytes;
+    }
+
+    const parsed = parseScannerExeJsonOutput(stdoutText, { exitCode: lastExitCode });
+    const contractPayload = extractScannerContractPayload(parsed);
+
+    if (contractPayload.machines.length > 0) {
+      for (const m of contractPayload.machines) {
+        if (typeof m.machineNo === 'number') {
+          const machineOk = String(m.status || '').toUpperCase() === 'OK';
+          await dbExecute(
+            `UPDATE scanner_devices
+             SET last_sync_at = CURRENT_TIMESTAMP,
+                 last_sync_status = ?,
+                 last_error_message = ?
+             WHERE machine_no = ?`,
+            [
+              machineOk ? 'SUCCESS' : 'FAILED',
+              machineOk
+                ? null
+                : sanitizeScannerErrorMessage(`สถานะจาก ScannerSyncCli: ${m.status || 'FAILED'}`),
+              m.machineNo,
+            ]
           );
-          (timeoutErr as Error & { code?: string }).code = 'SCANNER_TIMEOUT';
-          throw timeoutErr;
-        }
-        // ScannerSyncCli.exe คืนค่า exitCode = 1 เมื่ออ่านสำเร็จบางเครื่อง หรือ exitCode = 2 พร้อมพิมพ์ JSON ลง stdout
-        if (typeof execErr?.stdout === 'string' && execErr.stdout.trim().length > 0) {
-          stdoutText = execErr.stdout;
-        } else {
-          const unreachableErr = new Error(
-            `SCANNER_DEVICE_UNREACHABLE: ไม่สามารถดึงข้อมูลจากเครื่องสแกนได้ (${execErr?.message || 'Unknown EXE error'})`
-          );
-          (unreachableErr as Error & { code?: string }).code = 'SCANNER_DEVICE_UNREACHABLE';
-          throw unreachableErr;
         }
       }
     }
 
-    let parsed: unknown;
-    try {
-      const trimmedOut = stdoutText.trim();
-      try {
-        parsed = JSON.parse(trimmedOut);
-      } catch {
-        // กรณีมีบรรทัดข้อความอื่นนำหน้า JSON บน stdout ให้ตัดเฉพาะก้อน JSON มาแปลง
-        const firstBrace = trimmedOut.search(/[\[{]/);
-        if (firstBrace > 0) {
-          parsed = JSON.parse(trimmedOut.slice(firstBrace));
-        } else {
-          throw new Error('JSON parse failed');
-        }
+    if (!contractPayload.ok) {
+      const errMsg = contractPayload.errorMessage;
+      if (errMsg.includes('Another sync process')) {
+        throw new ScannerExeError('SYNC_ALREADY_RUNNING', `SYNC_ALREADY_RUNNING: ${errMsg}`, 409);
       }
-    } catch {
-      const err = new Error('INVALID_EXE_JSON_OUTPUT: ผลลัพธ์จากโปรแกรมดึงสแกนไม่ใช่ JSON ที่ถูกต้อง');
-      (err as Error & { code?: string }).code = 'INVALID_EXE_JSON_OUTPUT';
-      throw err;
-    }
-
-    let eventsToIngest: unknown[];
-    if (Array.isArray(parsed)) {
-      eventsToIngest = parsed;
-    } else if (parsed && typeof parsed === 'object') {
-      const wrapper = parsed as {
-        success?: boolean;
-        message?: string;
-        error?: string;
-        exitCode?: number;
-        machines?: Array<{
-          machineNo?: number;
-          ip?: string;
-          read?: number;
-          new?: number;
-          duplicates?: number;
-          status?: string;
-        }>;
-        scans?: unknown[];
-      };
-
-      if (Array.isArray(wrapper.machines)) {
-        for (const m of wrapper.machines) {
-          if (typeof m.machineNo === 'number') {
-            const machineOk = String(m.status || '').toUpperCase() === 'OK';
-            await dbExecute(
-              `UPDATE scanner_devices
-               SET last_sync_at = CURRENT_TIMESTAMP,
-                   last_sync_status = ?,
-                   last_error_message = ?
-               WHERE machine_no = ?`,
-              [
-                machineOk ? 'SUCCESS' : 'FAILED',
-                machineOk ? null : `สถานะจาก ScannerSyncCli: ${m.status || 'FAILED'}`,
-                m.machineNo,
-              ]
-            );
-          }
-        }
-      }
-
-      if (wrapper.success === false) {
-        const errMsg = wrapper.error || wrapper.message || 'ไม่สามารถดึงข้อมูลจากเครื่องสแกนนิ้วได้';
-        if (errMsg.includes('Another sync process')) {
-          const conflictErr = new Error(`SYNC_ALREADY_RUNNING: ${errMsg}`);
-          (conflictErr as Error & { code?: string; statusCode?: number }).code = 'SYNC_ALREADY_RUNNING';
-          (conflictErr as Error & { code?: string; statusCode?: number }).statusCode = 409;
-          throw conflictErr;
-        }
-        const unreachableErr = new Error(`SCANNER_DEVICE_UNREACHABLE: ${errMsg}`);
-        (unreachableErr as Error & { code?: string }).code = 'SCANNER_DEVICE_UNREACHABLE';
-        throw unreachableErr;
-      }
-
-      if (!Array.isArray(wrapper.scans)) {
-        const err = new Error(
-          'INVALID_EXE_CONTRACT: JSON จากโปรแกรมสแกนนิ้วต้องเป็น Array 6 ฟิลด์ หรือ Object ที่มีฟิลด์ scans เป็น Array'
-        );
-        (err as Error & { code?: string }).code = 'INVALID_EXE_CONTRACT';
-        throw err;
-      }
-
-      eventsToIngest = wrapper.scans;
-    } else {
-      const err = new Error('INVALID_EXE_CONTRACT: JSON จากโปรแกรมสแกนนิ้วต้องเป็น Array ของ Event 6 ฟิลด์');
-      (err as Error & { code?: string }).code = 'INVALID_EXE_CONTRACT';
-      throw err;
+      throw new ScannerExeError(
+        'SCANNER_DEVICE_UNREACHABLE',
+        `SCANNER_DEVICE_UNREACHABLE: ${errMsg}`,
+        503
+      );
     }
 
     const result = await ingestSixFieldEventsBatch(
-      eventsToIngest,
+      contractPayload.events,
       options.triggerMode,
       options.actorUsername,
       machineNo,
@@ -551,6 +503,26 @@ export async function executeScannerReaderSync(options: {
         onProgress: options.onProgress,
       }
     );
+
+    emitScannerSyncDiagnostic({
+      event: 'SCANNER_SYNC_DIAGNOSTIC',
+      requestId: options.requestId || 'scanner-sync',
+      jobId: options.jobId ?? null,
+      syncMode: resolvedRange.syncMode,
+      exeDaysArgUsed: resolvedRange.exeDaysArg,
+      requestedDateRange: {
+        fromBkk: resolvedRange.filterFromBkk,
+        toBkk: resolvedRange.filterToBkk,
+      },
+      durationMs: Date.now() - syncStartedAt,
+      exitCode: lastExitCode,
+      signal: lastSignal,
+      stdoutBytes: lastStdoutBytes,
+      stderrBytes: lastStderrBytes,
+      bufferLimitBytes: cfg.scanner.maxBufferBytes,
+      timeoutMs: cfg.scanner.timeoutMs,
+      errorCode: null,
+    });
 
     await writeAuditLog({
       requestId: options.requestId || 'scanner-sync',
@@ -567,7 +539,29 @@ export async function executeScannerReaderSync(options: {
     return result;
   } catch (err: unknown) {
     const code = (err as { code?: string })?.code || 'SCANNER_SYNC_FAILED';
-    const message = err instanceof Error ? err.message : String(err);
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    const message = sanitizeScannerErrorMessage(rawMessage);
+    const meta = err instanceof ScannerExeError ? err.meta : undefined;
+
+    emitScannerSyncDiagnostic({
+      event: 'SCANNER_SYNC_DIAGNOSTIC',
+      requestId: options.requestId || 'scanner-sync',
+      jobId: options.jobId ?? null,
+      syncMode: resolvedRange.syncMode,
+      exeDaysArgUsed: resolvedRange.exeDaysArg,
+      requestedDateRange: {
+        fromBkk: resolvedRange.filterFromBkk,
+        toBkk: resolvedRange.filterToBkk,
+      },
+      durationMs: meta?.durationMs ?? Date.now() - syncStartedAt,
+      exitCode: meta?.exitCode ?? lastExitCode,
+      signal: meta?.signal ?? lastSignal,
+      stdoutBytes: meta?.stdoutBytes ?? lastStdoutBytes,
+      stderrBytes: meta?.stderrBytes ?? lastStderrBytes,
+      bufferLimitBytes: cfg.scanner.maxBufferBytes,
+      timeoutMs: cfg.scanner.timeoutMs,
+      errorCode: code,
+    });
 
     await dbExecute(
       `INSERT INTO sync_runs (
@@ -612,8 +606,12 @@ export async function executeScannerReaderSync(options: {
       detail: {
         message,
         syncMode: resolvedRange.syncMode,
+        exeDaysArgUsed: resolvedRange.exeDaysArg,
         filterFromBkk: resolvedRange.filterFromBkk,
         filterToBkk: resolvedRange.filterToBkk,
+        stdoutBytes: meta?.stdoutBytes ?? lastStdoutBytes,
+        stderrBytes: meta?.stderrBytes ?? lastStderrBytes,
+        bufferLimitBytes: cfg.scanner.maxBufferBytes,
       },
     });
 
@@ -652,6 +650,8 @@ scannersRouter.get(
           timezone: 'Asia/Bangkok',
           maxRangeDays: cfg.scanner.maxRangeDays,
           defaultScheduledSyncDays: cfg.scanner.syncDays,
+          maxBufferBytes: cfg.scanner.maxBufferBytes,
+          timeoutMs: cfg.scanner.timeoutMs,
           supportsTodayMode: true,
           supportsCustomRangeMode: true,
           supportsAllMode: true,
@@ -1126,6 +1126,7 @@ scannersRouter.post(
         actorRole: req.user!.role,
         machineNo,
         requestId: req.requestId,
+        jobId: trackedJobId,
         ipAddress: req.ip || '127.0.0.1',
         rangeInput,
         onProgress: (step, processed, total) => {
@@ -1156,7 +1157,8 @@ scannersRouter.post(
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || 'SCANNER_SYNC_FAILED';
       const statusCode = (err as { statusCode?: number })?.statusCode;
-      const message = err instanceof Error ? err.message : String(err);
+      const rawMessage = err instanceof Error ? err.message : String(err);
+      const message = sanitizeScannerErrorMessage(rawMessage);
 
       if (trackedJobId) {
         failCentralJob(trackedJobId, {

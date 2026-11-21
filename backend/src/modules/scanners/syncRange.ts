@@ -155,6 +155,8 @@ export function validateAndNormalizeScannerSyncRange(
     syncMode = hasExplicitRangeFields ? 'CUSTOM_RANGE' : 'ALL';
   } else if (rawMode === 'TODAY' || rawMode === 'CUSTOM_RANGE' || rawMode === 'ALL') {
     syncMode = rawMode;
+  } else if (rawMode === 'ALL_SUPPORTED') {
+    syncMode = 'ALL';
   } else {
     throw new ScannerSyncRangeError(
       'INVALID_SYNC_MODE',

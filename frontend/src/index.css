@@ -2,49 +2,56 @@
 
 @layer base {
   :root {
-    /* Typography Tokens — Human-Centered Hospital Workspace */
+    /* Typography Tokens — Professional Thai Healthcare Workspace */
     --font-sans: 'Sarabun', 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     --font-display: 'Sarabun', 'Plus Jakarta Sans', sans-serif;
     --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
 
-    /* Color Palette Tokens — Soft Lavender & Clean White Hospital Enterprise */
-    --brand-primary: #8B73C7;
-    --brand-primary-hover: #7359B4;
-    --brand-soft: #F3EEFC;
-    --brand-subtle: #F7F4FD;
-
-    --surface-canvas: #FAF9FD;
+    /* Global Design System — Professional Light Lavender Healthcare Dashboard */
+    --bg-canvas: #F8F7FC;
     --surface-card: #FFFFFF;
-    --surface-secondary: #F6F4FA;
+    --lavender-light: #EDE5F8;
+    --lavender-soft: #F2EDFA;
+    --brand-primary: #8E70C9;
+    --brand-primary-hover: #795BB8;
+    --brand-primary-dark: #543B7A;
+    --border-subtle: #E6DFF0;
+    --border-default: #D5C9E8;
+    --border-focus: #8E70C9;
 
-    --text-primary: #273244;
-    --text-secondary: #596579;
-    --text-muted: #6E7A8E;
+    /* Legacy Aliases for Seamless Backward Compatibility */
+    --surface-canvas: var(--bg-canvas);
+    --surface-secondary: var(--lavender-soft);
+    --brand-soft: var(--lavender-soft);
+    --brand-subtle: var(--bg-canvas);
 
-    --border-subtle: #E7E2F0;
-    --border-default: #D5CEE6;
-    --border-focus: #8B73C7;
+    /* Text Hierarchy (WCAG AA Validated) */
+    --text-primary: #262238;
+    --text-secondary: #746B83;
+    --text-muted: #746B83;
 
-    /* Semantic Status Colors (WCAG AA Validated) */
-    --status-success: #047857;
-    --status-warning: #B45309;
-    --status-danger: #B91C1C;
-    --status-info: #2563EB;
+    /* Semantic Status Colors */
+    --status-success: #198568;
+    --status-warning: #B87516;
+    --status-danger: #C74455;
+    --status-info: #5879BC;
 
-    /* Spacing & Sizing Tokens (8px Grid with 4px Subdivisions) */
-    --space-1: 0.25rem;  /* 4px */
-    --space-2: 0.5rem;   /* 8px */
-    --space-3: 0.75rem;  /* 12px */
-    --space-4: 1rem;     /* 16px */
-    --space-5: 1.25rem;  /* 20px */
-    --space-6: 1.5rem;   /* 24px */
-    --space-8: 2rem;     /* 32px */
+    /* Spacing Scale (4 / 8 / 12 / 16 / 24 / 32) */
+    --space-1: 0.25rem;
+    --space-2: 0.5rem;
+    --space-3: 0.75rem;
+    --space-4: 1rem;
+    --space-5: 1.25rem;
+    --space-6: 1.5rem;
+    --space-8: 2rem;
 
-    --radius-sm: 0.5rem;    /* 8px */
-    --radius-md: 0.625rem;  /* 10px */
-    --radius-lg: 0.75rem;   /* 12px */
+    /* Radius Scale */
+    --radius-sm: 0.5rem;     /* 8px */
+    --radius-md: 0.625rem;   /* 10px */
+    --radius-lg: 0.8125rem;  /* 13px (12–14px standard card radius) */
 
-    --control-height: 2.625rem; /* 42px comfortable hospital input & button height */
+    /* Control Sizing */
+    --control-height: 2.5rem; /* 40px clean enterprise control height */
   }
 
   html {
@@ -54,9 +61,9 @@
 
   body {
     font-family: var(--font-sans);
-    background-color: var(--surface-canvas);
+    background-color: var(--bg-canvas);
     color: var(--text-primary);
-    font-size: 0.9375rem; /* 15px comfortable body baseline */
+    font-size: 0.9375rem; /* 15px */
     line-height: 1.6;
     overflow-wrap: break-word;
     overflow-x: hidden;
@@ -75,7 +82,7 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* Accessible Keyboard Navigation Focus States */
+  /* Accessible Keyboard Focus States */
   input:focus-visible,
   select:focus-visible,
   textarea:focus-visible,
@@ -85,7 +92,7 @@
     outline-offset: 2px;
   }
 
-  /* Comfortable Form Controls Consistency (40–44px) */
+  /* Consistent Control Heights */
   input[type="text"],
   input[type="password"],
   input[type="number"],
@@ -97,20 +104,20 @@
   }
 }
 
-/* Reusable Human-Centered Hospital Workspace Component Classes */
+/* Reusable Lavender Hospital Management System Component Classes */
 @layer components {
   .ent-card {
     background-color: var(--surface-card);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-lg);
-    box-shadow: 0 1px 3px 0 rgba(39, 50, 68, 0.04), 0 1px 2px -1px rgba(39, 50, 68, 0.03);
+    box-shadow: 0 1px 2px 0 rgba(38, 34, 56, 0.03);
   }
 
   .ent-table-wrapper {
     background-color: var(--surface-card);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-lg);
-    box-shadow: 0 1px 3px 0 rgba(39, 50, 68, 0.04), 0 1px 2px -1px rgba(39, 50, 68, 0.03);
+    box-shadow: 0 1px 2px 0 rgba(38, 34, 56, 0.03);
     overflow: hidden;
   }
 
@@ -120,42 +127,49 @@
 
   .ent-input {
     height: var(--control-height);
-    padding: 0.5rem 0.875rem;
+    padding: 0.45rem 0.875rem;
     font-size: 0.875rem; /* 14px */
     line-height: 1.35rem;
-    background-color: #FFFFFF;
+    background-color: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-sm);
     color: var(--text-primary);
-    transition: border-color 150ms ease, box-shadow 150ms ease;
+    transition: border-color 150ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 150ms cubic-bezier(0.16, 1, 0.3, 1);
     max-width: 100%;
   }
 
   .ent-input-with-icon {
-    padding-left: 2.75rem;
+    padding-left: 2.65rem;
   }
 
-  .ent-input:hover {
-    border-color: #B8AEB5;
+  .ent-input:hover:not(:disabled) {
+    border-color: var(--brand-primary);
   }
 
   .ent-input:focus {
     border-color: var(--brand-primary);
-    box-shadow: 0 0 0 3px rgba(180, 83, 99, 0.12);
+    box-shadow: 0 0 0 3px rgba(142, 112, 201, 0.16);
+  }
+
+  .ent-input:disabled {
+    background-color: var(--bg-canvas);
+    color: var(--text-secondary);
+    cursor: not-allowed;
   }
 
   .ent-label {
     display: block;
-    font-size: 0.875rem; /* 14px readable Thai label */
+    font-size: 0.875rem; /* 14px */
     font-weight: 600;
     color: var(--text-primary);
     margin-bottom: 0.375rem;
   }
 
+  /* Primary Button — Lavender */
   .ent-btn-primary {
     min-height: var(--control-height);
     padding: 0.5rem 1.125rem;
-    font-size: 0.875rem; /* 14px */
+    font-size: 0.875rem;
     font-weight: 600;
     color: #FFFFFF;
     background-color: var(--brand-primary);
@@ -166,33 +180,31 @@
     justify-content: center;
     gap: 0.5rem;
     text-align: center;
-    transition: background-color 150ms ease, transform 100ms ease;
+    transition: background-color 150ms cubic-bezier(0.16, 1, 0.3, 1), transform 100ms ease, opacity 150ms ease;
     cursor: pointer;
-  }
-
-  @media (min-width: 640px) {
-    .ent-btn-primary,
-    .ent-btn-secondary {
-      white-space: nowrap;
-    }
   }
 
   .ent-btn-primary:hover:not(:disabled) {
     background-color: var(--brand-primary-hover);
   }
 
+  .ent-btn-primary:active:not(:disabled) {
+    transform: translateY(0.5px);
+  }
+
   .ent-btn-primary:disabled {
-    opacity: 0.55;
+    opacity: 0.52;
     cursor: not-allowed;
   }
 
+  /* Secondary Button — White with Soft Lavender Border */
   .ent-btn-secondary {
     min-height: var(--control-height);
     padding: 0.5rem 1rem;
-    font-size: 0.875rem; /* 14px */
+    font-size: 0.875rem;
     font-weight: 600;
     color: var(--text-primary);
-    background-color: #FFFFFF;
+    background-color: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-sm);
     display: inline-flex;
@@ -200,12 +212,128 @@
     justify-content: center;
     gap: 0.5rem;
     text-align: center;
-    transition: background-color 150ms ease, border-color 150ms ease;
+    transition: background-color 150ms cubic-bezier(0.16, 1, 0.3, 1), border-color 150ms ease, color 150ms ease;
     cursor: pointer;
   }
 
   .ent-btn-secondary:hover:not(:disabled) {
-    background-color: var(--surface-secondary);
-    border-color: #B8AEB5;
+    background-color: var(--lavender-soft);
+    border-color: var(--brand-primary);
+    color: var(--brand-primary-dark);
+  }
+
+  .ent-btn-secondary:disabled {
+    opacity: 0.52;
+    cursor: not-allowed;
+  }
+
+  /* Danger Button — Semantic Crimson */
+  .ent-btn-danger {
+    min-height: var(--control-height);
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #FFFFFF;
+    background-color: var(--status-danger);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    text-align: center;
+    transition: background-color 150ms ease, opacity 150ms ease;
+    cursor: pointer;
+  }
+
+  .ent-btn-danger:hover:not(:disabled) {
+    background-color: #AF3546;
+  }
+
+  .ent-btn-danger:disabled {
+    opacity: 0.52;
+    cursor: not-allowed;
+  }
+
+  /* Ghost Button — Subtle Details / Row Actions */
+  .ent-btn-ghost {
+    min-height: 2.25rem;
+    padding: 0.375rem 0.75rem;
+    font-size: 0.84375rem;
+    font-weight: 600;
+    color: var(--brand-primary-dark);
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.375rem;
+    transition: background-color 150ms ease, color 150ms ease;
+    cursor: pointer;
+  }
+
+  .ent-btn-ghost:hover:not(:disabled) {
+    background-color: var(--lavender-soft);
+    color: var(--brand-primary-dark);
+  }
+
+  .ent-btn-ghost:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  @media (min-width: 640px) {
+    .ent-btn-primary,
+    .ent-btn-secondary,
+    .ent-btn-danger,
+    .ent-btn-ghost {
+      white-space: nowrap;
+    }
+  }
+
+  /* Segmented Tab Bar */
+  .ent-tab-bar {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.25rem;
+    background-color: var(--lavender-soft);
+    border: 1px solid var(--border-subtle);
+    border-radius: 0.625rem;
+  }
+
+  .ent-tab-btn {
+    padding: 0.45rem 0.9rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    border-radius: 0.5rem;
+    color: var(--text-secondary);
+    transition: background-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .ent-tab-btn:hover {
+    color: var(--text-primary);
+  }
+
+  .ent-tab-btn-active {
+    background-color: var(--brand-primary);
+    color: #FFFFFF;
+    box-shadow: 0 1px 2px rgba(84, 59, 122, 0.16);
+  }
+
+  .ent-tab-btn-active:hover {
+    color: #FFFFFF;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

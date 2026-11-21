@@ -11,10 +11,12 @@ import {
   Fingerprint,
   Send,
   UserCog,
-  Server,
+  FileClock,
   Rocket,
   ChevronDown,
   ChevronRight,
+  PanelLeftClose,
+  PanelLeftOpen,
   X,
   HeartHandshake,
   Workflow,
@@ -56,12 +58,12 @@ interface SidebarNavGroup {
 export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
   {
     id: 'group_dashboard',
-    title: 'ภาพรวมและข้อมูลส่วนตัว',
+    title: 'ภาพรวม',
     items: [
       {
         key: 'dashboard',
         label: 'แดชบอร์ดภาพรวม',
-        subLabel: 'สรุปผลการลงเวลาและงานที่ต้องดูแล',
+        subLabel: 'สรุปผลการลงเวลาและรายการที่ต้องดูแล',
         roles: ['ADMIN', 'RESPONSIBLE_STAFF'],
         icon: LayoutDashboard,
       },
@@ -76,7 +78,7 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
   },
   {
     id: 'group_hr',
-    title: 'การบริหารเวลาและบุคลากร',
+    title: 'บริหารเวลาปฏิบัติงาน',
     items: [
       {
         key: 'hrAttendance',
@@ -88,7 +90,7 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
       {
         key: 'attendanceReview',
         label: 'ตรวจสอบเวลาและหมายเหตุ',
-        subLabel: 'รับรองผลตรวจสอบและคำนวณเวลาซ้ำ',
+        subLabel: 'รับรองผลตรวจสอบและคำนวณเวลาใหม่',
         roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
         icon: UserCheck,
       },
@@ -102,13 +104,13 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
       {
         key: 'shifts',
         label: 'ตารางเวรและกะทำงาน',
-        subLabel: 'แม่แบบกะทำงานและการมอบหมายเวร',
+        subLabel: 'ตารางเวรรายเดือนและแม่แบบกะทำงาน',
         roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
         icon: CalendarDays,
       },
       {
         key: 'reports',
-        label: 'รายงานและสถิติการมาสาย',
+        label: 'รายงานการมาสาย',
         subLabel: 'สรุปรายงานประจำงวดและส่งออก CSV',
         roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
         icon: BarChart3,
@@ -117,19 +119,19 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
   },
   {
     id: 'group_scanners',
-    title: 'เครื่องสแกนและข้อมูลต้นฉบับ',
+    title: 'เครื่องสแกน',
     items: [
       {
         key: 'scanners',
-        label: 'เครื่องสแกนและรอบดึงข้อมูล',
-        subLabel: 'สถานะอุปกรณ์และตารางเวลาซิงก์',
+        label: 'เครื่องสแกนและการดึงข้อมูล',
+        subLabel: 'ดึงข้อมูลจากเครื่องสแกนและรอบอัตโนมัติ',
         roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
         icon: Radio,
       },
       {
         key: 'rawScans',
         label: 'ข้อมูลสแกนต้นฉบับ',
-        subLabel: 'ประวัติสแกนลายนิ้วมือจากเครื่องอ่าน',
+        subLabel: 'ประวัติสแกนลายนิ้วมือต้นฉบับ (Immutable)',
         roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
         icon: Fingerprint,
       },
@@ -137,33 +139,33 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
   },
   {
     id: 'group_system',
-    title: 'ระบบและผู้ดูแลส่วนกลาง',
+    title: 'ระบบและผู้ดูแล',
     items: [
       {
         key: 'hosofficePush',
-        label: 'ส่งข้อมูลกลับ HOSOffice',
-        subLabel: 'ตรวจสอบข้อมูลก่อนส่งกลับระบบหลัก',
+        label: 'ส่งข้อมูล HOSOffice',
+        subLabel: 'ตรวจสอบและส่งข้อมูลสรุปกลับ HOSOffice',
         roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
         icon: Send,
       },
       {
         key: 'adminUsers',
-        label: 'ผู้ใช้งานและสิทธิ์ระบบ',
+        label: 'ผู้ใช้และสิทธิ์',
         subLabel: 'จัดการบัญชีผู้ใช้และผูกชื่อบุคลากร',
         roles: ['ADMIN'],
         icon: UserCog,
       },
       {
         key: 'systemLogs',
-        label: 'ประวัติการใช้งานระบบ',
-        subLabel: 'บันทึกการตรวจสอบและเหตุการณ์สำคัญ',
+        label: 'ประวัติการใช้งาน',
+        subLabel: 'บันทึกการใช้งานและความปลอดภัยระบบ',
         roles: ['ADMIN'],
-        icon: Server,
+        icon: FileClock,
       },
       {
         key: 'deployment',
-        label: 'อัปเดตระบบ Sam_Att',
-        subLabel: 'อัปเดตระบบอัตโนมัติด้วยปุ่มเดียว',
+        label: 'อัปเดตระบบ',
+        subLabel: 'ตรวจสอบสถานะและอัปเดตระบบ Sam_Att',
         roles: ['ADMIN'],
         icon: Rocket,
       },
@@ -171,7 +173,7 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
   },
   {
     id: 'group_help',
-    title: 'ช่วยเหลือและคู่มือการใช้งาน',
+    title: 'ช่วยเหลือ',
     items: [
       {
         key: 'workflowGuide',
@@ -183,7 +185,7 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
       {
         key: 'userManual',
         label: 'คู่มือการใช้งาน',
-        subLabel: 'ศูนย์รวมคู่มือแบบทีละขั้นและคำถามที่พบบ่อย',
+        subLabel: 'คู่มือแบบทีละขั้นตอนและคำถามที่พบบ่อย',
         roles: ['GENERAL_USER', 'RESPONSIBLE_STAFF', 'ADMIN'],
         icon: BookOpen,
       },
@@ -232,8 +234,8 @@ export function getNavBreadcrumb(view: NavViewKey): {
     }
   }
   return {
-    groupTitle: 'ระบบบริหารเวลาปฏิบัติงาน',
-    itemLabel: 'ภาพรวมระบบ',
+    groupTitle: 'ภาพรวม',
+    itemLabel: 'แดชบอร์ดภาพรวม',
     subLabel: '',
   };
 }
@@ -244,12 +246,16 @@ export function Sidebar({
   onSelectView,
   mobileOpen,
   onCloseMobile,
+  collapsed = false,
+  onToggleCollapse,
 }: {
   user: AuthUser;
   activeView: NavViewKey;
   onSelectView: (view: NavViewKey) => void;
   mobileOpen: boolean;
   onCloseMobile: () => void;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
 }) {
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
     group_dashboard: true,
@@ -272,7 +278,7 @@ export function Sidebar({
     <>
       {mobileOpen && (
         <div
-          className="fixed inset-0 z-40 bg-[#273244]/40 backdrop-blur-xs lg:hidden"
+          className="fixed inset-0 z-40 bg-[#262238]/35 backdrop-blur-xs lg:hidden"
           onClick={onCloseMobile}
           aria-hidden="true"
         />
@@ -280,54 +286,97 @@ export function Sidebar({
 
       <aside
         aria-label="เมนูนำทางหลัก"
-        className={`fixed lg:static top-0 bottom-0 left-0 z-50 w-64 bg-white border-r border-[#E7E2F0] flex flex-col transition-transform duration-200 ease-out shrink-0 ${
-          mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
-        }`}
+        className={`fixed lg:sticky lg:top-[64px] lg:h-[calc(100vh-64px)] top-0 bottom-0 left-0 z-50 bg-white border-r border-[#E6DFF0] flex flex-col shrink-0 transition-transform duration-200 ease-out ${
+          collapsed ? 'w-64 lg:w-[76px]' : 'w-[260px]'
+        } ${mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}
       >
         {/* Mobile Drawer Header */}
-        <div className="lg:hidden px-5 py-4 border-b border-[#E7E2F0] flex items-center justify-between bg-[#FAF9FD]">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-[#8B73C7] text-white flex items-center justify-center">
+        <div className="lg:hidden px-4 py-3.5 border-b border-[#E6DFF0] flex items-center justify-between bg-[#F8F7FC]">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="w-8 h-8 rounded-lg bg-[#8E70C9] text-white flex items-center justify-center shrink-0">
               <HeartHandshake className="w-4 h-4" />
             </div>
-            <span className="font-bold text-[15px] text-[#273244]">โรงพยาบาลสามชุก</span>
+            <span className="font-bold text-[15px] text-[#262238] truncate">
+              โรงพยาบาลสามชุก
+            </span>
           </div>
           <button
             type="button"
             onClick={onCloseMobile}
-            className="p-1.5 rounded-lg text-[#596579] hover:text-[#273244] hover:bg-[#F3EEFC]"
+            className="p-1.5 rounded-lg text-[#746B83] hover:text-[#262238] hover:bg-[#EDE5F8] cursor-pointer"
             aria-label="ปิดเมนูนำทาง"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
+        {/* Desktop Expand / Collapse Utility Row */}
+        {onToggleCollapse && (
+          <div
+            className={`hidden lg:flex items-center border-b border-[#E6DFF0] px-3 py-2.5 ${
+              collapsed ? 'justify-center' : 'justify-between'
+            }`}
+          >
+            {!collapsed && (
+              <span className="text-[12px] font-semibold text-[#746B83] px-1.5 truncate">
+                เมนูระบบ Sam_Att V2
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={onToggleCollapse}
+              title={collapsed ? 'ขยายแถบเมนูด้านข้าง' : 'ย่อแถบเมนูด้านข้าง'}
+              aria-label={collapsed ? 'ขยายแถบเมนูด้านข้าง' : 'ย่อแถบเมนูด้านข้าง'}
+              className="p-1.5 rounded-lg text-[#746B83] hover:text-[#543B7A] hover:bg-[#F2EDFA] transition-colors cursor-pointer"
+            >
+              {collapsed ? (
+                <PanelLeftOpen className="w-4 h-4" />
+              ) : (
+                <PanelLeftClose className="w-4 h-4" />
+              )}
+            </button>
+          </div>
+        )}
+
         {/* Navigation Groups */}
-        <nav className="flex-1 px-3.5 py-4 space-y-5 overflow-y-auto">
-          {SIDEBAR_GROUPS.map((group) => {
+        <nav
+          className={`flex-1 overflow-y-auto py-3.5 ${
+            collapsed ? 'px-2.5 space-y-3' : 'px-3 space-y-4'
+          }`}
+        >
+          {SIDEBAR_GROUPS.map((group, groupIndex) => {
             const visibleItems = group.items.filter((i) => i.roles.includes(user.role));
             if (visibleItems.length === 0) return null;
 
-            const isExpanded = openGroups[group.id] ?? true;
+            const isExpanded = collapsed ? true : (openGroups[group.id] ?? true);
 
             return (
-              <div key={group.id} className="space-y-1">
-                <button
-                  type="button"
-                  aria-expanded={isExpanded}
-                  onClick={() => toggleGroup(group.id)}
-                  className="w-full px-3 py-1.5 flex items-center justify-between text-[12.5px] font-semibold text-[#596579] hover:text-[#273244] rounded-lg transition-colors"
-                >
-                  <span className="truncate">{group.title}</span>
-                  {isExpanded ? (
-                    <ChevronDown className="w-4 h-4 text-[#596579]/70 shrink-0" />
-                  ) : (
-                    <ChevronRight className="w-4 h-4 text-[#596579]/70 shrink-0" />
-                  )}
-                </button>
+              <div
+                key={group.id}
+                className={
+                  collapsed && groupIndex > 0
+                    ? 'pt-2.5 border-t border-[#E6DFF0] space-y-1'
+                    : 'space-y-1'
+                }
+              >
+                {!collapsed && (
+                  <button
+                    type="button"
+                    aria-expanded={isExpanded}
+                    onClick={() => toggleGroup(group.id)}
+                    className="w-full px-2.5 py-1 flex items-center justify-between text-[12px] font-semibold text-[#746B83] hover:text-[#543B7A] rounded-md transition-colors cursor-pointer"
+                  >
+                    <span className="truncate">{group.title}</span>
+                    {isExpanded ? (
+                      <ChevronDown className="w-3.5 h-3.5 text-[#746B83]/80 shrink-0" />
+                    ) : (
+                      <ChevronRight className="w-3.5 h-3.5 text-[#746B83]/80 shrink-0" />
+                    )}
+                  </button>
+                )}
 
                 {isExpanded && (
-                  <div className="space-y-1">
+                  <div className="space-y-0.5">
                     {visibleItems.map((item) => {
                       const Icon = item.icon;
                       const isActive = activeView === item.key;
@@ -338,19 +387,27 @@ export function Sidebar({
                           type="button"
                           aria-current={isActive ? 'page' : undefined}
                           onClick={() => handleSelect(item.key)}
-                          title={item.subLabel}
-                          className={`w-full flex items-center gap-3 px-3.5 py-2.5 text-[14.5px] rounded-xl transition-colors text-left ${
+                          title={collapsed ? `${item.label} — ${item.subLabel}` : item.subLabel}
+                          className={`w-full flex items-center rounded-xl transition-colors cursor-pointer ${
+                            collapsed
+                              ? 'justify-center px-2 py-2.5'
+                              : 'gap-2.5 px-3 py-2 text-left'
+                          } ${
                             isActive
-                              ? 'bg-[#F3EEFC] text-[#7359B4] font-semibold shadow-2xs'
-                              : 'text-[#273244] hover:bg-[#FAF9FD] font-medium'
+                              ? 'bg-[#EDE5F8] text-[#543B7A] font-semibold'
+                              : 'text-[#262238] hover:bg-[#F2EDFA]/70 font-medium'
                           }`}
                         >
                           <Icon
-                            className={`w-4.5 h-4.5 shrink-0 ${
-                              isActive ? 'text-[#8B73C7]' : 'text-[#596579]'
+                            className={`w-[18px] h-[18px] shrink-0 ${
+                              isActive ? 'text-[#543B7A]' : 'text-[#746B83]'
                             }`}
                           />
-                          <span className="truncate leading-snug">{item.label}</span>
+                          {!collapsed && (
+                            <span className="text-[14px] leading-snug whitespace-nowrap truncate">
+                              {item.label}
+                            </span>
+                          )}
                         </button>
                       );
                     })}
@@ -361,19 +418,23 @@ export function Sidebar({
           })}
         </nav>
 
-        {/* Readable Current User Card */}
-        <div className="p-4 m-3.5 bg-[#FAF9FD] border border-[#E7E2F0] rounded-xl space-y-1.5">
-          <div className="text-[12px] font-semibold text-[#7359B4]">ผู้ปฏิบัติงานปัจจุบัน</div>
-          <div className="text-[14.5px] font-bold text-[#273244] truncate">{user.displayName}</div>
-          <div className="text-[12.5px] text-[#596579] font-mono">
-            รหัสบุคลากร: {user.approvedPersonId || 'ยังไม่ผูกชื่อบุคลากร'}
+        {/* Compact Footer Identity */}
+        {!collapsed && (
+          <div className="px-3.5 py-3 m-3 bg-[#F8F7FC] border border-[#E6DFF0] rounded-xl space-y-1">
+            <div className="text-[13.5px] font-bold text-[#262238] truncate">{user.displayName}</div>
+            <div className="text-[12px] text-[#746B83] flex items-center gap-1.5 truncate">
+              <span>
+                {user.role === 'GENERAL_USER' && 'บุคลากรทั่วไป'}
+                {user.role === 'RESPONSIBLE_STAFF' && 'เจ้าหน้าที่งานบุคคล'}
+                {user.role === 'ADMIN' && 'ผู้ดูแลระบบ'}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono tabular-nums">
+                {user.approvedPersonId || 'ยังไม่ผูก'}
+              </span>
+            </div>
           </div>
-          <div className="text-[12.5px] text-[#596579] leading-snug pt-1.5 border-t border-[#E7E2F0]">
-            {user.role === 'GENERAL_USER' && 'สิทธิ์: ดูข้อมูลเวลาของตนเอง'}
-            {user.role === 'RESPONSIBLE_STAFF' && 'สิทธิ์: เจ้าหน้าที่บริหารงานบุคคล (HR)'}
-            {user.role === 'ADMIN' && 'สิทธิ์: ผู้ดูแลระบบทั้งหมด'}
-          </div>
-        </div>
+        )}
       </aside>
     </>
   );

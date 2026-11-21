@@ -77,6 +77,7 @@ export interface AppConfig {
     autoSchedulerEnabled: boolean;
     readerExePath: string;
     timeoutMs: number;
+    maxBufferBytes: number;
     syncDays: number;
     maxRangeDays: number;
     previewMode: boolean;
@@ -155,6 +156,31 @@ function isValidConfiguredSecret(val: string | undefined, minLength: number): bo
   const trimmed = val.trim();
   if (INVALID_SECRET_PLACEHOLDERS.has(trimmed)) return false;
   return trimmed.length >= minLength;
+}
+
+// ขีดจำกัดที่ปลอดภัยสำหรับ Buffer และ Timeout ของ ScannerSyncCli.exe / ScannerReader.exe
+export const SCANNER_MAX_BUFFER_MIN_BYTES = 1 * 1024 * 1024; // 1 MB
+export const SCANNER_MAX_BUFFER_DEFAULT_BYTES = 32 * 1024 * 1024; // 32 MB (รองรับ JSON หลายวัน/สูงสุด 90 วันแบบมีขอบเขต)
+export const SCANNER_MAX_BUFFER_HARD_CAP_BYTES = 64 * 1024 * 1024; // 64 MB เพดานสูงสุดที่ปลอดภัยต่อหน่วยความจำ
+
+export const SCANNER_TIMEOUT_MIN_MS = 5_000; // 5 วินาที
+export const SCANNER_TIMEOUT_DEFAULT_MS = 120_000; // 120 วินาที (รองรับการอ่านหลายเครื่อง/หลายวัน)
+export const SCANNER_TIMEOUT_HARD_CAP_MS = 300_000; // 300 วินาที (5 นาที) เพดานสูงสุด
+
+export function parseBoundedPositiveInteger(
+  rawValue: string | undefined,
+  defaultValue: number,
+  minValue: number,
+  maxValue: number
+): number {
+  if (rawValue === undefined || rawValue === null || rawValue.trim() === '') {
+    return defaultValue;
+  }
+  const parsed = Number(rawValue.trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return defaultValue;
+  }
+  return Math.max(minValue, Math.min(maxValue, Math.floor(parsed)));
 }
 
 /**
@@ -295,13 +321,28 @@ export function loadConfig(): AppConfig {
         : process.env.SCANNER_SYNC_ENABLED === 'true' ||
           (dataMode === 'REAL' && exeExistsOnDisk && process.env.SCANNER_FORCE_DISABLE !== 'true');
 
+      const isTestRuntime = isAutomatedTestRuntime();
+      const timeoutMs = parseBoundedPositiveInteger(
+        process.env.SCANNER_READER_TIMEOUT_MS,
+        SCANNER_TIMEOUT_DEFAULT_MS,
+        isTestRuntime ? 100 : SCANNER_TIMEOUT_MIN_MS,
+        SCANNER_TIMEOUT_HARD_CAP_MS
+      );
+      const maxBufferBytes = parseBoundedPositiveInteger(
+        process.env.SCANNER_READER_MAX_BUFFER_BYTES,
+        SCANNER_MAX_BUFFER_DEFAULT_BYTES,
+        isTestRuntime ? 1024 : SCANNER_MAX_BUFFER_MIN_BYTES,
+        SCANNER_MAX_BUFFER_HARD_CAP_BYTES
+      );
+
       return {
         syncEnabled,
         autoSchedulerEnabled: process.env.SCANNER_AUTO_SCHEDULER_ENABLED !== 'false',
         readerExePath: resolvedReaderExePath,
-        timeoutMs: Number(process.env.SCANNER_READER_TIMEOUT_MS || 30000),
-        syncDays: Number(process.env.SCANNER_SYNC_DAYS || 3),
-        maxRangeDays: Math.max(1, Math.min(365, Number(process.env.SCANNER_SYNC_MAX_RANGE_DAYS || 90))),
+        timeoutMs,
+        maxBufferBytes,
+        syncDays: parseBoundedPositiveInteger(process.env.SCANNER_SYNC_DAYS, 3, 1, 365),
+        maxRangeDays: parseBoundedPositiveInteger(process.env.SCANNER_SYNC_MAX_RANGE_DAYS, 90, 1, 365),
         previewMode: process.env.SCANNER_CLI_PREVIEW_MODE !== 'false',
         mysqlConnectionString:
           process.env.SCANNER_MYSQL_CONNECTION_STRING?.trim() || fallbackScannerMysqlConn,

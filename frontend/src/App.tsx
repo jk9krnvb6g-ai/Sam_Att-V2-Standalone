@@ -3,14 +3,6 @@
  * คอมโพเนนต์โครงสร้างหลักของแอปพลิเคชัน (Main Application Shell & Router)
  * ไฟล์: frontend/src/App.tsx
  * ============================================================================
- * หน้าที่หลัก:
- * 1. กู้คืนเซสชันผู้ใช้งานอัตโนมัติตอนเปิดหน้าเว็บด้วย GET /api/Sam_Att/auth/me
- * 2. กำหนดหน้าเริ่มต้นตามระดับสิทธิ์:
- *    - GENERAL_USER (บุคลากรทั่วไป) -> เปิดหน้า 'myAttendance' (เวลาปฏิบัติงานของฉัน) เสมอ
- *    - ADMIN / RESPONSIBLE_STAFF -> เปิดหน้า 'dashboard' (ภาพรวมองค์กร)
- * 3. จัดการโครงสร้างหน้าจอแบบ Responsive:
- *    - บนคอมพิวเตอร์ (>= 1024px): แสดงแถบเมนูด้านซ้าย (Sidebar) คงที่
- *    - บนมือถือ (< 1024px): แสดงปุ่มเปิดเมนู Drawer และแถบนำทางด่วนด้านล่าง (Bottom Quick-Access Bar)
  */
 
 import React, { useEffect, useState } from 'react';
@@ -55,6 +47,7 @@ export default function App() {
   const [dataMode, setDataMode] = useState<'REAL' | 'DEMO'>('REAL');
   const [activeView, setActiveView] = useState<NavViewKey>('dashboard');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [initializing, setInitializing] = useState(true);
 
   // ปิดการเข้าถึงเส้นทางหน้าตั้งค่าระบบหรือตรวจสอบสถานะการเชื่อมต่อเดิมหากผู้ใช้พิมพ์ URL/Hash โดยตรง
@@ -92,7 +85,12 @@ export default function App() {
           setDataMode(res.dataMode);
         }
         setUser(res.user);
-        setActiveView(resolveSafeNavView(res.user.role === 'GENERAL_USER' ? 'myAttendance' : 'dashboard', res.user.role));
+        setActiveView(
+          resolveSafeNavView(
+            res.user.role === 'GENERAL_USER' ? 'myAttendance' : 'dashboard',
+            res.user.role
+          )
+        );
       } catch {
         setStoredToken(null);
       } finally {
@@ -122,7 +120,7 @@ export default function App() {
 
   if (initializing) {
     return (
-      <div className="min-h-screen bg-[#FAF9FD] flex items-center justify-center p-4 text-center text-[15px] text-[#596579]">
+      <div className="min-h-screen bg-[#F8F7FC] flex items-center justify-center p-4 text-center text-[15px] text-[#746B83]">
         กำลังเตรียมพื้นที่ทำงานระบบบริหารเวลาปฏิบัติงาน โรงพยาบาลสามชุก...
       </div>
     );
@@ -136,98 +134,91 @@ export default function App() {
   const isStaffOrAdmin = user.role === 'ADMIN' || user.role === 'RESPONSIBLE_STAFF';
 
   return (
-    <div className="min-h-screen bg-[#FAF9FD] flex flex-col overflow-x-hidden">
+    <div className="min-h-screen bg-[#F8F7FC] flex flex-col overflow-x-hidden">
       {dataMode === 'DEMO' && (
         <div
           role="status"
           aria-label="แถบแจ้งเตือนโหมดข้อมูลตัวอย่าง"
-          className="bg-amber-50 border-b border-amber-200 px-4 py-2 text-center text-[13px] font-semibold text-[#B45309] flex flex-wrap items-center justify-center gap-2"
+          className="bg-[#FDF7EB] border-b border-[#B87516]/25 px-4 py-1.5 text-center text-[12.5px] font-medium text-[#B87516] flex flex-wrap items-center justify-center gap-2"
         >
-          <span className="px-2 py-0.5 rounded-md bg-amber-200/80 text-[#92400E] font-bold">
-            โหมดข้อมูลตัวอย่าง (DEMO)
-          </span>
-          <span>
-            ระบบกำลังแสดงข้อมูลจำลองในฐานข้อมูลแยกเฉพาะสำหรับการทดสอบ ไม่ปะปนกับข้อมูลจริงและปิดการส่งข้อมูลเข้า HOSOffice จริง
-          </span>
+          <span className="font-bold">โหมดข้อมูลตัวอย่าง (DEMO)</span>
+          <span aria-hidden="true">·</span>
+          <span>ฐานข้อมูลจำลองเพื่อการทดสอบ ไม่ปะปนกับข้อมูลจริงและปิดการส่งข้อมูล HOSOffice จริง</span>
         </div>
       )}
-      {/* Topbar: Responsive height (60px mobile, 68px desktop) */}
-      <header className="bg-white border-b border-[#E7E2F0] px-3 sm:px-6 lg:px-8 h-[60px] sm:h-[68px] flex items-center justify-between gap-2 sm:gap-4 lg:gap-8 sticky top-0 z-20">
-        {/* Zone 1: Mobile Drawer Toggle + Hospital Brand Identity */}
-        <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
+
+      {/* Streamlined Top Header: Brand + Breadcrumb + User Identity + Logout */}
+      <header className="bg-white border-b border-[#E6DFF0] px-3 sm:px-5 lg:px-6 h-[60px] lg:h-[64px] flex items-center justify-between gap-4 sticky top-0 z-30">
+        {/* Left: Brand & Breadcrumb */}
+        <div className="flex items-center gap-3 min-w-0">
           <button
             type="button"
             onClick={() => setMobileMenuOpen(true)}
-            className="lg:hidden p-2 text-[#273244] hover:bg-[#F3EEFC] rounded-lg shrink-0"
+            className="lg:hidden p-2 text-[#262238] hover:bg-[#F2EDFA] rounded-lg shrink-0 cursor-pointer"
             aria-label="เปิดเมนูนำทาง"
           >
             <Menu className="w-5 h-5" />
           </button>
+
           <a
             href="/Sam_Att/"
-            className="flex items-center gap-2.5 sm:gap-3 group min-w-0"
+            className="flex items-center gap-2.5 group shrink-0"
           >
-            <div className="w-8 h-8 sm:w-9 sm:h-9 rounded-xl bg-[#8B73C7] text-white flex items-center justify-center shadow-2xs group-hover:bg-[#7359B4] transition-colors shrink-0">
-              <HeartHandshake className="w-4.5 h-4.5 sm:w-5 sm:h-5" />
+            <div className="w-8 h-8 rounded-lg bg-[#8E70C9] text-white flex items-center justify-center group-hover:bg-[#795BB8] transition-colors shrink-0">
+              <HeartHandshake className="w-4.5 h-4.5" />
             </div>
-            <div className="min-w-0">
-              <div className="text-[14.5px] sm:text-[15.5px] font-bold tracking-tight text-[#273244] leading-tight truncate">
-                โรงพยาบาลสามชุก
-              </div>
-              <div className="hidden md:block text-[12.5px] text-[#596579] leading-tight truncate">
-                ระบบบริหารเวลาปฏิบัติงานบุคลากร
-              </div>
-              <div className="md:hidden text-[12px] font-semibold text-[#7359B4] leading-tight truncate">
-                {breadcrumb.itemLabel}
-              </div>
-            </div>
-          </a>
-        </div>
-
-        {/* Zone 2: Contextual Breadcrumb & Current Staff Identity */}
-        <div className="hidden md:flex items-center justify-between flex-1 min-w-0 text-[13.5px] text-[#596579] gap-4">
-          <nav aria-label="ตำแหน่งหน้าจอปัจจุบัน" className="flex items-center gap-2 truncate pl-2">
-            <span className="text-[#596579] truncate">{breadcrumb.groupTitle}</span>
-            <ChevronRight className="w-4 h-4 text-[#596579]/60 shrink-0" aria-hidden="true" />
-            <span className="font-semibold text-[#7359B4] truncate">{breadcrumb.itemLabel}</span>
-          </nav>
-
-          <div className="hidden xl:flex items-center gap-3.5 whitespace-nowrap shrink-0 border-l border-[#E7E2F0] pl-5">
-            <span className="font-semibold text-[#273244] text-[14px]">{user.displayName}</span>
-            <span aria-hidden="true" className="text-[#D5CEE6]">·</span>
-            <RoleLabel role={user.role} />
-            <span aria-hidden="true" className="text-[#D5CEE6]">·</span>
-            <span className="font-mono text-[13px] text-[#596579]">
-              รหัส: {user.approvedPersonId || 'ยังไม่ผูก'}
+            <span className="text-[15px] font-bold tracking-tight text-[#262238] whitespace-nowrap">
+              โรงพยาบาลสามชุก
             </span>
-          </div>
+          </a>
+
+          <span className="hidden md:block h-5 w-px bg-[#E6DFF0] shrink-0" aria-hidden="true" />
+
+          <nav
+            aria-label="ตำแหน่งหน้าจอปัจจุบัน"
+            className="hidden md:flex items-center gap-1.5 text-[13.5px] text-[#746B83] min-w-0 truncate"
+          >
+            <span className="truncate">{breadcrumb.groupTitle}</span>
+            <ChevronRight className="w-3.5 h-3.5 text-[#746B83]/60 shrink-0" aria-hidden="true" />
+            <span className="font-semibold text-[#543B7A] truncate">{breadcrumb.itemLabel}</span>
+          </nav>
         </div>
 
-        {/* Zone 3: Primary Session Action (Logout) */}
-        <div className="flex items-center gap-2 shrink-0">
+        {/* Right: User Identity + Role + Logout */}
+        <div className="flex items-center gap-3 shrink-0">
+          <div className="hidden md:flex items-center gap-2.5 text-[13.5px] whitespace-nowrap">
+            <span className="font-semibold text-[#262238] max-w-[200px] truncate">
+              {user.displayName}
+            </span>
+            <span aria-hidden="true" className="text-[#E6DFF0]">·</span>
+            <RoleLabel role={user.role} />
+          </div>
+
           <button
             type="button"
             onClick={handleLogout}
-            className="h-9 sm:h-[42px] px-2.5 sm:px-4 text-[13px] sm:text-[14px] font-semibold text-[#273244] bg-white border border-[#E7E2F0] rounded-lg hover:bg-[#F3EEFC] inline-flex items-center gap-1.5"
+            className="h-9 px-3 text-[13.5px] font-semibold text-[#262238] bg-white border border-[#E6DFF0] rounded-lg hover:bg-[#F2EDFA] hover:border-[#8E70C9] hover:text-[#543B7A] inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             title="ออกจากระบบ"
           >
-            <LogOut className="w-4 h-4 text-[#596579] shrink-0" />
-            <span className="hidden xs:inline sm:inline">ออกจากระบบ</span>
+            <LogOut className="w-4 h-4 text-[#746B83] shrink-0" />
+            <span className="hidden sm:inline">ออกจากระบบ</span>
           </button>
         </div>
       </header>
 
-      {/* Main Workspace Canvas: 256px Sidebar + Spacious Content Viewport */}
-      <div className="flex-1 flex flex-col lg:flex-row">
+      {/* Main Workspace Canvas: Collapsible Sidebar + Content Viewport */}
+      <div className="flex-1 flex flex-col lg:flex-row min-w-0">
         <Sidebar
           user={user}
           activeView={activeView}
           onSelectView={(v) => setActiveView(resolveSafeNavView(v, user.role))}
           mobileOpen={mobileMenuOpen}
           onCloseMobile={() => setMobileMenuOpen(false)}
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
         />
 
-        <main className="flex-1 p-3.5 sm:p-6 lg:p-8 pb-24 lg:pb-8 max-w-[1440px] w-full mx-auto min-w-0">
+        <main className="flex-1 p-4 sm:p-5 lg:p-6 xl:p-7 pb-24 lg:pb-8 max-w-[1480px] w-full mx-auto min-w-0">
           {activeView === 'dashboard' && (
             <DashboardView
               user={user}
@@ -330,10 +321,10 @@ export default function App() {
         </main>
       </div>
 
-      {/* Mobile & Tablet Fixed Bottom Quick-Access Bar */}
+      {/* Mobile & Tablet Compact Bottom Quick-Access Bar */}
       <nav
         aria-label="แถบเมนูลัดสำหรับมือถือ"
-        className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/95 backdrop-blur-md border-t border-[#E7E2F0] px-2 py-1.5 shadow-lg"
+        className="lg:hidden fixed bottom-0 left-0 right-0 z-30 bg-white/95 backdrop-blur-md border-t border-[#E6DFF0] px-2 py-1.5 shadow-sm"
       >
         <div className="grid grid-cols-5 gap-1 max-w-md mx-auto">
           {isStaffOrAdmin ? (
@@ -343,8 +334,8 @@ export default function App() {
                 onClick={() => setActiveView('dashboard')}
                 className={`flex flex-col items-center justify-center py-1.5 px-1 rounded-lg text-[11.5px] font-semibold transition-colors ${
                   activeView === 'dashboard'
-                    ? 'bg-[#F3EEFC] text-[#7359B4]'
-                    : 'text-[#596579] hover:text-[#273244]'
+                    ? 'bg-[#EDE5F8] text-[#543B7A]'
+                    : 'text-[#746B83] hover:text-[#262238]'
                 }`}
               >
                 <LayoutDashboard className="w-4.5 h-4.5 mb-0.5" />
@@ -355,8 +346,8 @@ export default function App() {
                 onClick={() => setActiveView('attendanceReview')}
                 className={`flex flex-col items-center justify-center py-1.5 px-1 rounded-lg text-[11.5px] font-semibold transition-colors ${
                   activeView === 'attendanceReview' || activeView === 'hrAttendance'
-                    ? 'bg-[#F3EEFC] text-[#7359B4]'
-                    : 'text-[#596579] hover:text-[#273244]'
+                    ? 'bg-[#EDE5F8] text-[#543B7A]'
+                    : 'text-[#746B83] hover:text-[#262238]'
                 }`}
               >
                 <UserCheck className="w-4.5 h-4.5 mb-0.5" />
@@ -367,8 +358,8 @@ export default function App() {
                 onClick={() => setActiveView('myAttendance')}
                 className={`flex flex-col items-center justify-center py-1.5 px-1 rounded-lg text-[11.5px] font-semibold transition-colors ${
                   activeView === 'myAttendance'
-                    ? 'bg-[#F3EEFC] text-[#7359B4]'
-                    : 'text-[#596579] hover:text-[#273244]'
+                    ? 'bg-[#EDE5F8] text-[#543B7A]'
+                    : 'text-[#746B83] hover:text-[#262238]'
                 }`}
               >
                 <Clock className="w-4.5 h-4.5 mb-0.5" />
@@ -379,8 +370,8 @@ export default function App() {
                 onClick={() => setActiveView('shifts')}
                 className={`flex flex-col items-center justify-center py-1.5 px-1 rounded-lg text-[11.5px] font-semibold transition-colors ${
                   activeView === 'shifts'
-                    ? 'bg-[#F3EEFC] text-[#7359B4]'
-                    : 'text-[#596579] hover:text-[#273244]'
+                    ? 'bg-[#EDE5F8] text-[#543B7A]'
+                    : 'text-[#746B83] hover:text-[#262238]'
                 }`}
               >
                 <CalendarDays className="w-4.5 h-4.5 mb-0.5" />
@@ -391,8 +382,8 @@ export default function App() {
                 onClick={() => setMobileMenuOpen(true)}
                 className={`flex flex-col items-center justify-center py-1.5 px-1 rounded-lg text-[11.5px] font-semibold transition-colors ${
                   mobileMenuOpen
-                    ? 'bg-[#8B73C7] text-white'
-                    : 'text-[#7359B4] bg-[#F3EEFC] hover:bg-[#E7E2F0]'
+                    ? 'bg-[#8E70C9] text-white'
+                    : 'text-[#543B7A] bg-[#F2EDFA] hover:bg-[#EDE5F8]'
                 }`}
               >
                 <Grid className="w-4.5 h-4.5 mb-0.5" />
@@ -406,8 +397,8 @@ export default function App() {
                 onClick={() => setActiveView('myAttendance')}
                 className={`col-span-3 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-[13px] font-semibold transition-colors ${
                   activeView === 'myAttendance'
-                    ? 'bg-[#F3EEFC] text-[#7359B4]'
-                    : 'text-[#596579] hover:text-[#273244]'
+                    ? 'bg-[#EDE5F8] text-[#543B7A]'
+                    : 'text-[#746B83] hover:text-[#262238]'
                 }`}
               >
                 <Clock className="w-4.5 h-4.5" />
@@ -416,7 +407,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => setMobileMenuOpen(true)}
-                className="col-span-2 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-[13px] font-semibold text-[#7359B4] bg-[#F3EEFC]"
+                className="col-span-2 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-[13px] font-semibold text-[#543B7A] bg-[#F2EDFA]"
               >
                 <Grid className="w-4.5 h-4.5" />
                 <span>เมนู / คู่มือ</span>

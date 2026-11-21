@@ -4,10 +4,10 @@
  * ไฟล์: frontend/src/pages/HrAttendanceView.tsx
  * ============================================================================
  * หน้าที่หลัก:
- * 1. แสดงรายการผลการลงเวลารายกะของบุคลากรทั้งโรงพยาบาล พร้อมตัวกรองช่วงเวลาและสถานะ
+ * 1. แสดงรายการผลการลงเวลารายกะของบุคลากรทั้งโรงพยาบาล พร้อมตัวกรองช่วงเวลา สถานะ กลุ่มงาน ประเภทบุคลากร และค้นหา
  * 2. รองรับการจำลองผลก่อนประมวลผลใหม่ (Preview Reprocess) และการสั่งประมวลผลเวลาใหม่ (Execute Reprocess)
  *    โดยไม่แก้ไขข้อมูลสแกนต้นฉบับ (raw_scans) และไม่ลบหมายเหตุเดิม
- * 3. เปิดแผงด้านข้าง (Slide-Over Drawer) เพื่อบันทึกหมายเหตุชี้แจงรายเวรและบันทึกผลการตรวจทานของ HR
+ * 3. เปิดแผงด้านข้าง (Slide-Over Drawer) เพื่อตรวจสอบหลักฐาน Raw Scan บันทึกลาครึ่งวัน หมายเหตุ และรับรองผล HR
  */
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { Play, Eye, CheckCircle2, FileText, Search, PanelRightOpen } from 'lucide-react';
@@ -25,6 +25,7 @@ import {
   TablePaginationBar,
   NotificationBanner,
   TableEmptyState,
+  TableLoadingSkeleton,
   RequiredMark,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
@@ -68,6 +69,8 @@ export function HrAttendanceView({
   const [customTo, setCustomTo] = useState(initialBkk.monthEndYmd);
 
   const [statusFilter, setStatusFilter] = useState('');
+  const [departmentFilter, setDepartmentFilter] = useState('');
+  const [personnelTypeFilter, setPersonnelTypeFilter] = useState('');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ code?: string; message: string } | null>(null);
@@ -179,6 +182,24 @@ export function HrAttendanceView({
     };
   }, [selectedRow?.id]);
 
+  // Dynamic client-side filter options derived strictly from real loaded items
+  const availableDepartments = useMemo(() => {
+    const set = new Set<string>();
+    items.forEach((row) => {
+      if (row.department_name) set.add(String(row.department_name));
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'th'));
+  }, [items]);
+
+  const availablePersonnelTypes = useMemo(() => {
+    const set = new Set<string>();
+    items.forEach((row) => {
+      const label = row.personnel_type_name || row.personnel_type_code;
+      if (label) set.add(String(label));
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'th'));
+  }, [items]);
+
   function handleSort(key: string) {
     if (sortKey === key) {
       setSortDir((d) => (d === 'ASC' ? 'DESC' : 'ASC'));
@@ -189,8 +210,16 @@ export function HrAttendanceView({
     setPage(1);
   }
 
-  const sortedItems = useMemo(() => {
-    const list = [...items];
+  const filteredAndSortedItems = useMemo(() => {
+    let list = [...items];
+    if (departmentFilter) {
+      list = list.filter((row) => String(row.department_name || '') === departmentFilter);
+    }
+    if (personnelTypeFilter) {
+      list = list.filter(
+        (row) => String(row.personnel_type_name || row.personnel_type_code || '') === personnelTypeFilter
+      );
+    }
     list.sort((a, b) => {
       const valA = a[sortKey];
       const valB = b[sortKey];
@@ -202,13 +231,13 @@ export function HrAttendanceView({
         : String(valB || '').localeCompare(String(valA || ''), 'th');
     });
     return list;
-  }, [items, sortKey, sortDir]);
+  }, [items, departmentFilter, personnelTypeFilter, sortKey, sortDir]);
 
   const pagedItems = useMemo(() => {
-    if (pageSize === 'ALL') return sortedItems;
+    if (pageSize === 'ALL') return filteredAndSortedItems;
     const start = (page - 1) * pageSize;
-    return sortedItems.slice(start, start + pageSize);
-  }, [sortedItems, page, pageSize]);
+    return filteredAndSortedItems.slice(start, start + pageSize);
+  }, [filteredAndSortedItems, page, pageSize]);
 
   async function handleAddNote() {
     if (!selectedRow) return;
@@ -340,7 +369,7 @@ export function HrAttendanceView({
   return (
     <div className="space-y-6">
       <PageHeader
-        category="การบริหารเวลาและบุคลากร"
+        category="บริหารเวลาปฏิบัติงาน"
         title={
           mode === 'management'
             ? 'รายการลงเวลาปฏิบัติงานทั้งหมด'
@@ -390,8 +419,47 @@ export function HrAttendanceView({
               <option value="NEEDS_RE_REVIEW">ต้องตรวจสอบซ้ำ (หลัง Reprocess)</option>
               <option value="PENDING_MAPPING">รอเชื่อมโยงรหัสสแกน</option>
             </select>
-            <div className="relative w-full sm:w-64">
-              <Search className="w-4 h-4 text-[#596579] absolute left-3.5 top-3" aria-hidden="true" />
+
+            {availableDepartments.length > 0 && (
+              <select
+                aria-label="กรองตามกลุ่มงาน"
+                value={departmentFilter}
+                onChange={(e) => {
+                  setDepartmentFilter(e.target.value);
+                  setPage(1);
+                }}
+                className="ent-input w-full sm:w-auto"
+              >
+                <option value="">ทุกกลุ่มงาน</option>
+                {availableDepartments.map((dept) => (
+                  <option key={dept} value={dept}>
+                    {dept}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            {availablePersonnelTypes.length > 0 && (
+              <select
+                aria-label="กรองตามประเภทบุคลากร"
+                value={personnelTypeFilter}
+                onChange={(e) => {
+                  setPersonnelTypeFilter(e.target.value);
+                  setPage(1);
+                }}
+                className="ent-input w-full sm:w-auto"
+              >
+                <option value="">ทุกประเภทบุคลากร</option>
+                {availablePersonnelTypes.map((pt) => (
+                  <option key={pt} value={pt}>
+                    {pt}
+                  </option>
+                ))}
+              </select>
+            )}
+
+            <div className="relative w-full sm:w-60">
+              <Search className="w-4 h-4 text-[#746B83] absolute left-3.5 top-3" aria-hidden="true" />
               <input
                 type="text"
                 aria-label="ค้นหาชื่อบุคลากรหรือรหัส"
@@ -412,14 +480,14 @@ export function HrAttendanceView({
       <NotificationBanner message={notice} onClose={() => setNotice(null)} />
 
       {mode === 'review' && (
-        <div className="ent-card p-4 sm:p-6 space-y-4">
+        <div className="ent-card p-5 sm:p-6 space-y-4">
           <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
             <div className="space-y-1">
-              <h2 className="text-[17px] sm:text-[18px] font-bold text-[#273244]">
+              <h2 className="text-[17px] sm:text-[18px] font-bold text-[#262238]">
                 คำนวณผลเวลาปฏิบัติงานซ้ำ (Reprocess)
               </h2>
-              <p className="text-[13.5px] sm:text-[14px] text-[#596579]">
-                ใช้เมื่อมีการปรับตารางเวรหรืออัปเดตการเชื่อมโยงรหัสสแกน โดยจะรักษาหมายเหตุและประวัติการตรวจสอบของเจ้าหน้าที่ไว้ครบถ้วน
+              <p className="text-[13.5px] text-[#746B83]">
+                ใช้เมื่อมีการปรับตารางเวรหรืออัปเดตการเชื่อมโยงรหัสสแกน โดยคงข้อมูลสแกนต้นฉบับและหมายเหตุเดิมครบถ้วน
               </p>
             </div>
 
@@ -432,7 +500,7 @@ export function HrAttendanceView({
                   onChange={(e) => setReprocessFrom(e.target.value)}
                   className="ent-input font-mono tabular-nums w-full sm:w-auto"
                 />
-                <span className="text-[13.5px] text-[#596579] text-center">ถึง</span>
+                <span className="text-[13px] text-[#746B83] text-center">ถึง</span>
                 <input
                   type="date"
                   aria-label="คำนวณซ้ำถึงวันที่"
@@ -446,7 +514,7 @@ export function HrAttendanceView({
                 onClick={handlePreviewReprocess}
                 className="ent-btn-secondary w-full sm:w-auto"
               >
-                <Eye className="w-4 h-4 text-[#B45363]" />
+                <Eye className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
                 <span>1. ดูตัวอย่างผลกระทบ</span>
               </button>
               <button
@@ -454,19 +522,19 @@ export function HrAttendanceView({
                 onClick={handleExecuteReprocess}
                 className="ent-btn-primary w-full sm:w-auto"
               >
-                <Play className="w-4 h-4" />
+                <Play className="w-4 h-4" aria-hidden="true" />
                 <span>2. ยืนยันคำนวณเวลาซ้ำ</span>
               </button>
             </div>
           </div>
 
           {previewResult && (
-            <div className="border border-[#F9E8EB] bg-[#FFF1F3] rounded-xl p-4 text-[13.5px] sm:text-[14px] space-y-1">
-              <div className="font-bold text-[#9F3F50]">
+            <div className="border border-[#E6DFF0] bg-[#F2EDFA] rounded-xl p-4 text-[13.5px] space-y-1">
+              <div className="font-bold text-[#543B7A]">
                 ผลการจำลองการคำนวณซ้ำ ({formatThaiDate(previewResult.dateFrom)} ถึง{' '}
                 {formatThaiDate(previewResult.dateTo)}):
               </div>
-              <div className="text-[#273244] tabular-nums">
+              <div className="text-[#262238] tabular-nums">
                 ประเมินทั้งหมด <strong>{previewResult.totalEvaluated}</strong> เวร · รายการใหม่{' '}
                 <strong>{previewResult.newRecordsCount}</strong> · เปลี่ยนแปลงสถานะ{' '}
                 <strong>{previewResult.changedCount}</strong> · คงเดิม{' '}
@@ -479,287 +547,297 @@ export function HrAttendanceView({
 
       {/* Main Attendance Table (Mobile Card List + Desktop Table) */}
       <div className="ent-table-wrapper">
-        {/* Mobile Card View (< md) */}
-        <div className="md:hidden divide-y divide-[#E7E2E5]">
-          {loading ? (
-            <div className="p-8 text-center text-[14px] text-[#596579]">
-              กำลังโหลดข้อมูลการลงเวลาปฏิบัติงาน...
-            </div>
-          ) : pagedItems.length === 0 ? (
-            <div className="p-8 text-center text-[14px] text-[#596579]">
-              ไม่พบรายการลงเวลาตามตัวกรองที่เลือก
-            </div>
-          ) : (
-            pagedItems.map((row) => {
-              const rowNotes = notes.filter((n) => n.attendance_id === row.id);
-              return (
-                <div key={row.id} className="p-4 space-y-3 bg-white hover:bg-[#FFF9F9]">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="font-bold text-[15px] text-[#273244]">{row.full_name}</div>
-                      <div className="text-[12.5px] text-[#596579] mt-0.5">
-                        <span className="font-mono">{row.person_id}</span> · สแกน{' '}
-                        <span className="font-mono">{row.fingle_id || '—'}</span>
-                      </div>
-                      <div className="text-[12.5px] text-[#596579] truncate">
-                        {row.department_name}
-                      </div>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <div className="font-semibold text-[13.5px] text-[#273244]">
-                        {formatThaiDate(row.work_date)}
-                      </div>
-                      <div className="text-[12px] font-mono text-[#596579]">
-                        {row.shift_name} ({row.scheduled_start?.slice(11, 16)}–
-                        {row.scheduled_end?.slice(11, 16)})
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-2.5 p-3 rounded-xl bg-[#F8F6F7] border border-[#E7E2E5] text-[13px]">
-                    <div>
-                      <div className="text-[#596579] text-[12px]">เวลาสแกนเข้า</div>
-                      {row.check_in_time ? (
-                        <div className="font-mono font-bold text-[#273244] mt-0.5">
-                          {row.check_in_time.slice(11, 16)} น.
-                        </div>
-                      ) : (
-                        <div className="font-semibold text-[#B91C1C] mt-0.5">ไม่พบสแกนเข้า</div>
-                      )}
-                    </div>
-                    <div>
-                      <div className="text-[#596579] text-[12px]">เวลาสแกนออก</div>
-                      {row.check_out_time ? (
-                        <div className="font-mono font-bold text-[#273244] mt-0.5">
-                          {row.check_out_time.slice(11, 16)} น.
-                        </div>
-                      ) : (
-                        <div className="font-semibold text-[#B45309] mt-0.5">ไม่พบสแกนออก</div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <AttendanceStatusText
-                        status={row.status}
-                        secondaryFlags={row.secondary_flags}
-                        earlyCheckoutMinutes={row.early_checkout_minutes}
-                      />
-                      {row.late_minutes > 0 && (
-                        <span className="font-mono text-[13px] font-bold text-[#B45309] bg-amber-50 px-2 py-0.5 rounded-md border border-amber-200">
-                          สาย {row.late_minutes} นาที
-                        </span>
-                      )}
-                      {Number(row.early_checkout_minutes || 0) > 0 && (
-                        <span className="font-mono text-[13px] font-bold text-[#B91C1C] bg-red-50 px-2 py-0.5 rounded-md border border-red-200">
-                          ออกก่อน {row.early_checkout_minutes} นาที
-                        </span>
-                      )}
-                    </div>
-                    <ReviewStatusLabel status={row.review_status} />
-                  </div>
-
-                  {rowNotes.length > 0 && (
-                    <div className="p-2.5 rounded-lg bg-[#FFF1F3] border border-[#F9E8EB] text-[12.5px] text-[#9F3F50] space-y-1">
-                      {rowNotes.map((n) => (
-                        <div key={n.id}>
-                          <strong>{REASON_LABELS[n.reason_type] || n.reason_type}:</strong>{' '}
-                          {n.note_text}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={() => setSelectedRow(row)}
-                    className="w-full h-10 px-3.5 text-[13.5px] font-semibold bg-white border border-[#D5CDD2] rounded-lg hover:bg-[#FFF1F3] hover:border-[#B45363] hover:text-[#9F3F50] inline-flex items-center justify-center gap-2 text-[#273244] transition-colors"
-                  >
-                    <PanelRightOpen className="w-4 h-4 text-[#B45363]" />
-                    <span>{mode === 'review' ? 'ตรวจสอบหลักฐาน / บันทึกหมายเหตุ' : 'ดูรายละเอียดหลักฐาน'}</span>
-                  </button>
+        {loading ? (
+          <TableLoadingSkeleton rows={6} cols={6} />
+        ) : (
+          <>
+            {/* Mobile Card View (< md) */}
+            <div className="md:hidden divide-y divide-[#E6DFF0]">
+              {pagedItems.length === 0 ? (
+                <div className="p-8 text-center text-[14px] text-[#746B83]">
+                  ไม่พบรายการลงเวลาตามตัวกรองที่เลือก
                 </div>
-              );
-            })
-          )}
-        </div>
-
-        {/* Desktop Table View (>= md) */}
-        <div className="hidden md:block overflow-x-auto">
-          <table className="w-full text-left border-collapse text-[14px]">
-            <thead>
-              <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
-                <SortableHeader
-                  label="วันที่ปฏิบัติงาน"
-                  sortKey="work_date"
-                  activeSortKey={sortKey}
-                  sortDir={sortDir}
-                  onSort={handleSort}
-                />
-                <SortableHeader
-                  label="บุคลากร · หน่วยงาน"
-                  sortKey="full_name"
-                  activeSortKey={sortKey}
-                  sortDir={sortDir}
-                  onSort={handleSort}
-                />
-                <SortableHeader
-                  label="กะปฏิบัติงาน"
-                  sortKey="shift_name"
-                  activeSortKey={sortKey}
-                  sortDir={sortDir}
-                  onSort={handleSort}
-                />
-                <th className="py-3.5 px-4 text-[13.5px] font-semibold">เวลาสแกนเข้า</th>
-                <th className="py-3.5 px-4 text-[13.5px] font-semibold">เวลาสแกนออก</th>
-                <SortableHeader
-                  label="นาทีสาย"
-                  sortKey="late_minutes"
-                  activeSortKey={sortKey}
-                  sortDir={sortDir}
-                  onSort={handleSort}
-                  align="right"
-                />
-                <SortableHeader
-                  label="สถานะการลงเวลา"
-                  sortKey="status"
-                  activeSortKey={sortKey}
-                  sortDir={sortDir}
-                  onSort={handleSort}
-                />
-                <SortableHeader
-                  label="การตรวจสอบ HR"
-                  sortKey="review_status"
-                  activeSortKey={sortKey}
-                  sortDir={sortDir}
-                  onSort={handleSort}
-                />
-                <th className="py-3.5 px-4 text-[13.5px] font-semibold text-right">รายละเอียด</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[#E7E2E5]">
-              {loading ? (
-                <tr>
-                  <td colSpan={9} className="py-12 text-center text-[14.5px] text-[#596579]">
-                    กำลังโหลดข้อมูลการลงเวลาปฏิบัติงาน...
-                  </td>
-                </tr>
-              ) : pagedItems.length === 0 ? (
-                <TableEmptyState colSpan={9} title="ไม่พบรายการลงเวลาตามตัวกรองที่เลือก" />
               ) : (
                 pagedItems.map((row) => {
                   const rowNotes = notes.filter((n) => n.attendance_id === row.id);
                   return (
-                    <tr key={row.id} className="hover:bg-[#FFF9F9] transition-colors">
-                      <td className="py-4 px-4">
-                        <div className="font-semibold text-[#273244]">
-                          {formatThaiDate(row.work_date)}
+                    <div key={row.id} className="p-4 space-y-3 bg-white">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-bold text-[15px] text-[#262238]">{row.full_name}</div>
+                          <div className="text-[12.5px] text-[#746B83] mt-0.5">
+                            <span className="font-mono">{row.person_id}</span> · สแกน{' '}
+                            <span className="font-mono">{row.fingle_id || '—'}</span>
+                          </div>
+                          <div className="text-[12.5px] text-[#746B83] truncate">
+                            {row.department_name}
+                          </div>
                         </div>
-                        <div className="text-[12.5px] font-mono text-[#596579] tabular-nums mt-0.5">
-                          เวร #{row.id}
+                        <div className="text-right shrink-0">
+                          <div className="font-semibold text-[13.5px] text-[#262238]">
+                            {formatThaiDate(row.work_date)}
+                          </div>
+                          <div className="text-[12px] font-mono text-[#746B83] tabular-nums">
+                            {row.shift_name} ({row.scheduled_start?.slice(11, 16)}–
+                            {row.scheduled_end?.slice(11, 16)})
+                          </div>
                         </div>
-                      </td>
-                      <td className="py-4 px-4">
-                        <div className="font-bold text-[15px] text-[#273244]">{row.full_name}</div>
-                        <div className="text-[12.5px] text-[#596579] mt-0.5">
-                          <span className="font-mono">{row.person_id}</span> · รหัสสแกน{' '}
-                          <span className="font-mono">{row.fingle_id || '—'}</span> · {row.department_name}
-                        </div>
-                      </td>
-                      <td className="py-4 px-4">
-                        <div className="font-semibold text-[#273244]">{row.shift_name}</div>
-                        <div className="text-[12.5px] font-mono text-[#596579] tabular-nums mt-0.5">
-                          {row.scheduled_start?.slice(11, 16)} – {row.scheduled_end?.slice(11, 16)} น.
-                        </div>
-                      </td>
-                      <td className="py-4 px-4 font-mono tabular-nums">
-                        {row.check_in_time ? (
-                          <div>
-                            <div className="font-semibold text-[#273244]">
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2.5 p-3 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0] text-[13px]">
+                        <div>
+                          <div className="text-[#746B83] text-[12px]">เวลาสแกนเข้า</div>
+                          {row.check_in_time ? (
+                            <div className="font-mono font-bold text-[#262238] mt-0.5 tabular-nums">
                               {row.check_in_time.slice(11, 16)} น.
                             </div>
-                            <div className="text-[12px] text-[#596579]">
-                              อ้างอิงสแกน #{row.check_in_raw_scan_id}
-                            </div>
-                          </div>
-                        ) : (
-                          <span className="text-[#B91C1C] font-sans text-[13.5px] font-medium">
-                            ไม่พบสแกนเข้า
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-4 px-4 font-mono tabular-nums">
-                        {row.check_out_time ? (
-                          <div>
-                            <div className="font-semibold text-[#273244]">
+                          ) : (
+                            <div className="font-semibold text-[#C74455] mt-0.5">ไม่พบสแกนเข้า</div>
+                          )}
+                        </div>
+                        <div>
+                          <div className="text-[#746B83] text-[12px]">เวลาสแกนออก</div>
+                          {row.check_out_time ? (
+                            <div className="font-mono font-bold text-[#262238] mt-0.5 tabular-nums">
                               {row.check_out_time.slice(11, 16)} น.
                             </div>
-                            <div className="text-[12px] text-[#596579]">
-                              อ้างอิงสแกน #{row.check_out_raw_scan_id}
-                            </div>
-                          </div>
-                        ) : (
-                          <span className="text-[#B45309] font-sans text-[13.5px] font-medium">
-                            ไม่พบสแกนออก
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-4 px-4 text-right font-mono tabular-nums">
-                        {row.late_minutes > 0 ? (
-                          <span className="font-bold text-[#B45309] text-[14.5px]">
-                            {row.late_minutes} นาที
-                          </span>
-                        ) : (
-                          <span className="text-[#596579]">0</span>
-                        )}
-                      </td>
-                      <td className="py-4 px-4">
-                        <AttendanceStatusText
-                          status={row.status}
-                          secondaryFlags={row.secondary_flags}
-                          earlyCheckoutMinutes={row.early_checkout_minutes}
-                        />
-                        {row.leave_type && (
-                          <div className="text-[12px] text-[#7359B4] mt-0.5">
-                            ลาบางส่วน ({row.leave_start_time}–{row.leave_end_time} น.)
-                          </div>
-                        )}
-                      </td>
-                      <td className="py-4 px-4">
+                          ) : (
+                            <div className="font-semibold text-[#B87516] mt-0.5">ไม่พบสแกนออก</div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <AttendanceStatusText
+                            status={row.status}
+                            secondaryFlags={row.secondary_flags}
+                            earlyCheckoutMinutes={row.early_checkout_minutes}
+                          />
+                          {row.late_minutes > 0 && (
+                            <span className="font-mono text-[12.5px] font-bold text-[#B87516] tabular-nums">
+                              · สาย {row.late_minutes} น.
+                            </span>
+                          )}
+                          {Number(row.early_checkout_minutes || 0) > 0 && (
+                            <span className="font-mono text-[12.5px] font-bold text-[#C74455] tabular-nums">
+                              · ออกก่อน {row.early_checkout_minutes} น.
+                            </span>
+                          )}
+                        </div>
                         <ReviewStatusLabel status={row.review_status} />
-                        {row.review_reason && (
-                          <div className="text-[12px] text-[#596579] mt-0.5">{row.review_reason}</div>
-                        )}
-                        {rowNotes.map((n) => (
-                          <div key={n.id} className="text-[12.5px] text-[#9F3F50] mt-1">
-                            {REASON_LABELS[n.reason_type] || n.reason_type}: {n.note_text}
-                            {Number(n.needs_re_review) === 1 && (
-                              <span className="ml-1 text-[#B91C1C] font-semibold">(ต้องตรวจสอบซ้ำ)</span>
-                            )}
-                          </div>
-                        ))}
-                      </td>
-                      <td className="py-4 px-4 text-right">
-                        <button
-                          type="button"
-                          onClick={() => setSelectedRow(row)}
-                          className="h-9 px-3.5 text-[13.5px] font-semibold bg-white border border-[#D5CDD2] rounded-lg hover:bg-[#FFF1F3] hover:border-[#B45363] hover:text-[#9F3F50] inline-flex items-center gap-1.5 whitespace-nowrap text-[#273244] transition-colors"
-                        >
-                          <PanelRightOpen className="w-4 h-4 text-[#B45363]" />
-                          <span>{mode === 'review' ? 'ตรวจสอบ / หมายเหตุ' : 'ดูรายละเอียด'}</span>
-                        </button>
-                      </td>
-                    </tr>
+                      </div>
+
+                      {rowNotes.length > 0 && (
+                        <div className="p-2.5 rounded-lg bg-[#F2EDFA] border border-[#E6DFF0] text-[12.5px] text-[#543B7A] space-y-1">
+                          {rowNotes.map((n) => (
+                            <div key={n.id}>
+                              <strong>{REASON_LABELS[n.reason_type] || n.reason_type}:</strong>{' '}
+                              {n.note_text}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => setSelectedRow(row)}
+                        className="ent-btn-secondary w-full"
+                      >
+                        <PanelRightOpen className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
+                        <span>{mode === 'review' ? 'ตรวจสอบหลักฐาน / บันทึกหมายเหตุ' : 'ดูรายละเอียดหลักฐาน'}</span>
+                      </button>
+                    </div>
                   );
                 })
               )}
-            </tbody>
-          </table>
-        </div>
+            </div>
+
+            {/* Desktop Table View (>= md) */}
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-left border-collapse text-[14px]">
+                <thead>
+                  <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
+                    <SortableHeader
+                      label="วันที่ปฏิบัติงาน"
+                      sortKey="work_date"
+                      activeSortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={handleSort}
+                    />
+                    <SortableHeader
+                      label="บุคลากร · หน่วยงาน"
+                      sortKey="full_name"
+                      activeSortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={handleSort}
+                    />
+                    <SortableHeader
+                      label="กะปฏิบัติงาน"
+                      sortKey="shift_name"
+                      activeSortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={handleSort}
+                    />
+                    <th className="py-3.5 px-4 text-[13px] font-semibold">สแกนเข้า</th>
+                    <th className="py-3.5 px-4 text-[13px] font-semibold">สแกนออก</th>
+                    <SortableHeader
+                      label="นาทีสาย"
+                      sortKey="late_minutes"
+                      activeSortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={handleSort}
+                      align="right"
+                    />
+                    <SortableHeader
+                      label="ออกก่อนเวลา"
+                      sortKey="early_checkout_minutes"
+                      activeSortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={handleSort}
+                      align="right"
+                    />
+                    <SortableHeader
+                      label="สถานะ"
+                      sortKey="status"
+                      activeSortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={handleSort}
+                    />
+                    <SortableHeader
+                      label="ผลตรวจ HR"
+                      sortKey="review_status"
+                      activeSortKey={sortKey}
+                      sortDir={sortDir}
+                      onSort={handleSort}
+                    />
+                    <th className="py-3.5 px-4 text-[13px] font-semibold text-right">รายละเอียด</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#E6DFF0]">
+                  {pagedItems.length === 0 ? (
+                    <TableEmptyState colSpan={10} title="ไม่พบรายการลงเวลาตามตัวกรองที่เลือก" />
+                  ) : (
+                    pagedItems.map((row) => {
+                      const rowNotes = notes.filter((n) => n.attendance_id === row.id);
+                      const earlyMins = Number(row.early_checkout_minutes || 0);
+                      return (
+                        <tr key={row.id} className="hover:bg-[#F8F7FC] transition-colors">
+                          <td className="py-3.5 px-4">
+                            <div className="font-semibold text-[#262238]">
+                              {formatThaiDate(row.work_date)}
+                            </div>
+                            <div className="text-[12px] font-mono text-[#746B83] tabular-nums mt-0.5">
+                              เวร #{row.id}
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <div className="font-semibold text-[14.5px] text-[#262238]">{row.full_name}</div>
+                            <div className="text-[12px] text-[#746B83] mt-0.5">
+                              <span className="font-mono">{row.person_id}</span> · สแกน{' '}
+                              <span className="font-mono">{row.fingle_id || '—'}</span> · {row.department_name}
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <div className="font-semibold text-[#262238]">{row.shift_name}</div>
+                            <div className="text-[12px] font-mono text-[#746B83] tabular-nums mt-0.5">
+                              {row.scheduled_start?.slice(11, 16)}–{row.scheduled_end?.slice(11, 16)} น.
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-4 font-mono tabular-nums">
+                            {row.check_in_time ? (
+                              <div>
+                                <div className="font-semibold text-[#262238]">
+                                  {row.check_in_time.slice(11, 16)} น.
+                                </div>
+                                <div className="text-[11.5px] text-[#746B83]">
+                                  #{row.check_in_raw_scan_id}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-[#C74455] font-sans text-[13px] font-medium">
+                                ไม่พบสแกนเข้า
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4 font-mono tabular-nums">
+                            {row.check_out_time ? (
+                              <div>
+                                <div className="font-semibold text-[#262238]">
+                                  {row.check_out_time.slice(11, 16)} น.
+                                </div>
+                                <div className="text-[11.5px] text-[#746B83]">
+                                  #{row.check_out_raw_scan_id}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-[#B87516] font-sans text-[13px] font-medium">
+                                ไม่พบสแกนออก
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4 text-right font-mono tabular-nums">
+                            {row.late_minutes > 0 ? (
+                              <span className="font-bold text-[#B87516]">{row.late_minutes} น.</span>
+                            ) : (
+                              <span className="text-[#746B83]">0</span>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4 text-right font-mono tabular-nums">
+                            {earlyMins > 0 ? (
+                              <span className="font-bold text-[#C74455]">{earlyMins} น.</span>
+                            ) : (
+                              <span className="text-[#746B83]">0</span>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <AttendanceStatusText
+                              status={row.status}
+                              secondaryFlags={row.secondary_flags}
+                              earlyCheckoutMinutes={row.early_checkout_minutes}
+                            />
+                            {row.leave_type && (
+                              <div className="text-[12px] text-[#543B7A] mt-0.5">
+                                ลาบางส่วน ({row.leave_start_time}–{row.leave_end_time} น.)
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <ReviewStatusLabel status={row.review_status} />
+                            {row.review_reason && (
+                              <div className="text-[12px] text-[#746B83] mt-0.5">{row.review_reason}</div>
+                            )}
+                            {rowNotes.map((n) => (
+                              <div key={n.id} className="text-[12px] text-[#543B7A] mt-1">
+                                {REASON_LABELS[n.reason_type] || n.reason_type}: {n.note_text}
+                                {Number(n.needs_re_review) === 1 && (
+                                  <span className="ml-1 text-[#C74455] font-semibold">(ต้องตรวจซ้ำ)</span>
+                                )}
+                              </div>
+                            ))}
+                          </td>
+                          <td className="py-3.5 px-4 text-right">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedRow(row)}
+                              className="h-9 px-3 text-[13px] font-semibold bg-white border border-[#E6DFF0] rounded-lg hover:bg-[#F2EDFA] hover:border-[#8E70C9]/50 hover:text-[#543B7A] inline-flex items-center gap-1.5 whitespace-nowrap text-[#262238] transition-colors cursor-pointer"
+                            >
+                              <PanelRightOpen className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
+                              <span>{mode === 'review' ? 'ตรวจสอบ / หมายเหตุ' : 'ดูรายละเอียด'}</span>
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
 
         <TablePaginationBar
-          totalItems={sortedItems.length}
+          totalItems={filteredAndSortedItems.length}
           currentPage={page}
           pageSize={pageSize}
           onPageChange={setPage}
@@ -782,12 +860,13 @@ export function HrAttendanceView({
         {selectedRow && (
           <div className="space-y-6">
             {/* Employee & Shift Summary Card */}
-            <div className="p-4 rounded-xl bg-[#FFF9F9] border border-[#E7E2E5] space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E7E2E5] pb-3">
+            <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0] space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E6DFF0] pb-3">
                 <div>
-                  <div className="text-[12.5px] text-[#596579]">รหัสบุคลากร / รหัสลายนิ้วมือ</div>
-                  <div className="font-mono font-bold text-[#273244] text-[14.5px] mt-0.5">
-                    {selectedRow.person_id} · รหัสสแกน {selectedRow.fingle_id || '—'}
+                  <div className="text-[12.5px] text-[#746B83]">รหัสบุคลากร · รหัสลายนิ้วมือ · กลุ่มงาน</div>
+                  <div className="font-mono font-bold text-[#262238] text-[14px] mt-0.5">
+                    {selectedRow.person_id} · สแกน {selectedRow.fingle_id || '—'} ·{' '}
+                    <span className="font-sans font-medium text-[#746B83]">{selectedRow.department_name}</span>
                   </div>
                 </div>
                 <AttendanceStatusText
@@ -800,13 +879,13 @@ export function HrAttendanceView({
               {(selectedRow.leave_type || Number(selectedRow.early_checkout_minutes || 0) > 0) && (
                 <div className="flex flex-wrap gap-2 text-[12.5px]">
                   {selectedRow.leave_type && (
-                    <span className="px-2.5 py-1 rounded-md bg-[#F3EEFC] border border-[#DDD3F2] text-[#7359B4] font-semibold">
+                    <span className="px-2.5 py-1 rounded-md bg-[#F2EDFA] border border-[#E6DFF0] text-[#543B7A] font-semibold">
                       ลาบางส่วน {selectedRow.leave_start_time}–{selectedRow.leave_end_time} น. (ประเมินช่วง{' '}
                       {selectedRow.evaluated_start_time?.slice(11, 16)}–{selectedRow.evaluated_end_time?.slice(11, 16)} น.)
                     </span>
                   )}
                   {Number(selectedRow.early_checkout_minutes || 0) > 0 && (
-                    <span className="px-2.5 py-1 rounded-md bg-red-50 border border-red-200 text-[#B91C1C] font-semibold">
+                    <span className="px-2.5 py-1 rounded-md bg-[#FDF2F3] border border-[#F3CCD0] text-[#C74455] font-semibold">
                       ออกก่อนเวลา {selectedRow.early_checkout_minutes} นาที
                     </span>
                   )}
@@ -814,27 +893,27 @@ export function HrAttendanceView({
               )}
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[13.5px]">
-                <div className="p-3 rounded-lg bg-white border border-[#E7E2E5]">
-                  <div className="text-[#596579]">หลักฐานเวลาสแกนเข้า</div>
-                  <div className="font-mono font-semibold text-[#273244] mt-1">
+                <div className="p-3 rounded-lg bg-white border border-[#E6DFF0]">
+                  <div className="text-[12.5px] text-[#746B83]">หลักฐานเวลาสแกนเข้า</div>
+                  <div className="font-mono font-semibold text-[#262238] mt-1 tabular-nums">
                     {selectedRow.check_in_time
                       ? formatThaiDateTime(selectedRow.check_in_time)
                       : 'ไม่พบข้อมูลสแกนเข้า'}
                   </div>
-                  <div className="font-mono text-[12px] text-[#596579] mt-0.5">
-                    รหัสอ้างอิง Raw Scan: #{selectedRow.check_in_raw_scan_id || '—'}
+                  <div className="font-mono text-[12px] text-[#746B83] mt-0.5">
+                    Raw Scan: #{selectedRow.check_in_raw_scan_id || '—'}
                   </div>
                 </div>
 
-                <div className="p-3 rounded-lg bg-white border border-[#E7E2E5]">
-                  <div className="text-[#596579]">หลักฐานเวลาสแกนออก</div>
-                  <div className="font-mono font-semibold text-[#273244] mt-1">
+                <div className="p-3 rounded-lg bg-white border border-[#E6DFF0]">
+                  <div className="text-[12.5px] text-[#746B83]">หลักฐานเวลาสแกนออก</div>
+                  <div className="font-mono font-semibold text-[#262238] mt-1 tabular-nums">
                     {selectedRow.check_out_time
                       ? formatThaiDateTime(selectedRow.check_out_time)
                       : 'ไม่พบข้อมูลสแกนออก'}
                   </div>
-                  <div className="font-mono text-[12px] text-[#596579] mt-0.5">
-                    รหัสอ้างอิง Raw Scan: #{selectedRow.check_out_raw_scan_id || '—'}
+                  <div className="font-mono text-[12px] text-[#746B83] mt-0.5">
+                    Raw Scan: #{selectedRow.check_out_raw_scan_id || '—'}
                   </div>
                 </div>
               </div>
@@ -842,37 +921,37 @@ export function HrAttendanceView({
 
             {/* Raw Scan Usage Trace (ATT-09: Used vs Extra Unused Scans) */}
             <div className="space-y-2.5">
-              <div className="border-b border-[#E7E2E5] pb-1.5">
-                <h4 className="text-[15px] font-bold text-[#273244]">
+              <div className="border-b border-[#E6DFF0] pb-1.5">
+                <h4 className="text-[15px] font-bold text-[#262238]">
                   รายการสแกนทั้งหมดของบุคลากรในช่วงเวรนี้ ({selectedRowScans.length} รายการ)
                 </h4>
-                <p className="text-[12.5px] text-[#596579]">
+                <p className="text-[12.5px] text-[#746B83]">
                   แสดงสแกนที่ถูกนำไปจับคู่เป็นเข้า/ออกงาน กะอื่น และสแกนเพิ่มเติมที่ไม่ได้ถูกใช้ซ้ำ
                 </p>
               </div>
               {loadingDrawerScans ? (
-                <div className="text-[13px] text-[#596579] py-2">กำลังโหลดรายการสแกน...</div>
+                <div className="text-[13px] text-[#746B83] py-2">กำลังโหลดรายการสแกน...</div>
               ) : selectedRowScans.length === 0 ? (
-                <div className="text-[13px] text-[#596579] py-2">ไม่พบข้อมูลสแกนดิบในช่วงเวลาใกล้เคียง</div>
+                <div className="text-[13px] text-[#746B83] py-2">ไม่พบข้อมูลสแกนดิบในช่วงเวลาใกล้เคียง</div>
               ) : (
-                <div className="divide-y divide-[#E7E2E5] border border-[#E7E2E5] rounded-xl bg-white text-[13px]">
+                <div className="divide-y divide-[#E6DFF0] border border-[#E6DFF0] rounded-xl bg-white text-[13px]">
                   {selectedRowScans.map((sc) => (
                     <div key={sc.id} className="px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2">
                       <div>
-                        <span className="font-mono font-bold text-[#273244]">{sc.canonical_bkk_time}</span>
-                        <span className="text-[12px] font-mono text-[#596579] ml-2">
+                        <span className="font-mono font-bold text-[#262238] tabular-nums">{sc.canonical_bkk_time}</span>
+                        <span className="text-[12px] font-mono text-[#746B83] ml-2">
                           (สแกน #{sc.id} · เครื่อง #{sc.machine_no})
                         </span>
                       </div>
                       <span
                         className={`text-[12.5px] font-semibold ${
                           sc.relationToShift === 'USED_AS_IN_THIS_SHIFT'
-                            ? 'text-[#047857]'
+                            ? 'text-[#198568]'
                             : sc.relationToShift === 'USED_AS_OUT_THIS_SHIFT'
-                            ? 'text-[#2563EB]'
+                            ? 'text-[#5879BC]'
                             : sc.relationToShift === 'USED_BY_OTHER_SHIFT'
-                            ? 'text-[#7359B4]'
-                            : 'text-[#596579]'
+                            ? 'text-[#543B7A]'
+                            : 'text-[#746B83]'
                         }`}
                       >
                         {sc.relationToShift === 'USED_AS_IN_THIS_SHIFT'
@@ -888,8 +967,8 @@ export function HrAttendanceView({
                 </div>
               )}
               {selectedRowHistory.length > 0 && (
-                <div className="p-3 rounded-xl bg-amber-50/70 border border-amber-200 text-[12.5px] text-[#273244] space-y-1">
-                  <div className="font-bold text-[#B45309]">ประวัติการเปลี่ยนแปลงผลจับคู่ (Reprocess):</div>
+                <div className="p-3 rounded-xl bg-[#FEF8ED] border border-[#F3DFBC] text-[12.5px] text-[#262238] space-y-1">
+                  <div className="font-bold text-[#B87516]">ประวัติการเปลี่ยนแปลงผลจับคู่ (Reprocess):</div>
                   {selectedRowHistory.slice(0, 3).map((mh) => (
                     <div key={mh.id} className="font-mono">
                       {mh.previous_status} → {mh.new_status} ({mh.change_reason}) โดย {mh.triggered_by}
@@ -900,12 +979,12 @@ export function HrAttendanceView({
             </div>
 
             {/* Compact Half-Day Leave Recording (ATT-15 — never modifies shift template) */}
-            <div className="space-y-3 p-4 rounded-xl bg-[#FAF9FD] border border-[#E7E2F0]">
+            <div className="space-y-3 p-4 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0]">
               <div>
-                <h4 className="text-[14.5px] font-bold text-[#273244]">
+                <h4 className="text-[14.5px] font-bold text-[#262238]">
                   บันทึกการลาครึ่งวันสำหรับเวรนี้ (ไม่แก้ไขแม่แบบกะ)
                 </h4>
-                <p className="text-[12.5px] text-[#596579]">
+                <p className="text-[12.5px] text-[#746B83]">
                   ระบบจะปรับช่วงเวลาที่ใช้ประเมินมาสาย/ออกก่อนเวลาเฉพาะรายการนี้และคำนวณเวลาใหม่ทันที
                 </p>
               </div>
@@ -965,11 +1044,11 @@ export function HrAttendanceView({
 
             {/* HR Note & Verification Form */}
             <div className="space-y-4">
-              <div className="border-b border-[#E7E2E5] pb-2">
-                <h4 className="text-[16px] font-bold text-[#273244]">
+              <div className="border-b border-[#E6DFF0] pb-2">
+                <h4 className="text-[15.5px] font-bold text-[#262238]">
                   บันทึกเหตุผลและรับรองผลการตรวจสอบ
                 </h4>
-                <p className="text-[13px] text-[#596579]">
+                <p className="text-[13px] text-[#746B83]">
                   การบันทึกหมายเหตุจะจัดเก็บแยกในตารางประวัติโดยไม่แก้ไขเวลาสแกนต้นฉบับจากเครื่องสแกน
                 </p>
               </div>
@@ -1025,7 +1104,7 @@ export function HrAttendanceView({
                   onClick={handleAddNote}
                   className="ent-btn-secondary w-full sm:w-auto"
                 >
-                  <FileText className="w-4 h-4 text-[#B45363]" />
+                  <FileText className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
                   <span>บันทึกหมายเหตุ</span>
                 </button>
                 <button
@@ -1033,7 +1112,7 @@ export function HrAttendanceView({
                   onClick={handleConfirmReview}
                   className="ent-btn-primary w-full sm:w-auto"
                 >
-                  <CheckCircle2 className="w-4 h-4" />
+                  <CheckCircle2 className="w-4 h-4" aria-hidden="true" />
                   <span>ยืนยันรับรองผลตรวจสอบ HR</span>
                 </button>
               </div>
@@ -1044,36 +1123,36 @@ export function HrAttendanceView({
 
       {mode === 'review' && reviewHistory.length > 0 && (
         <div className="ent-table-wrapper">
-          <div className="px-6 py-4 border-b border-[#E7E2E5] bg-[#F8F6F7]">
-            <h2 className="text-[18px] font-bold text-[#273244]">
+          <div className="px-5 py-4 border-b border-[#E6DFF0] bg-[#F8F7FC]">
+            <h2 className="text-[17px] font-bold text-[#262238]">
               ประวัติการรับรองผลตรวจสอบล่าสุดโดยเจ้าหน้าที่ HR
             </h2>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse text-[14px]">
               <thead>
-                <tr className="border-b border-[#E7E2E5] bg-[#F8F6F7] text-[#273244]">
-                  <th className="py-3.5 px-5 font-semibold">วันและเวลาที่ตรวจสอบ</th>
-                  <th className="py-3.5 px-5 font-semibold">รหัสเวร · บุคลากร</th>
-                  <th className="py-3.5 px-5 font-semibold">ผลการพิจารณา</th>
-                  <th className="py-3.5 px-5 font-semibold">ความเห็นเจ้าหน้าที่</th>
-                  <th className="py-3.5 px-5 font-semibold">ผู้ตรวจสอบ</th>
+                <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
+                  <th className="py-3.5 px-5 font-semibold text-[13px]">วันและเวลาที่ตรวจสอบ</th>
+                  <th className="py-3.5 px-5 font-semibold text-[13px]">รหัสเวร · บุคลากร</th>
+                  <th className="py-3.5 px-5 font-semibold text-[13px]">ผลการพิจารณา</th>
+                  <th className="py-3.5 px-5 font-semibold text-[13px]">ความเห็นเจ้าหน้าที่</th>
+                  <th className="py-3.5 px-5 font-semibold text-[13px]">ผู้ตรวจสอบ</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#E7E2E5]">
+              <tbody className="divide-y divide-[#E6DFF0]">
                 {reviewHistory.map((h) => (
-                  <tr key={h.id} className="hover:bg-[#FFF9F9]">
-                    <td className="py-3.5 px-5 font-mono tabular-nums text-[#273244]">
+                  <tr key={h.id} className="hover:bg-[#F8F7FC]">
+                    <td className="py-3.5 px-5 font-mono tabular-nums text-[#262238]">
                       {formatThaiDateTime(h.reviewed_at)}
                     </td>
-                    <td className="py-3.5 px-5 font-mono text-[#273244]">
+                    <td className="py-3.5 px-5 font-mono text-[#262238]">
                       เวร #{h.attendance_id} · {h.person_id} ({formatThaiDate(h.work_date)})
                     </td>
                     <td className="py-3.5 px-5">
                       <ReviewStatusLabel status={h.new_review_status} />
                     </td>
-                    <td className="py-3.5 px-5 text-[#273244]">{h.review_comment}</td>
-                    <td className="py-3.5 px-5 font-mono text-[#596579]">{h.reviewed_by}</td>
+                    <td className="py-3.5 px-5 text-[#262238]">{h.review_comment}</td>
+                    <td className="py-3.5 px-5 font-mono text-[#746B83]">{h.reviewed_by}</td>
                   </tr>
                 ))}
               </tbody>

@@ -6,11 +6,11 @@
  * หน้าที่หลัก:
  * 1. แสดงรายชื่อบุคลากรที่ซิงก์มาจากตาราง hr_person ของฐานข้อมูล HOSOffice
  * 2. สั่งซิงก์ข้อมูลบุคลากรแบบ Read-Only (POST /api/Sam_Att/personnel/sync)
- *    พร้อม ConfirmDialog, ProgressDialog และการกู้คืนสถานะงานอัตโนมัติเมื่อรีเฟรชหน้า (Section 10)
+ *    พร้อม ConfirmDialog, ProgressDialog และการกู้คืนสถานะงานอัตโนมัติเมื่อรีเฟรชหน้า
  * 3. ตรวจสอบและแจ้งเตือนรายการที่มีปัญหาการผูกรหัสลายนิ้วมือ (เช่น ยังไม่มี FINGLE_ID หรือรหัสซ้ำกัน)
  */
 import React, { useEffect, useState, useCallback } from 'react';
-import { RefreshCw, Search, CheckCircle2, AlertTriangle, Users } from 'lucide-react';
+import { RefreshCw, Search, CheckCircle2, AlertTriangle, Users, Clock } from 'lucide-react';
 import { apiRequest, ApiClientError, type UserRole } from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
 import {
@@ -19,6 +19,7 @@ import {
   TablePaginationBar,
   NotificationBanner,
   TableEmptyState,
+  TableLoadingSkeleton,
   ConfirmDialog,
   ProgressDialog,
   type PageSizeOption,
@@ -45,7 +46,7 @@ export function PersonnelView({
   const [syncLogs, setSyncLogs] = useState<any[]>([]);
   const [issuesData, setIssuesData] = useState<any>(null);
 
-  // Confirm & Progress Dialog state (Section 10)
+  // Confirm & Progress Dialog state
   const [confirmSyncOpen, setConfirmSyncOpen] = useState(false);
   const [progressOpen, setProgressOpen] = useState(false);
   const [progressStep, setProgressStep] = useState('กำลังเตรียมเชื่อมต่อฐานข้อมูล HOSOffice...');
@@ -90,7 +91,7 @@ export function PersonnelView({
     loadPersonnel();
   }, [loadPersonnel]);
 
-  // กู้คืนสถานะงานซิงก์หากเปิดหน้าจอขณะกำลังซิงก์อยู่ (Section 9 & 10)
+  // กู้คืนสถานะงานซิงก์หากเปิดหน้าจอขณะกำลังซิงก์อยู่
   useEffect(() => {
     let timer: ReturnType<typeof setInterval> | null = null;
     async function checkActiveSyncJob() {
@@ -191,13 +192,14 @@ export function PersonnelView({
 
   const validMappedCount = items.filter((p) => p.mapping_status === 'VALID').length;
   const issueCount = issuesData?.personnelIssues?.length || 0;
+  const latestSyncLog = syncLogs[0] || null;
 
   return (
     <div className="space-y-6">
       <PageHeader
-        category="การบริหารเวลาและบุคลากร"
-        title="ทะเบียนบุคลากรและการเชื่อมโยงรหัสสแกน (HOSOffice)"
-        subtitle="ดึงข้อมูลบุคลากรแบบอ่านอย่างเดียว (Read-Only) จากตารางบุคลากรหลักของโรงพยาบาล พร้อมตรวจสอบความถูกต้องของรหัสสแกนลายนิ้วมือ (FINGLE_ID)"
+        category="บริหารเวลาปฏิบัติงาน"
+        title="ทะเบียนบุคลากร HOSOffice"
+        subtitle="ดึงข้อมูลบุคลากรแบบอ่านอย่างเดียว (Read-Only) จากตารางหลักของโรงพยาบาล พร้อมตรวจสอบความถูกต้องของรหัสสแกนลายนิ้วมือ (FINGLE_ID)"
         actions={
           <>
             <PageHelpAction
@@ -212,9 +214,9 @@ export function PersonnelView({
               onClick={() => setConfirmSyncOpen(true)}
               className="ent-btn-primary"
             >
-              <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} aria-hidden="true" />
               <span>
-                {syncing ? 'กำลังซิงก์ข้อมูลจาก HOSOffice...' : 'ซิงก์ข้อมูลบุคลากรจาก HOSOffice'}
+                {syncing ? 'กำลังซิงก์ข้อมูลจาก HOSOffice...' : 'ซิงก์บุคลากรจาก HOSOffice'}
               </span>
             </button>
           </>
@@ -224,92 +226,110 @@ export function PersonnelView({
       <ErrorBanner error={error} />
       <NotificationBanner message={syncNotice} onClose={() => setSyncNotice(null)} />
 
-      {/* Summary Directory Strips */}
+      {/* Last Sync & Read-Only Status Strip */}
+      <div className="ent-card px-4 sm:px-5 py-3 bg-[#F8F7FC] flex flex-wrap items-center justify-between gap-2 text-[13px] text-[#746B83]">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="inline-flex items-center gap-1.5 font-semibold text-[#543B7A]">
+            <Clock className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
+            <span>ซิงก์ล่าสุด:</span>
+          </span>
+          <span className="font-mono text-[#262238] tabular-nums">
+            {latestSyncLog ? formatThaiDateTime(latestSyncLog.started_at) : 'ยังไม่มีประวัติการซิงก์'}
+          </span>
+          {latestSyncLog && (
+            <>
+              <span className="text-[#E6DFF0]" aria-hidden="true">·</span>
+              <span
+                className={`font-semibold ${
+                  latestSyncLog.status === 'SUCCESS' ? 'text-[#198568]' : 'text-[#C74455]'
+                }`}
+              >
+                {latestSyncLog.status === 'SUCCESS'
+                  ? `สำเร็จ (อัปเดต ${latestSyncLog.records_upserted} รายการ)`
+                  : `ไม่สำเร็จ (${latestSyncLog.error_code || 'ERROR'})`}
+              </span>
+            </>
+          )}
+        </div>
+        <span className="text-[12.5px] font-medium text-[#746B83]">
+          โหมด Read-Only · แก้ไขชื่อ/รหัสสแกนได้ที่ต้นทาง HOSOffice เท่านั้น
+        </span>
+      </div>
+
+      {/* 3 Summary KPI Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
         <div className="ent-card p-5 flex items-center justify-between">
           <div>
-            <div className="text-[13.5px] font-medium text-[#596579]">บุคลากรในทะเบียนทั้งหมด</div>
-            <div className="mt-1 text-[26px] font-bold text-[#273244] tabular-nums">
+            <div className="text-[13px] font-medium text-[#746B83]">บุคลากรในทะเบียนทั้งหมด</div>
+            <div className="mt-1 text-[26px] font-bold text-[#262238] tabular-nums">
               {items.length} คน
             </div>
           </div>
-          <div className="w-11 h-11 rounded-xl bg-[#F3EEFC] flex items-center justify-center text-[#7359B4]">
-            <Users className="w-5 h-5" />
+          <div className="w-11 h-11 rounded-xl bg-[#F2EDFA] flex items-center justify-center text-[#8E70C9]">
+            <Users className="w-5 h-5" aria-hidden="true" />
           </div>
         </div>
 
         <div className="ent-card p-5 flex items-center justify-between">
           <div>
-            <div className="text-[13.5px] font-medium text-[#596579]">เชื่อมโยงรหัสสแกนสมบูรณ์</div>
-            <div className="mt-1 text-[26px] font-bold text-[#047857] tabular-nums">
+            <div className="text-[13px] font-medium text-[#746B83]">เชื่อมโยงรหัสสแกนสมบูรณ์</div>
+            <div className="mt-1 text-[26px] font-bold text-[#198568] tabular-nums">
               {validMappedCount} คน
             </div>
           </div>
-          <div className="w-11 h-11 rounded-xl bg-emerald-50 flex items-center justify-center text-[#047857]">
-            <CheckCircle2 className="w-5 h-5" />
+          <div className="w-11 h-11 rounded-xl bg-[#EDF8F4] flex items-center justify-center text-[#198568]">
+            <CheckCircle2 className="w-5 h-5" aria-hidden="true" />
           </div>
         </div>
 
         <button
           type="button"
           onClick={() => setTab('issues')}
-          className="ent-card p-5 flex items-center justify-between text-left hover:border-[#8B73C7] transition-colors"
+          className="ent-card p-5 flex items-center justify-between text-left hover:border-[#8E70C9]/60 transition-colors cursor-pointer"
         >
           <div>
-            <div className="text-[13.5px] font-medium text-[#596579]">
+            <div className="text-[13px] font-medium text-[#746B83]">
               พบปัญหาการจับคู่รหัสสแกน (คลิกตรวจสอบ)
             </div>
-            <div className="mt-1 text-[26px] font-bold text-[#B91C1C] tabular-nums">
+            <div className="mt-1 text-[26px] font-bold text-[#C74455] tabular-nums">
               {issueCount} รายการ
             </div>
           </div>
-          <div className="w-11 h-11 rounded-xl bg-red-50 flex items-center justify-center text-[#B91C1C]">
-            <AlertTriangle className="w-5 h-5" />
+          <div className="w-11 h-11 rounded-xl bg-[#FDF2F3] flex items-center justify-center text-[#C74455]">
+            <AlertTriangle className="w-5 h-5" aria-hidden="true" />
           </div>
         </button>
       </div>
 
       {/* Filter & View Switcher */}
-      <div className="ent-card p-3.5 sm:p-4 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3.5 sm:gap-4">
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 p-1 bg-[#FAF9FD] border border-[#E7E2F0] rounded-xl w-full xl:w-auto">
+      <div className="ent-card p-3.5 sm:p-4 flex flex-col xl:flex-row xl:items-center xl:justify-between gap-3.5">
+        <div className="ent-tab-bar w-full xl:w-auto flex-col sm:flex-row">
           <button
             type="button"
             onClick={() => setTab('list')}
-            className={`px-3.5 py-2 text-[13.5px] font-medium rounded-lg transition-colors text-center whitespace-nowrap ${
-              tab === 'list'
-                ? 'bg-[#8B73C7] text-white shadow-2xs font-semibold'
-                : 'text-[#596579] hover:text-[#273244]'
-            }`}
+            className={`ent-tab-btn ${tab === 'list' ? 'ent-tab-btn-active' : ''}`}
           >
             รายชื่อบุคลากรทั้งหมด ({items.length})
           </button>
           <button
             type="button"
             onClick={() => setTab('issues')}
-            className={`px-3.5 py-2 text-[13.5px] font-medium rounded-lg transition-colors text-center whitespace-nowrap ${
-              tab === 'issues'
-                ? 'bg-[#8B73C7] text-white shadow-2xs font-semibold'
-                : 'text-[#596579] hover:text-[#273244]'
-            }`}
+            className={`ent-tab-btn ${tab === 'issues' ? 'ent-tab-btn-active' : ''}`}
           >
-            ตรวจสอบปัญหารหัสสแกน ({issueCount})
+            รายการที่มีปัญหา ({issueCount})
           </button>
           <button
             type="button"
             onClick={() => setTab('syncHistory')}
-            className={`px-3.5 py-2 text-[13.5px] font-medium rounded-lg transition-colors text-center whitespace-nowrap ${
-              tab === 'syncHistory'
-                ? 'bg-[#8B73C7] text-white shadow-2xs font-semibold'
-                : 'text-[#596579] hover:text-[#273244]'
-            }`}
+            className={`ent-tab-btn ${tab === 'syncHistory' ? 'ent-tab-btn-active' : ''}`}
           >
-            ประวัติการซิงก์ HOSOffice ({syncLogs.length})
+            ประวัติการซิงก์ ({syncLogs.length})
           </button>
         </div>
 
-        <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2.5 sm:gap-3 w-full xl:w-auto">
-          <div className="relative w-full sm:w-72">
-            <Search className="w-4 h-4 text-[#596579] absolute left-3.5 top-3" aria-hidden="true" />
+        <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2.5 w-full xl:w-auto">
+          <div className="relative w-full sm:w-64">
+            <Search className="w-4 h-4 text-[#746B83] absolute left-3.5 top-3" aria-hidden="true" />
             <input
               type="text"
               aria-label="ค้นหาบุคลากร"
@@ -331,7 +351,7 @@ export function PersonnelView({
             }}
             className="ent-input w-full sm:w-auto"
           >
-            <option value="">ทุกสถานะการจับคู่รหัสสแกน</option>
+            <option value="">ทุกสถานะรหัสสแกน</option>
             <option value="VALID">พร้อมใช้งาน (เชื่อมโยงสมบูรณ์)</option>
             <option value="EMPTY_FINGLE_ID">ยังไม่มีรหัสสแกนลายนิ้วมือ</option>
             <option value="DUPLICATE_FINGLE_ID">รหัสสแกนซ้ำซ้อนกัน</option>
@@ -340,49 +360,49 @@ export function PersonnelView({
       </div>
 
       {loading ? (
-        <div className="ent-card p-12 text-center text-[14.5px] text-[#596579]">
-          กำลังโหลดทะเบียนบุคลากร...
+        <div className="ent-table-wrapper">
+          <TableLoadingSkeleton rows={6} cols={5} />
         </div>
       ) : tab === 'list' ? (
         <div className="ent-table-wrapper">
-          <div className="md:hidden divide-y divide-[#E7E2F0]">
+          <div className="md:hidden divide-y divide-[#E6DFF0]">
             {pagedItems.length === 0 ? (
-              <div className="p-8 text-center text-[14px] text-[#596579]">
+              <div className="p-8 text-center text-[14px] text-[#746B83]">
                 ไม่พบรายชื่อบุคลากรตามเงื่อนไขที่ค้นหา
               </div>
             ) : (
               pagedItems.map((p) => (
-                <div key={p.person_id} className="p-4 space-y-2.5 bg-white hover:bg-[#FAF9FD]">
+                <div key={p.person_id} className="p-4 space-y-2.5 bg-white">
                   <div className="flex items-start justify-between gap-2">
                     <div>
-                      <div className="font-bold text-[15px] text-[#273244]">{p.full_name}</div>
-                      <div className="text-[12.5px] font-mono text-[#596579] mt-0.5">
+                      <div className="font-bold text-[15px] text-[#262238]">{p.full_name}</div>
+                      <div className="text-[12.5px] font-mono text-[#746B83] mt-0.5">
                         รหัสบุคลากร: {p.person_id}
                       </div>
                     </div>
                     {p.fingle_id ? (
-                      <span className="font-mono font-bold text-[13.5px] text-[#273244] bg-[#FAF9FD] px-2.5 py-1 rounded-lg border border-[#E7E2F0] shrink-0">
+                      <span className="font-mono font-bold text-[13px] text-[#543B7A] bg-[#F2EDFA] px-2.5 py-1 rounded-lg border border-[#E6DFF0] shrink-0">
                         สแกน: {p.fingle_id}
                       </span>
                     ) : (
-                      <span className="text-[#B91C1C] text-[12.5px] font-semibold bg-red-50 px-2.5 py-1 rounded-lg border border-red-200 shrink-0">
+                      <span className="text-[#C74455] text-[12.5px] font-semibold bg-[#FDF2F3] px-2.5 py-1 rounded-lg border border-[#F3CCD0] shrink-0">
                         ไม่มีรหัสสแกน
                       </span>
                     )}
                   </div>
-                  <div className="text-[13.5px] text-[#273244]">
-                    {p.position_name || '—'} · <span className="text-[#596579]">{p.department_name}</span>
+                  <div className="text-[13.5px] text-[#262238]">
+                    {p.position_name || '—'} · <span className="text-[#746B83]">{p.department_name}</span>
                   </div>
-                  <div className="text-[12.5px] text-[#596579]">{p.personnel_type_name}</div>
+                  <div className="text-[12.5px] text-[#746B83]">{p.personnel_type_name}</div>
                   <div className="pt-1">
                     {p.mapping_status === 'VALID' ? (
-                      <div className="inline-flex items-center gap-1.5 text-[13px] text-[#047857] font-semibold">
-                        <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      <div className="inline-flex items-center gap-1.5 text-[13px] text-[#198568] font-semibold">
+                        <CheckCircle2 className="w-4 h-4 shrink-0" aria-hidden="true" />
                         <span>พร้อมใช้งาน (เชื่อมโยงปกติ)</span>
                       </div>
                     ) : (
-                      <div className="inline-flex items-center gap-1.5 text-[13px] text-[#B91C1C] font-semibold">
-                        <AlertTriangle className="w-4 h-4 shrink-0" />
+                      <div className="inline-flex items-center gap-1.5 text-[13px] text-[#C74455] font-semibold">
+                        <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
                         <span>
                           {p.mapping_status === 'EMPTY_FINGLE_ID'
                             ? 'ไม่มีรหัสสแกนลายนิ้วมือ'
@@ -401,7 +421,7 @@ export function PersonnelView({
           <div className="hidden md:block overflow-x-auto">
             <table className="w-full text-left border-collapse text-[14px]">
               <thead>
-                <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
+                <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
                   <SortableHeader
                     label="ชื่อ-นามสกุล · รหัสบุคลากร"
                     sortKey="full_name"
@@ -439,45 +459,45 @@ export function PersonnelView({
                   />
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#E7E2F0]">
+              <tbody className="divide-y divide-[#E6DFF0]">
                 {pagedItems.length === 0 ? (
                   <TableEmptyState colSpan={5} title="ไม่พบรายชื่อบุคลากรตามเงื่อนไขที่ค้นหา" />
                 ) : (
                   pagedItems.map((p) => (
-                    <tr key={p.person_id} className="hover:bg-[#FAF9FD] transition-colors">
-                      <td className="py-4 px-4">
-                        <div className="font-bold text-[15px] text-[#273244]">{p.full_name}</div>
-                        <div className="text-[12.5px] font-mono text-[#596579] mt-0.5">
+                    <tr key={p.person_id} className="hover:bg-[#F8F7FC] transition-colors">
+                      <td className="py-3.5 px-4">
+                        <div className="font-semibold text-[14.5px] text-[#262238]">{p.full_name}</div>
+                        <div className="text-[12px] font-mono text-[#746B83] mt-0.5">
                           รหัสบุคลากร: {p.person_id}
                         </div>
                       </td>
-                      <td className="py-4 px-4">
-                        <div className="font-medium text-[#273244]">{p.position_name || '—'}</div>
-                        <div className="text-[12.5px] text-[#596579] mt-0.5">
+                      <td className="py-3.5 px-4">
+                        <div className="font-medium text-[#262238]">{p.position_name || '—'}</div>
+                        <div className="text-[12.5px] text-[#746B83] mt-0.5">
                           {p.personnel_type_name}
                         </div>
                       </td>
-                      <td className="py-4 px-4 text-[#273244] font-medium">{p.department_name}</td>
-                      <td className="py-4 px-4 font-mono tabular-nums">
+                      <td className="py-3.5 px-4 text-[#262238] font-medium">{p.department_name}</td>
+                      <td className="py-3.5 px-4 font-mono tabular-nums">
                         {p.fingle_id ? (
-                          <span className="font-bold text-[14.5px] text-[#273244] bg-[#FAF9FD] px-3 py-1 rounded-lg border border-[#E7E2F0]">
+                          <span className="font-bold text-[14px] text-[#543B7A] bg-[#F2EDFA] px-2.5 py-1 rounded-lg border border-[#E6DFF0]">
                             {p.fingle_id}
                           </span>
                         ) : (
-                          <span className="text-[#B91C1C] font-sans text-[13.5px] font-semibold">
+                          <span className="text-[#C74455] font-sans text-[13px] font-semibold">
                             ยังไม่ระบุรหัสสแกน
                           </span>
                         )}
                       </td>
-                      <td className="py-4 px-4">
+                      <td className="py-3.5 px-4">
                         {p.mapping_status === 'VALID' ? (
-                          <div className="inline-flex items-center gap-2 text-[#047857] font-semibold">
+                          <div className="inline-flex items-center gap-2 text-[#198568] font-semibold">
                             <CheckCircle2 className="w-4 h-4 shrink-0" aria-hidden="true" />
                             <span>พร้อมใช้งาน (เชื่อมโยงปกติ)</span>
                           </div>
                         ) : (
                           <div>
-                            <div className="inline-flex items-center gap-2 text-[#B91C1C] font-semibold">
+                            <div className="inline-flex items-center gap-2 text-[#C74455] font-semibold">
                               <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
                               <span>
                                 {p.mapping_status === 'EMPTY_FINGLE_ID'
@@ -488,7 +508,7 @@ export function PersonnelView({
                               </span>
                             </div>
                             {p.mapping_issue_detail && (
-                              <div className="text-[12.5px] text-[#B91C1C] pl-6 mt-0.5">
+                              <div className="text-[12px] text-[#C74455] pl-6 mt-0.5">
                                 {p.mapping_issue_detail}
                               </div>
                             )}
@@ -512,31 +532,31 @@ export function PersonnelView({
       ) : tab === 'issues' ? (
         <div className="space-y-6">
           <div className="ent-table-wrapper">
-            <div className="px-6 py-4 border-b border-[#E7E2F0] bg-[#F3EEFC] flex items-center justify-between">
+            <div className="px-5 py-4 border-b border-[#E6DFF0] bg-[#F2EDFA] flex flex-wrap items-center justify-between gap-3">
               <div>
-                <h2 className="text-[18px] font-bold text-[#273244]">
+                <h2 className="text-[17px] font-bold text-[#262238]">
                   รายการบุคลากรที่พบปัญหาการเชื่อมโยงรหัสสแกน ({issueCount} รายการ)
                 </h2>
-                <p className="text-[13.5px] text-[#596579]">
+                <p className="text-[13px] text-[#746B83]">
                   บุคลากรที่ยังไม่ได้ระบุรหัสสแกนลายนิ้วมือ (EMPTY_FINGLE_ID) หรือมีรหัสสแกนซ้ำซ้อนกันในฐานข้อมูล HOSOffice
                 </p>
               </div>
-              <span className="px-3 py-1 rounded-lg bg-white border border-[#E7E2F0] text-[13px] font-semibold text-[#7359B4]">
+              <span className="px-3 py-1 rounded-lg bg-white border border-[#E6DFF0] text-[12.5px] font-semibold text-[#543B7A]">
                 ต้องแก้ไขที่ต้นทาง HOSOffice แล้วกดซิงก์ใหม่
               </span>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-[14px]">
                 <thead>
-                  <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
-                    <th className="py-3.5 px-5 font-semibold">รหัสบุคลากร</th>
-                    <th className="py-3.5 px-5 font-semibold">ชื่อ-นามสกุล</th>
-                    <th className="py-3.5 px-5 font-semibold">กลุ่มงาน / หน่วยงาน</th>
-                    <th className="py-3.5 px-5 font-semibold">รหัสสแกน (FINGLE_ID)</th>
-                    <th className="py-3.5 px-5 font-semibold">สาเหตุที่ตรวจพบ</th>
+                  <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
+                    <th className="py-3.5 px-5 font-semibold text-[13px]">รหัสบุคลากร</th>
+                    <th className="py-3.5 px-5 font-semibold text-[13px]">ชื่อ-นามสกุล</th>
+                    <th className="py-3.5 px-5 font-semibold text-[13px]">กลุ่มงาน / หน่วยงาน</th>
+                    <th className="py-3.5 px-5 font-semibold text-[13px]">รหัสสแกน (FINGLE_ID)</th>
+                    <th className="py-3.5 px-5 font-semibold text-[13px]">สาเหตุที่ตรวจพบ</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#E7E2F0]">
+                <tbody className="divide-y divide-[#E6DFF0]">
                   {!issuesData?.personnelIssues || issuesData.personnelIssues.length === 0 ? (
                     <TableEmptyState
                       colSpan={5}
@@ -544,18 +564,18 @@ export function PersonnelView({
                     />
                   ) : (
                     issuesData.personnelIssues.map((issue: any) => (
-                      <tr key={issue.person_id} className="hover:bg-[#FAF9FD]">
-                        <td className="py-4 px-5 font-mono font-semibold text-[#273244]">
+                      <tr key={issue.person_id} className="hover:bg-[#F8F7FC]">
+                        <td className="py-3.5 px-5 font-mono font-semibold text-[#262238]">
                           {issue.person_id}
                         </td>
-                        <td className="py-4 px-5 font-bold text-[#273244]">{issue.full_name}</td>
-                        <td className="py-4 px-5 text-[#273244]">{issue.department_name}</td>
-                        <td className="py-4 px-5 font-mono tabular-nums font-semibold text-[#B91C1C]">
+                        <td className="py-3.5 px-5 font-semibold text-[#262238]">{issue.full_name}</td>
+                        <td className="py-3.5 px-5 text-[#262238]">{issue.department_name}</td>
+                        <td className="py-3.5 px-5 font-mono tabular-nums font-semibold text-[#C74455]">
                           {issue.fingle_id || 'ยังไม่ระบุรหัส'}
                         </td>
-                        <td className="py-4 px-5">
-                          <div className="inline-flex items-center gap-1.5 text-[#B91C1C] font-semibold">
-                            <AlertTriangle className="w-4 h-4 shrink-0" />
+                        <td className="py-3.5 px-5">
+                          <div className="inline-flex items-center gap-1.5 text-[#C74455] font-semibold">
+                            <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
                             <span>
                               {issue.mapping_status === 'EMPTY_FINGLE_ID'
                                 ? 'ไม่มีรหัสสแกนลายนิ้วมือ'
@@ -565,7 +585,7 @@ export function PersonnelView({
                             </span>
                           </div>
                           {issue.mapping_issue_detail && (
-                            <div className="text-[12.5px] text-[#596579] mt-0.5">
+                            <div className="text-[12.5px] text-[#746B83] mt-0.5">
                               {issue.mapping_issue_detail}
                             </div>
                           )}
@@ -579,44 +599,44 @@ export function PersonnelView({
           </div>
 
           <div className="ent-table-wrapper">
-            <div className="px-6 py-4 border-b border-[#E7E2F0] bg-[#FAF9FD]">
-              <h2 className="text-[18px] font-bold text-[#273244]">
+            <div className="px-5 py-4 border-b border-[#E6DFF0] bg-[#F8F7FC]">
+              <h2 className="text-[17px] font-bold text-[#262238]">
                 ประวัติการเชื่อมโยงรหัสสแกนตามวันที่มีผลบังคับใช้
               </h2>
-              <p className="text-[13.5px] text-[#596579]">
+              <p className="text-[13px] text-[#746B83]">
                 ใช้สำหรับอ้างอิงการคำนวณเวลาย้อนหลังเมื่อบุคลากรมีการเปลี่ยนรหัสสแกนลายนิ้วมือ
               </p>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse text-[14px]">
                 <thead>
-                  <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
-                    <th className="py-3.5 px-5 font-semibold">รหัสบุคลากร</th>
-                    <th className="py-3.5 px-5 font-semibold">ชื่อ-นามสกุล</th>
-                    <th className="py-3.5 px-5 font-semibold">รหัสสแกน (FINGLE_ID)</th>
-                    <th className="py-3.5 px-5 font-semibold">มีผลตั้งแต่วันที่</th>
-                    <th className="py-3.5 px-5 font-semibold">สิ้นสุดวันที่</th>
-                    <th className="py-3.5 px-5 font-semibold">สถานะความถูกต้อง</th>
+                  <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
+                    <th className="py-3.5 px-5 font-semibold text-[13px]">รหัสบุคลากร</th>
+                    <th className="py-3.5 px-5 font-semibold text-[13px]">ชื่อ-นามสกุล</th>
+                    <th className="py-3.5 px-5 font-semibold text-[13px]">รหัสสแกน (FINGLE_ID)</th>
+                    <th className="py-3.5 px-5 font-semibold text-[13px]">มีผลตั้งแต่วันที่</th>
+                    <th className="py-3.5 px-5 font-semibold text-[13px]">สิ้นสุดวันที่</th>
+                    <th className="py-3.5 px-5 font-semibold text-[13px]">สถานะความถูกต้อง</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#E7E2F0]">
+                <tbody className="divide-y divide-[#E6DFF0]">
                   {issuesData?.mappingHistory?.map((m: any) => (
-                    <tr key={m.id} className="hover:bg-[#FAF9FD]">
-                      <td className="py-4 px-5 font-mono font-semibold text-[#273244]">{m.person_id}</td>
-                      <td className="py-4 px-5 font-bold text-[#273244]">{m.full_name}</td>
-                      <td className="py-4 px-5 font-mono tabular-nums font-semibold text-[#7359B4]">
+                    <tr key={m.id} className="hover:bg-[#F8F7FC]">
+                      <td className="py-3.5 px-5 font-mono font-semibold text-[#262238]">{m.person_id}</td>
+                      <td className="py-3.5 px-5 font-semibold text-[#262238]">{m.full_name}</td>
+                      <td className="py-3.5 px-5 font-mono tabular-nums font-semibold text-[#543B7A]">
                         {m.fingle_id}
                       </td>
-                      <td className="py-4 px-5 font-mono tabular-nums text-[#273244]">
+                      <td className="py-3.5 px-5 font-mono tabular-nums text-[#262238]">
                         {formatThaiDate(m.effective_from)}
                       </td>
-                      <td className="py-4 px-5 font-mono tabular-nums text-[#596579]">
+                      <td className="py-3.5 px-5 font-mono tabular-nums text-[#746B83]">
                         {m.effective_to ? formatThaiDate(m.effective_to) : 'ใช้งานอยู่ในปัจจุบัน'}
                       </td>
-                      <td className="py-4 px-5 font-semibold">
+                      <td className="py-3.5 px-5 font-semibold">
                         <span
                           className={
-                            m.conflict_state === 'NONE' ? 'text-[#047857]' : 'text-[#B91C1C]'
+                            m.conflict_state === 'NONE' ? 'text-[#198568]' : 'text-[#C74455]'
                           }
                         >
                           {m.conflict_state === 'NONE' ? 'ปกติ' : m.conflict_state}
@@ -634,37 +654,37 @@ export function PersonnelView({
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse text-[14px]">
               <thead>
-                <tr className="border-b border-[#E7E2F0] bg-[#FAF9FD] text-[#273244]">
-                  <th className="py-3.5 px-5 font-semibold">รอบการซิงก์</th>
-                  <th className="py-3.5 px-5 font-semibold">วันและเวลาที่ดำเนินการ</th>
-                  <th className="py-3.5 px-5 font-semibold">สถานะ</th>
-                  <th className="py-3.5 px-5 font-semibold text-right">จำนวนที่อ่าน</th>
-                  <th className="py-3.5 px-5 font-semibold text-right">อัปเดตสำเร็จ</th>
-                  <th className="py-3.5 px-5 font-semibold">รายละเอียดผลการเชื่อมต่อ</th>
-                  <th className="py-3.5 px-5 font-semibold">ผู้ดำเนินการ</th>
+                <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
+                  <th className="py-3.5 px-5 font-semibold text-[13px]">รอบการซิงก์</th>
+                  <th className="py-3.5 px-5 font-semibold text-[13px]">วันและเวลาที่ดำเนินการ</th>
+                  <th className="py-3.5 px-5 font-semibold text-[13px]">สถานะ</th>
+                  <th className="py-3.5 px-5 font-semibold text-[13px] text-right">จำนวนที่อ่าน</th>
+                  <th className="py-3.5 px-5 font-semibold text-[13px] text-right">อัปเดตสำเร็จ</th>
+                  <th className="py-3.5 px-5 font-semibold text-[13px]">รายละเอียดผลการเชื่อมต่อ</th>
+                  <th className="py-3.5 px-5 font-semibold text-[13px]">ผู้ดำเนินการ</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#E7E2F0]">
+              <tbody className="divide-y divide-[#E6DFF0]">
                 {syncLogs.length === 0 ? (
                   <TableEmptyState colSpan={7} title="ยังไม่มีประวัติการสั่งซิงก์ข้อมูลจาก HOSOffice" />
                 ) : (
                   syncLogs.map((log) => (
-                    <tr key={log.id} className="hover:bg-[#FAF9FD]">
-                      <td className="py-4 px-5 font-mono tabular-nums font-semibold">#{log.id}</td>
-                      <td className="py-4 px-5 font-mono tabular-nums">{formatThaiDateTime(log.started_at)}</td>
-                      <td className="py-4 px-5 font-semibold">
-                        <span className={log.status === 'SUCCESS' ? 'text-[#047857]' : 'text-[#B91C1C]'}>
+                    <tr key={log.id} className="hover:bg-[#F8F7FC]">
+                      <td className="py-3.5 px-5 font-mono tabular-nums font-semibold text-[#262238]">#{log.id}</td>
+                      <td className="py-3.5 px-5 font-mono tabular-nums text-[#262238]">{formatThaiDateTime(log.started_at)}</td>
+                      <td className="py-3.5 px-5 font-semibold">
+                        <span className={log.status === 'SUCCESS' ? 'text-[#198568]' : 'text-[#C74455]'}>
                           {log.status === 'SUCCESS' ? 'สำเร็จ' : 'ไม่สำเร็จ'}
                         </span>
                       </td>
-                      <td className="py-4 px-5 text-right font-mono tabular-nums">{log.records_fetched}</td>
-                      <td className="py-4 px-5 text-right font-mono tabular-nums font-bold">
+                      <td className="py-3.5 px-5 text-right font-mono tabular-nums">{log.records_fetched}</td>
+                      <td className="py-3.5 px-5 text-right font-mono tabular-nums font-bold text-[#262238]">
                         {log.records_upserted}
                       </td>
-                      <td className="py-4 px-5 text-[#596579]">
+                      <td className="py-3.5 px-5 text-[#746B83]">
                         {log.error_code ? `${log.error_code}: ${log.error_message}` : 'ซิงก์ข้อมูลปกติ'}
                       </td>
-                      <td className="py-4 px-5 font-mono text-[#596579]">{log.triggered_by}</td>
+                      <td className="py-3.5 px-5 font-mono text-[#746B83]">{log.triggered_by}</td>
                     </tr>
                   ))
                 )}
@@ -674,7 +694,7 @@ export function PersonnelView({
         </div>
       )}
 
-      {/* ConfirmDialog ก่อนซิงก์ HOSOffice (Section 10) */}
+      {/* ConfirmDialog ก่อนซิงก์ HOSOffice */}
       <ConfirmDialog
         open={confirmSyncOpen}
         title="ยืนยันการซิงก์ข้อมูลบุคลากรจาก HOSOffice"
@@ -685,7 +705,7 @@ export function PersonnelView({
         onCancel={() => setConfirmSyncOpen(false)}
       />
 
-      {/* ProgressDialog แสดงสถานะการซิงก์ HOSOffice (Section 10) */}
+      {/* ProgressDialog แสดงสถานะการซิงก์ HOSOffice */}
       <ProgressDialog
         open={progressOpen}
         title="ซิงก์ข้อมูลบุคลากรจาก HOSOffice"

@@ -89,30 +89,30 @@ export const DEPENDENCY_TYPE_META: Record<
   SEQUENTIAL: {
     label: 'ทำตามลำดับหลัก',
     shortDesc: 'ควรทำเรียงลำดับเพื่อให้ข้อมูลต้นทางพร้อมก่อนขั้นตอนถัดไป',
-    textColor: 'text-[#694C8C]',
-    bgColor: 'bg-[#F3EEFC]',
-    borderColor: 'border-[#D5CEE6]',
+    textColor: 'text-[#543B7A]',
+    bgColor: 'bg-[#F2EDFA]',
+    borderColor: 'border-[#E6DFF0]',
   },
   INDEPENDENT: {
     label: 'ทำได้อย่างอิสระ',
     shortDesc: 'เปิดดูหรือตรวจสอบได้ตลอดเวลา ไม่ต้องรอครบทุกขั้นตอน',
-    textColor: 'text-[#1D4ED8]',
-    bgColor: 'bg-blue-50',
-    borderColor: 'border-blue-200',
+    textColor: 'text-[#5879BC]',
+    bgColor: 'bg-[#EFF4FC]',
+    borderColor: 'border-[#D2E0F5]',
   },
   AS_NEEDED: {
     label: 'ทำเฉพาะเมื่อจำเป็น',
     shortDesc: 'ทำเมื่อมีการรับคนใหม่ เปลี่ยนเวร พบ NO_SCAN หรือปิดงวดประจำเดือน',
-    textColor: 'text-[#B45309]',
-    bgColor: 'bg-amber-50',
-    borderColor: 'border-amber-200',
+    textColor: 'text-[#B87516]',
+    bgColor: 'bg-[#FEF8ED]',
+    borderColor: 'border-[#F3DFBC]',
   },
   ADMIN_ONLY: {
     label: 'เฉพาะผู้ดูแลระบบ (ADMIN)',
     shortDesc: 'จำกัดสิทธิ์เฉพาะผู้ดูแลระบบส่วนกลาง',
-    textColor: 'text-[#475569]',
-    bgColor: 'bg-slate-100',
-    borderColor: 'border-slate-300',
+    textColor: 'text-[#746B83]',
+    bgColor: 'bg-[#F8F7FC]',
+    borderColor: 'border-[#E6DFF0]',
   },
 };
 
@@ -123,9 +123,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'ตรวจสอบเวลาและตารางเวรส่วนตัว',
     shortDesc: 'สำหรับบุคลากรทุกคน ดูเวลาเข้า-ออกงาน ตารางเวร หมายเหตุ HR และประวัติสแกนของตนเอง',
     iconKey: 'userCheck',
-    accentBg: 'bg-[#F3EEFC]',
-    accentText: 'text-[#694C8C]',
-    accentBorder: 'border-[#D5CEE6]',
+    accentBg: 'bg-[#F2EDFA]',
+    accentText: 'text-[#543B7A]',
+    accentBorder: 'border-[#E6DFF0]',
     roles: ['GENERAL_USER', 'RESPONSIBLE_STAFF', 'ADMIN'],
     steps: [
       {
@@ -174,9 +174,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'บัญชีผู้ใช้งาน สิทธิ์ และความปลอดภัยระบบ',
     shortDesc: 'สร้างบัญชีผู้ใช้ ผูกรหัสบุคลากร ตรวจประวัติ Audit Trail และอัปเดตระบบสำหรับผู้ดูแลระบบ',
     iconKey: 'shield',
-    accentBg: 'bg-[#EDE9FE]',
-    accentText: 'text-[#5B21B6]',
-    accentBorder: 'border-[#DDD6FE]',
+    accentBg: 'bg-[#EDE5F8]',
+    accentText: 'text-[#543B7A]',
+    accentBorder: 'border-[#E6DFF0]',
     roles: ['ADMIN'],
     steps: [
       {
@@ -243,9 +243,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'การจัดการข้อมูลบุคลากร (HOSOffice)',
     shortDesc: 'ซิงก์รายชื่อบุคลากรแบบ Read-Only จาก HOSOffice และตรวจสอบปัญหา FINGLE_ID ก่อนประมวลผล',
     iconKey: 'users',
-    accentBg: 'bg-[#F3EEFC]',
-    accentText: 'text-[#694C8C]',
-    accentBorder: 'border-[#E2D9F3]',
+    accentBg: 'bg-[#F2EDFA]',
+    accentText: 'text-[#543B7A]',
+    accentBorder: 'border-[#E6DFF0]',
     roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
     steps: [
       {
@@ -294,9 +294,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'การกำหนดแม่แบบกะและจัดตารางเวร',
     shortDesc: 'จัดการแม่แบบกะ กฎกะเริ่มต้นตามประเภทบุคลากร จัดเวรรายบุคคล/หลายคน/หลายกะ และนำเข้า Excel',
     iconKey: 'calendar',
-    accentBg: 'bg-[#EDE9FE]',
-    accentText: 'text-[#6D28D9]',
-    accentBorder: 'border-[#DDD6FE]',
+    accentBg: 'bg-[#EDE5F8]',
+    accentText: 'text-[#543B7A]',
+    accentBorder: 'border-[#E6DFF0]',
     roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
     steps: [
       {
@@ -363,9 +363,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'การดึงข้อมูลเครื่องสแกนและข้อมูลต้นฉบับ',
     shortDesc: 'ดึงข้อมูลจากเครื่องสแกนตามช่วงวันที่/เวลา (Asia/Bangkok) ตรวจผลซิงก์ และตรวจ Raw Scans',
     iconKey: 'radio',
-    accentBg: 'bg-[#F5F3FF]',
-    accentText: 'text-[#5B4B8A]',
-    accentBorder: 'border-[#DDD6FE]',
+    accentBg: 'bg-[#EFF4FC]',
+    accentText: 'text-[#5879BC]',
+    accentBorder: 'border-[#D2E0F5]',
     roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
     steps: [
       {
@@ -415,9 +415,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'การตรวจสอบการลงเวลาและการมาสาย',
     shortDesc: 'ตรวจสอบผลการเข้า-ออกงานทั้งโรงพยาบาล กรองสถานะมาสาย ขาดสแกน และตรวจสอบหลักฐานรายบุคคล',
     iconKey: 'clock',
-    accentBg: 'bg-[#F3EEFC]',
-    accentText: 'text-[#694C8C]',
-    accentBorder: 'border-[#D5CEE6]',
+    accentBg: 'bg-[#F2EDFA]',
+    accentText: 'text-[#543B7A]',
+    accentBorder: 'border-[#E6DFF0]',
     roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
     steps: [
       {
@@ -449,9 +449,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'การจัดการ NO_SCAN หมายเหตุ และการประมวลผลใหม่',
     shortDesc: 'บันทึกเหตุผลประกอบการลา/ไปราชการ/ลืมสแกนออก รับรองผล HR และ Reprocess อย่างปลอดภัย',
     iconKey: 'clipboard',
-    accentBg: 'bg-[#FEF3C7]/70',
-    accentText: 'text-[#92400E]',
-    accentBorder: 'border-amber-200',
+    accentBg: 'bg-[#FEF8ED]',
+    accentText: 'text-[#B87516]',
+    accentBorder: 'border-[#F3DFBC]',
     roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
     steps: [
       {
@@ -501,9 +501,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'แดชบอร์ดภาพรวม รายงาน และส่งออก CSV',
     shortDesc: 'ติดตามตัวชี้วัดภาพรวมองค์กร เจาะลึกรายกลุ่มงาน สรุปสถิติการมาสาย และส่งออกไฟล์ CSV',
     iconKey: 'barChart',
-    accentBg: 'bg-[#ECFDF5]/80',
-    accentText: 'text-[#065F46]',
-    accentBorder: 'border-emerald-200',
+    accentBg: 'bg-[#EDF8F4]',
+    accentText: 'text-[#198568]',
+    accentBorder: 'border-[#C2E6DA]',
     roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
     steps: [
       {
@@ -551,9 +551,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'การตรวจสอบและส่งข้อมูลกลับ HOSOffice',
     shortDesc: 'จำลองชุดข้อมูล Dry-Run Preview ตรวจความสมบูรณ์ และส่งข้อมูลจริงตามสิทธิ์และสถานะระบบ',
     iconKey: 'send',
-    accentBg: 'bg-[#F3EEFC]',
-    accentText: 'text-[#694C8C]',
-    accentBorder: 'border-[#D5CEE6]',
+    accentBg: 'bg-[#F2EDFA]',
+    accentText: 'text-[#543B7A]',
+    accentBorder: 'border-[#E6DFF0]',
     roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
     steps: [
       {

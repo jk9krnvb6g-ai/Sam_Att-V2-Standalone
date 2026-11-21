@@ -27,7 +27,7 @@ const THAI_SHORT_MONTHS = [
 ];
 
 // ชื่อเดือนภาษาไทยแบบเต็ม
-const THAI_FULL_MONTHS = [
+export const THAI_FULL_MONTHS = [
   'มกราคม',
   'กุมภาพันธ์',
   'มีนาคม',
@@ -41,6 +41,8 @@ const THAI_FULL_MONTHS = [
   'พฤศจิกายน',
   'ธันวาคม',
 ];
+
+export const THAI_MONTHS = THAI_FULL_MONTHS;
 
 /**
  * แปลงสตริงวันที่มาตรฐาน 'YYYY-MM-DD' เป็นวันที่ภาษาไทยศักราชพุทธ (พ.ศ. = ค.ศ. + 543)
