@@ -25,6 +25,7 @@ import {
 } from '../../utils/crypto.ts';
 import { requireAuth, requireRoles, enforceOwnPersonMapping } from '../../middleware/auth.ts';
 import { resolveRawScanPersonnelMappings, reprocessAttendanceRange } from '../attendance/processor.ts';
+import { addDaysYmd } from '../attendance/matchingEngine.ts';
 import { writeAuditLog } from '../audit/service.ts';
 import { evaluateDueSyncSchedules, getScannerSchedulerStatus } from './scheduler.ts';
 import {
@@ -276,11 +277,13 @@ export async function ingestSixFieldEventsBatch(
     );
     const minDate = sortedDates[0];
     const maxDate = sortedDates[sortedDates.length - 1];
-    const mapStats = await resolveRawScanPersonnelMappings(minDate, maxDate);
+    // Expand by -1 day so post-midnight OUT scans update previous day's cross-midnight shift (ATT-01)
+    const reprocessFrom = addDaysYmd(minDate, -1);
+    const mapStats = await resolveRawScanPersonnelMappings(reprocessFrom, maxDate);
     unmatchedCount = mapStats.unmatchedCount;
 
     await reprocessAttendanceRange({
-      dateFrom: minDate,
+      dateFrom: reprocessFrom,
       dateTo: maxDate,
       actorUsername: triggeredBy,
     });
@@ -1301,12 +1304,17 @@ scannersRouter.get(
                 rs.in_out_mode, rs.work_code, rs.raw_payload_json, rs.sync_run_id, rs.imported_at,
                 rsm.matched_person_id,
                 COALESCE(rsm.mapping_state, 'UNMATCHED') AS mapping_state,
-                p.full_name, p.department_name
+                p.full_name, p.department_name,
+                u.usage_role,
+                u.attendance_id AS used_attendance_id,
+                u.work_date AS used_work_date,
+                u.shift_code AS used_shift_code
          FROM raw_scans rs
          LEFT JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
          LEFT JOIN personnel p ON p.person_id = rsm.matched_person_id
+         LEFT JOIN attendance_raw_scan_usage u ON u.raw_scan_id = rs.id
          WHERE ${conditions.join(' AND ')}
-         ORDER BY rs.canonical_bkk_time DESC
+         ORDER BY rs.canonical_bkk_time DESC, rs.id DESC
          LIMIT 200`,
         params
       );
@@ -1329,11 +1337,16 @@ scannersRouter.get(
         `SELECT rs.id, rs.machine_no, rs.enroll_number, rs.scan_date_time, rs.canonical_bkk_time,
                 rs.verify_mode, rs.in_out_mode, rs.work_code,
                 COALESCE(rsm.mapping_state, 'MATCHED') AS mapping_state,
-                rs.imported_at
+                rs.imported_at,
+                u.usage_role,
+                u.attendance_id AS used_attendance_id,
+                u.work_date AS used_work_date,
+                u.shift_code AS used_shift_code
          FROM raw_scans rs
          INNER JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
+         LEFT JOIN attendance_raw_scan_usage u ON u.raw_scan_id = rs.id
          WHERE rsm.matched_person_id = ?
-         ORDER BY rs.canonical_bkk_time DESC`,
+         ORDER BY rs.canonical_bkk_time DESC, rs.id DESC`,
         [personId]
       );
       res.json({ personId, items });

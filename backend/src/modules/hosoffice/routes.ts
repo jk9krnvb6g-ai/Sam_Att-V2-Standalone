@@ -290,7 +290,23 @@ export async function evaluatePushBatch(dateFrom: string, dateTo: string) {
       continue;
     }
 
-    if ((r.status === 'NO_SCAN' || r.status === 'MISSING_CHECKOUT') && r.review_status === 'PENDING') {
+    if (r.review_status === 'NEEDS_RE_REVIEW') {
+      invalidItems.push({
+        attendanceId: r.id,
+        personId: r.person_id,
+        fullName: r.full_name,
+        workDate: r.work_date,
+        status: r.status,
+        reason:
+          'ผลจับคู่เวลาเปลี่ยนแปลงหลัง Reprocess กรุณาให้เจ้าหน้าที่ HR ตรวจสอบซ้ำก่อนส่งเข้า HOSOffice (review_status = NEEDS_RE_REVIEW)',
+      });
+      continue;
+    }
+
+    if (
+      (r.status === 'NO_SCAN' || r.status === 'MISSING_CHECKIN' || r.status === 'MISSING_CHECKOUT') &&
+      r.review_status === 'PENDING'
+    ) {
       invalidItems.push({
         attendanceId: r.id,
         personId: r.person_id,

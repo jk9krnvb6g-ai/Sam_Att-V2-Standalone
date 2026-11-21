@@ -32,6 +32,7 @@ import {
   TableEmptyState,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
+import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
 import {
   formatThaiDate,
   formatThaiDateTime,
@@ -267,8 +268,8 @@ export function DashboardView({
   return (
     <div className="space-y-6">
       {/* 1. Welcome & Operational Context Header */}
-      <div className="ent-card p-4 sm:p-6 bg-gradient-to-r from-[#FFF1F3] via-white to-white border border-[#F9E8EB] flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 sm:gap-5">
-        <div className="space-y-1.5">
+      <div className="ent-card p-4 sm:p-6 bg-gradient-to-r from-[#FFF1F3] via-white to-white border border-[#F9E8EB] flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4 sm:gap-5">
+        <div className="space-y-1.5 min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2 text-[13px] sm:text-[13.5px] font-semibold text-[#9F3F50]">
             <span>ภาพรวมการปฏิบัติงาน · โรงพยาบาลสามชุก</span>
             {data?.dataMode === 'DEMO' && (
@@ -285,26 +286,33 @@ export function DashboardView({
           </p>
         </div>
 
-        {onNavigate && (
-          <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2.5 sm:gap-3 shrink-0">
-            <button
-              type="button"
-              onClick={() => onNavigate('attendanceReview')}
-              className="ent-btn-primary w-full sm:w-auto"
-            >
-              <ClipboardCheck className="w-4 h-4" />
-              <span>ตรวจสอบรายการค้าง ({kpi?.pendingReviewCount ?? 0} รายการ)</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => onNavigate('scanners')}
-              className="ent-btn-secondary w-full sm:w-auto"
-            >
-              <Radio className="w-4 h-4 text-[#B45363]" />
-              <span>สถานะเครื่องสแกน</span>
-            </button>
-          </div>
-        )}
+        <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center xl:justify-end gap-2.5 sm:gap-3 xl:max-w-[54%]">
+          <PageHelpAction
+            guideKey="dashboard"
+            userRole={user?.role}
+            onNavigate={onNavigate}
+          />
+          {onNavigate && (
+            <>
+              <button
+                type="button"
+                onClick={() => onNavigate('attendanceReview')}
+                className="ent-btn-primary w-full sm:w-auto"
+              >
+                <ClipboardCheck className="w-4 h-4" />
+                <span>ตรวจสอบรายการค้าง ({kpi?.pendingReviewCount ?? 0} รายการ)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onNavigate('scanners')}
+                className="ent-btn-secondary w-full sm:w-auto"
+              >
+                <Radio className="w-4 h-4 text-[#B45363]" />
+                <span>สถานะเครื่องสแกน</span>
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
       {/* 2. Period & Department Filter Bar */}

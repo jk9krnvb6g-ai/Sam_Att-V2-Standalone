@@ -3,28 +3,45 @@
  * ไฟล์: backend/src/modules/attendance/processor.ts
  * หน้าที่: เครื่องมือประมวลผลและคำนวณเวลาปฏิบัติงาน (Attendance Reprocess Engine)
  * ============================================================================
- * กฎธุรกิจสำคัญ (Core Business Rules):
- * 1. ห้ามแก้ไขตาราง `raw_scans` เด็ดขาด (Immutable Raw Scans) การคำนวณจะอ่านจาก `raw_scans`
- *    แล้วบันทึกลงตาราง `processed_attendance_days` เท่านั้น
- * 2. การเรียงลำดับเวลาสแกน (Chronological Deduplication):
- *    - นำเวลาสแกนทั้งหมดของบุคลากรในวันนั้นมาเรียงจากน้อยไปมาก
- *    - ตัดสแกนซ้ำที่ห่างกันไม่เกิน `duplicate_scan_threshold_seconds` (เช่น 120 วินาที) ออก
- *    - สแกนแรกสุด = เวลาเข้างาน (First Check-In)
- *    - สแกนสุดท้าย (เมื่อมีสแกนมากกว่า 1 ครั้งหลังจากตัดสแกนซ้ำ) = เวลาออกงาน (Last Check-Out)
- *    - หากมีสแกนเพียงครั้งเดียวและเลยเวลาเลิกกะแล้ว จะได้สถานะ `MISSING_CHECKOUT` (ลืมสแกนออก)
- * 3. การคำนวณมาสาย (Late Calculation):
- *    - เปรียบเทียบเวลาเข้างานกับจุดตัดสาย (`late_after_time`) ตามประเภทบุคลากรและกะงาน
- *    - ข้าราชการ/พกส. กะเช้า จุดตัดสาย 08:15 น. | ลูกจ้างรายวัน/รายเดือน จุดตัดสาย 07:30 น.
- * 4. การรักษาข้อมูลที่ HR ตรวจสอบแล้ว (Preserve Manual Override):
- *    - เมื่อสั่ง Reprocess ใหม่ ระบบจะไม่เขียนทับรายการที่ HR ทำ Manual Override (`is_manual_override = 1`)
- *      และจะคงสถานะการตรวจรับรองของ HR (`hr_review_status`) ไว้เสมอ
+ * กฎธุรกิจสำคัญ (ATT-01 ถึง ATT-16):
+ * 1. ห้ามแก้ไขหรือลบข้อมูลในตาราง `raw_scans` เด็ดขาด (Immutable Raw Scans)
+ * 2. ใช้ Global Multi-Shift Matching Engine (`matchingEngine.ts`) ประเมินทุกกะของบุคลากรร่วมกัน
+ *    - เรียง Raw Scan ตาม `(canonical_bkk_time ASC, id ASC)` (ATT-02, TC-29)
+ *    - ห้ามใช้ Raw Scan ID ซ้ำเกิน 1 บทบาท และบันทึกหลักฐานลง `attendance_raw_scan_usage` (ATT-03, ATT-09)
+ *    - รองรับกะต่อเนื่องห่างกัน 1 นาทีโดยใช้สแกนคนละรายการ (ATT-04, ATT-05)
+ *    - ใช้สแกนแรกที่เหมาะสมเป็น IN และสแกนแรกที่เหมาะสมเป็น OUT หลังจัดสรรทุกกะแล้ว (ATT-06, ATT-07)
+ *    - กรณีสแกนเดียวทับซ้อนระหว่าง OUT กะแรกกับ IN กะถัดไป ให้จัดเป็น IN กะถัดไปก่อนโดยไม่ใช้ซ้ำ (ATT-16)
+ *    - คำนวณออกก่อนเวลา (`early_checkout_indicator`, `early_checkout_minutes`) แยกจากสถานะความครบถ้วน (ATT-10, ATT-12, ATT-14)
+ *    - รองรับการลาครึ่งวัน (`attendance_leaves`) โดยไม่แก้ไขแม่แบบกะทำงาน (ATT-15)
+ * 3. การรัน Reprocess ซ้ำ (ATT-13):
+ *    - รักษา `attendance_notes`, `hr_review_history`, `review_reason`, `reviewed_by`, `reviewed_at` เดิมไว้ครบถ้วน
+ *    - หากผลจับคู่เปลี่ยนแปลงบนรายการที่เคยตรวจสอบแล้วหรือมีหมายเหตุ จะเปลี่ยน `review_status` เป็น `NEEDS_RE_REVIEW`
+ *      และทำเครื่องหมาย `needs_re_review = 1` บนหมายเหตุ พร้อมบันทึกประวัติลง `attendance_matching_history`
  * ============================================================================
  */
 
 import { dbQuery, dbExecute } from '../../database/adapter.ts';
 import { writeAuditLog } from '../audit/service.ts';
+import {
+  normalizeWorkDateString,
+  resolveEffectiveDailyScheduleForPersonDate,
+  computeAbsoluteIntervalMinutes,
+  type DailyOverrideRow,
+  type ExistingAssignmentRow,
+  type PersonnelTypeRuleRow,
+} from '../shifts/routes.ts';
+import {
+  addDaysYmd,
+  matchPersonShiftsGlobally,
+  type AttendanceCompletenessStatus,
+  type LegacyAttendanceStatus,
+  type MatchingLeaveInput,
+  type MatchingRawScanInput,
+  type MatchingShiftInput,
+  type MatchedShiftOutcome,
+} from './matchingEngine.ts';
 
-export const ATTENDANCE_RULE_VERSION = 'v2.1.0-tz-bkk';
+export const ATTENDANCE_RULE_VERSION = 'v2.3.0-global-match-bkk';
 
 export interface ReprocessOptions {
   dateFrom: string; // YYYY-MM-DD
@@ -45,15 +62,25 @@ export interface CalculatedShiftAttendance {
   shiftName: string | null;
   scheduledStart: string | null;
   scheduledEnd: string | null;
+  evaluatedStartTime: string | null;
+  evaluatedEndTime: string | null;
   cutoffTimestamp: string | null;
   checkInTime: string | null;
   checkOutTime: string | null;
   checkInRawScanId: number | null;
   checkOutRawScanId: number | null;
-  status: 'NORMAL' | 'LATE' | 'NO_SCAN' | 'MISSING_CHECKOUT' | 'NO_SCHEDULE' | 'PENDING_MAPPING';
+  status: LegacyAttendanceStatus;
+  attendanceStatus: AttendanceCompletenessStatus;
   secondaryFlags: string | null;
   isLate: number;
   lateMinutes: number;
+  earlyCheckoutIndicator: number;
+  earlyCheckoutMinutes: number;
+  matchingRule: string;
+  leaveId: number | null;
+  leaveType: string | null;
+  leaveStartTime: string | null;
+  leaveEndTime: string | null;
 }
 
 export function getBangkokNowString(): string {
@@ -70,40 +97,34 @@ export function getBangkokNowString(): string {
   return formatter.format(new Date());
 }
 
-function addDays(dateStr: string, days: number): string {
-  const [y, m, d] = dateStr.split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d + days));
-  return dt.toISOString().slice(0, 10);
-}
-
-function toEpochMinutes(bkkTimestamp: string): number {
-  // Format: YYYY-MM-DD HH:mm(:ss)
-  const [datePart, timePart] = bkkTimestamp.trim().split(' ');
-  const [y, m, d] = datePart.split('-').map(Number);
-  const [hh, mm] = timePart.split(':').map(Number);
-  return Math.floor(Date.UTC(y, m - 1, d, hh, mm, 0) / 60000);
-}
-
-function fromEpochMinutes(epochMinutes: number): string {
-  const dt = new Date(epochMinutes * 60000);
-  const yyyy = dt.getUTCFullYear();
-  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(dt.getUTCDate()).padStart(2, '0');
-  const hh = String(dt.getUTCHours()).padStart(2, '0');
-  const min = String(dt.getUTCMinutes()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd} ${hh}:${min}:00`;
+export async function getHalfDayPreCheckinWindowMinutes(): Promise<number> {
+  try {
+    const rows = await dbQuery<{ setting_value: string }>(
+      "SELECT setting_value FROM attendance_settings WHERE setting_key = 'half_day_pre_checkin_window_minutes' LIMIT 1"
+    );
+    if (rows.length > 0) {
+      const parsed = Number(rows[0].setting_value);
+      if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 240) {
+        return Math.round(parsed);
+      }
+    }
+  } catch {
+    // Fallback to 60 minutes if settings table is not yet initialized
+  }
+  return 60;
 }
 
 /**
- * จับคู่ข้อมูลสแกนดิบ (raw_scans) เข้ากับบุคลากรผ่านตาราง fingerprint_mappings ตามช่วงวันที่ที่มีผล (effective_from..effective_to)
- * กฎสำคัญ (P1 ข้อ 08): ห้ามแก้ไขตาราง raw_scans เด็ดขาด! ผลการจับคู่ทั้งหมดจะถูกบันทึกลงตาราง Derived Mapping (raw_scan_mappings) เท่านั้น
+ * จับคู่ข้อมูลสแกนดิบ (raw_scans) เข้ากับบุคลากรผ่านตาราง fingerprint_mappings ตามช่วงวันที่ที่มีผล
+ * กฎสำคัญ: ห้ามแก้ไขตาราง raw_scans เด็ดขาด บันทึกผลการจับคู่ลง raw_scan_mappings เท่านั้น
  */
 export async function resolveRawScanPersonnelMappings(dateFrom: string, dateTo: string): Promise<{
   newlyMatched: number;
   unmatchedCount: number;
   conflictCount: number;
 }> {
-  const extendedEnd = addDays(dateTo, 1);
+  const extendedStart = addDaysYmd(dateFrom, -1);
+  const extendedEnd = addDaysYmd(dateTo, 2);
   const scans = await dbQuery<{
     id: number;
     event_dedup_key: string;
@@ -116,8 +137,9 @@ export async function resolveRawScanPersonnelMappings(dateFrom: string, dateTo: 
             rsm.matched_person_id, rsm.mapping_state
      FROM raw_scans rs
      LEFT JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
-     WHERE rs.canonical_bkk_time >= ? AND rs.canonical_bkk_time <= ?`,
-    [`${dateFrom} 00:00:00`, `${extendedEnd} 23:59:59`]
+     WHERE rs.canonical_bkk_time >= ? AND rs.canonical_bkk_time <= ?
+     ORDER BY rs.canonical_bkk_time ASC, rs.id ASC`,
+    [`${extendedStart} 00:00:00`, `${extendedEnd} 23:59:59`]
   );
 
   const mappings = await dbQuery<{
@@ -213,46 +235,39 @@ export async function resolveRawScanPersonnelMappings(dateFrom: string, dateTo: 
   return { newlyMatched, unmatchedCount, conflictCount };
 }
 
-import {
-  normalizeWorkDateString,
-  resolveEffectiveDailyScheduleForPersonDate,
-  computeAbsoluteIntervalMinutes,
-  type DailyOverrideRow,
-  type ExistingAssignmentRow,
-  type PersonnelTypeRuleRow,
-} from '../shifts/routes.ts';
-
 function buildDateRangeList(dateFrom: string, dateTo: string): string[] {
   const start = normalizeWorkDateString(dateFrom);
   const end = normalizeWorkDateString(dateTo);
   const out: string[] = [];
   let cur = start;
   let guard = 0;
-  while (cur <= end && guard < 400) {
+  while (cur <= end && guard < 420) {
     out.push(cur);
-    cur = addDays(cur, 1);
+    cur = addDaysYmd(cur, 1);
     guard++;
   }
   return out;
 }
 
 /**
- * Pure deterministic calculation of attendance rows for a date range.
- * Enforces the 5-step Shift Priority Order (Section 5.4):
- * 1. Check daily override & shift assignments for (person, date)
- * 2. If custom shifts assigned -> evaluate assigned shifts
- * 3. If CLEARED_ALL_SHIFTS -> 0 shifts (never reverts to default shift)
- * 4. If DEFAULT_FROM_TYPE or RESTORED_DEFAULT -> evaluate default morning shift from personnel_type_rules
- * 5. Prevent time overlap with cross-midnight shifts from previous day
+ * Pure deterministic calculation of attendance rows for a date range using the
+ * Global Multi-Shift Matching Engine (ATT-01..ATT-16).
+ *
+ * Evaluates shifts across [dateFrom - 1 .. dateTo + 1] together with all raw scans
+ * in [dateFrom - 1 00:00:00 .. dateTo + 2 23:59:59] so cross-midnight boundary shifts
+ * never reuse scans, then returns only outcomes whose workDate lies in [dateFrom .. dateTo].
  */
 export async function computeAttendanceOutcomes(
   options: ReprocessOptions
 ): Promise<CalculatedShiftAttendance[]> {
   const nowBkk = options.referenceNowBkk || getBangkokNowString();
-  const nowMin = toEpochMinutes(nowBkk);
+  const halfDayPreCheckinWindowMinutes = await getHalfDayPreCheckinWindowMinutes();
 
-  const prevDayBeforeRange = addDays(options.dateFrom, -1);
-  const assignmentParams: unknown[] = [prevDayBeforeRange, options.dateTo];
+  const evalDateFrom = addDaysYmd(options.dateFrom, -1);
+  const evalDateTo = addDaysYmd(options.dateTo, 1);
+  const prevDayBeforeEval = addDaysYmd(evalDateFrom, -1);
+
+  const assignmentParams: unknown[] = [prevDayBeforeEval, evalDateTo];
   let personClause = '';
   if (options.personId) {
     personClause = ' AND sa.person_id = ?';
@@ -272,18 +287,27 @@ export async function computeAttendanceOutcomes(
     snapshot_cutoff_time: string;
     snapshot_is_cross_midnight: number;
     mapping_status: string;
+    checkin_window_before_min: number | null;
+    checkin_window_after_min: number | null;
+    checkout_window_before_min: number | null;
+    checkout_window_after_min: number | null;
   }>(
     `SELECT sa.id, sa.person_id, sa.shift_id, sa.work_date,
             sa.snapshot_shift_code, sa.snapshot_shift_name,
             sa.snapshot_start_time, sa.snapshot_end_time,
             sa.snapshot_grace_minutes, sa.snapshot_cutoff_time,
             sa.snapshot_is_cross_midnight,
-            p.mapping_status
+            p.mapping_status,
+            s.checkin_window_before_min,
+            s.checkin_window_after_min,
+            s.checkout_window_before_min,
+            s.checkout_window_after_min
      FROM shift_assignments sa
      INNER JOIN personnel p ON p.person_id = sa.person_id
+     LEFT JOIN shifts s ON s.id = sa.shift_id
      WHERE sa.status = 'ACTIVE'
        AND sa.work_date >= ? AND sa.work_date <= ?${personClause}
-     ORDER BY sa.work_date ASC, sa.snapshot_start_time ASC`,
+     ORDER BY sa.work_date ASC, sa.snapshot_start_time ASC, sa.id ASC`,
     assignmentParams
   );
 
@@ -308,7 +332,7 @@ export async function computeAttendanceOutcomes(
 
   const rawOverrides = await dbQuery<DailyOverrideRow>(
     `SELECT * FROM shift_daily_overrides WHERE work_date >= ? AND work_date <= ?`,
-    [options.dateFrom, options.dateTo]
+    [evalDateFrom, evalDateTo]
   );
   const overridesByPersonDate = new Map<string, DailyOverrideRow>();
   for (const ov of rawOverrides) {
@@ -332,6 +356,16 @@ export async function computeAttendanceOutcomes(
     });
   }
 
+  const assignmentWindowById = new Map<
+    number,
+    {
+      inBefore: number;
+      inAfter: number;
+      outBefore: number;
+      outAfter: number;
+    }
+  >();
+
   const assignmentsByPersonDate = new Map<string, ExistingAssignmentRow[]>();
   for (const sa of rawAssignments) {
     const pid = String(sa.person_id ?? '').trim();
@@ -353,23 +387,18 @@ export async function computeAttendanceOutcomes(
       status: 'ACTIVE',
     });
     assignmentsByPersonDate.set(key, list);
+
+    assignmentWindowById.set(sa.id, {
+      inBefore: Number(sa.checkin_window_before_min ?? 120),
+      inAfter: Number(sa.checkin_window_after_min ?? 240),
+      outBefore: Number(sa.checkout_window_before_min ?? 180),
+      outAfter: Number(sa.checkout_window_after_min ?? 240),
+    });
   }
 
-  // Construct effective shift items across all dates in [dateFrom, dateTo]
-  const dateList = buildDateRangeList(options.dateFrom, options.dateTo);
-  const effectiveEvaluatedShifts: Array<{
-    id: number | null;
-    person_id: string;
-    work_date: string;
-    snapshot_shift_code: string;
-    snapshot_shift_name: string;
-    snapshot_start_time: string;
-    snapshot_end_time: string;
-    snapshot_grace_minutes: number;
-    snapshot_cutoff_time: string;
-    snapshot_is_cross_midnight: number;
-    mapping_status: string;
-  }> = [];
+  // Construct effective shift inputs across [evalDateFrom .. evalDateTo] per person
+  const dateList = buildDateRangeList(evalDateFrom, evalDateTo);
+  const shiftsByPerson = new Map<string, MatchingShiftInput[]>();
 
   for (const workDate of dateList) {
     for (const person of activePersonnel) {
@@ -393,14 +422,14 @@ export async function computeAttendanceOutcomes(
         continue;
       }
 
+      const typeRule = rulesByCode.get(String(person.personnel_type_code || '').trim().toUpperCase());
+
       for (const eff of resolved.effectiveShifts) {
         if (eff.isDefaultFromType) {
-          // For synthesized default shifts, skip if person has invalid mapping status (unless explicitly restored)
           if (person.mapping_status !== 'VALID' && resolved.state !== 'RESTORED_DEFAULT') {
             continue;
           }
-          // Check time overlap against previous day's cross-midnight shift
-          const prevDate = addDays(workDate, -1);
+          const prevDate = addDaysYmd(workDate, -1);
           const prevDayList = assignmentsByPersonDate.get(`${pid}:${prevDate}`) || [];
           const candInt = computeAbsoluteIntervalMinutes(
             workDate,
@@ -425,184 +454,232 @@ export async function computeAttendanceOutcomes(
           }
         }
 
-        effectiveEvaluatedShifts.push({
-          id: eff.assignmentId,
-          person_id: pid,
-          work_date: workDate,
-          snapshot_shift_code: eff.shiftCode,
-          snapshot_shift_name: eff.shiftName,
-          snapshot_start_time: eff.startTime,
-          snapshot_end_time: eff.endTime,
-          snapshot_grace_minutes: eff.graceMinutes,
-          snapshot_cutoff_time: eff.cutoffTime,
-          snapshot_is_cross_midnight: eff.isCrossMidnight,
-          mapping_status: person.mapping_status,
+        const win =
+          eff.assignmentId !== null ? assignmentWindowById.get(eff.assignmentId) : undefined;
+        const checkinWindowBeforeMin =
+          win?.inBefore ?? Number((typeRule as any)?.CheckinWindowBeforeMinutes ?? 120);
+        const checkinWindowAfterMin = win?.inAfter ?? 240;
+        const checkoutWindowBeforeMin = win?.outBefore ?? 180;
+        const checkoutWindowAfterMin =
+          win?.outAfter ?? Number((typeRule as any)?.CheckoutWindowAfterMinutes ?? 240);
+
+        const list = shiftsByPerson.get(pid) || [];
+        list.push({
+          personId: pid,
+          workDate,
+          shiftAssignmentId: eff.assignmentId,
+          shiftCode: eff.shiftCode,
+          shiftName: eff.shiftName,
+          startTime: eff.startTime,
+          endTime: eff.endTime,
+          graceMinutes: Number(eff.graceMinutes ?? 0),
+          cutoffTime: eff.cutoffTime,
+          isCrossMidnight: Number(eff.isCrossMidnight ?? 0),
+          mappingStatus: person.mapping_status,
+          checkinWindowBeforeMin,
+          checkinWindowAfterMin,
+          checkoutWindowBeforeMin,
+          checkoutWindowAfterMin,
         });
+        shiftsByPerson.set(pid, list);
       }
     }
   }
 
-  const extendedEnd = addDays(options.dateTo, 1);
+  // Load all raw scans across [evalDateFrom 00:00:00 .. dateTo + 2 23:59:59] sorted by (canonical_bkk_time ASC, id ASC) (ATT-02, TC-29)
+  const scanWindowStart = `${evalDateFrom} 00:00:00`;
+  const scanWindowEnd = `${addDaysYmd(options.dateTo, 2)} 23:59:59`;
+  const scanParams: unknown[] = [scanWindowStart, scanWindowEnd];
+  let scanPersonClause = '';
+  if (options.personId) {
+    scanPersonClause = ' AND rsm.matched_person_id = ?';
+    scanParams.push(options.personId);
+  }
+
   const rawScans = await dbQuery<{
     id: number;
     matched_person_id: string | null;
     canonical_bkk_time: string;
     in_out_mode: number;
-    mapping_state: string;
   }>(
-    `SELECT rs.id, rsm.matched_person_id, rs.canonical_bkk_time, rs.in_out_mode,
-            COALESCE(rsm.mapping_state, 'UNMATCHED') AS mapping_state
+    `SELECT rs.id, rsm.matched_person_id, rs.canonical_bkk_time, rs.in_out_mode
      FROM raw_scans rs
-     LEFT JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
-     WHERE rs.canonical_bkk_time >= ? AND rs.canonical_bkk_time <= ?
-     ORDER BY rs.canonical_bkk_time ASC`,
-    [`${options.dateFrom} 00:00:00`, `${extendedEnd} 23:59:59`]
+     INNER JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
+     WHERE rsm.mapping_state = 'MATCHED'
+       AND rsm.matched_person_id IS NOT NULL
+       AND rs.canonical_bkk_time >= ? AND rs.canonical_bkk_time <= ?${scanPersonClause}
+     ORDER BY rs.canonical_bkk_time ASC, rs.id ASC`,
+    scanParams
   );
 
-  const results: CalculatedShiftAttendance[] = [];
-
-  for (const sa of effectiveEvaluatedShifts) {
-    const startTs = `${sa.work_date} ${sa.snapshot_start_time}:00`;
-    const isCross =
-      Number(sa.snapshot_is_cross_midnight) === 1 || sa.snapshot_end_time <= sa.snapshot_start_time;
-    const endDay = isCross ? addDays(sa.work_date, 1) : sa.work_date;
-    const endTs = `${endDay} ${sa.snapshot_end_time}:00`;
-
-    const cutoffDay =
-      sa.snapshot_cutoff_time < sa.snapshot_start_time ? addDays(sa.work_date, 1) : sa.work_date;
-    const cutoffTs = `${cutoffDay} ${sa.snapshot_cutoff_time}:00`;
-
-    const startMin = toEpochMinutes(startTs);
-    const endMin = toEpochMinutes(endTs);
-    const cutoffMin = toEpochMinutes(cutoffTs);
-
-    if (sa.mapping_status && sa.mapping_status !== 'VALID') {
-      results.push({
-        personId: sa.person_id,
-        workDate: sa.work_date,
-        shiftAssignmentId: sa.id,
-        shiftCode: sa.snapshot_shift_code,
-        shiftName: sa.snapshot_shift_name,
-        scheduledStart: startTs,
-        scheduledEnd: endTs,
-        cutoffTimestamp: cutoffTs,
-        checkInTime: null,
-        checkOutTime: null,
-        checkInRawScanId: null,
-        checkOutRawScanId: null,
-        status: 'PENDING_MAPPING',
-        secondaryFlags: sa.mapping_status,
-        isLate: 0,
-        lateMinutes: 0,
-      });
-      continue;
-    }
-
-    const checkinWindowStart = fromEpochMinutes(startMin - 180);
-    const checkinWindowEnd = fromEpochMinutes(endMin - 30);
-    const checkoutWindowStart = fromEpochMinutes(startMin + 60);
-    const checkoutWindowEnd = fromEpochMinutes(endMin + 240);
-
-    const personScans = rawScans.filter((s) => s.matched_person_id === sa.person_id);
-
-    const checkinCandidates = personScans.filter(
-      (s) =>
-        s.canonical_bkk_time >= checkinWindowStart &&
-        s.canonical_bkk_time <= checkinWindowEnd &&
-        (s.in_out_mode === 0 || s.in_out_mode === 255)
-    );
-
-    const firstCheckin = checkinCandidates.length > 0 ? checkinCandidates[0] : null;
-
-    const checkoutCandidates = personScans.filter(
-      (s) =>
-        s.canonical_bkk_time >= checkoutWindowStart &&
-        s.canonical_bkk_time <= checkoutWindowEnd &&
-        (!firstCheckin || s.id !== firstCheckin.id)
-    );
-    const lastCheckout =
-      checkoutCandidates.length > 0 ? checkoutCandidates[checkoutCandidates.length - 1] : null;
-
-    if (!firstCheckin) {
-      if (nowMin < cutoffMin) {
-        continue;
-      }
-      results.push({
-        personId: sa.person_id,
-        workDate: sa.work_date,
-        shiftAssignmentId: sa.id,
-        shiftCode: sa.snapshot_shift_code,
-        shiftName: sa.snapshot_shift_name,
-        scheduledStart: startTs,
-        scheduledEnd: endTs,
-        cutoffTimestamp: cutoffTs,
-        checkInTime: null,
-        checkOutTime: lastCheckout ? lastCheckout.canonical_bkk_time : null,
-        checkInRawScanId: null,
-        checkOutRawScanId: lastCheckout ? lastCheckout.id : null,
-        status: 'NO_SCAN',
-        secondaryFlags: null,
-        isLate: 0,
-        lateMinutes: 0,
-      });
-      continue;
-    }
-
-    const checkinMin = toEpochMinutes(firstCheckin.canonical_bkk_time);
-    const rawDiffMin = checkinMin - startMin;
-    const isLate = rawDiffMin > Number(sa.snapshot_grace_minutes) ? 1 : 0;
-    const lateMinutes = isLate ? Math.max(0, rawDiffMin) : 0;
-
-    if (!lastCheckout) {
-      if (nowMin >= endMin) {
-        results.push({
-          personId: sa.person_id,
-          workDate: sa.work_date,
-          shiftAssignmentId: sa.id,
-          shiftCode: sa.snapshot_shift_code,
-          shiftName: sa.snapshot_shift_name,
-          scheduledStart: startTs,
-          scheduledEnd: endTs,
-          cutoffTimestamp: cutoffTs,
-          checkInTime: firstCheckin.canonical_bkk_time,
-          checkOutTime: null,
-          checkInRawScanId: firstCheckin.id,
-          checkOutRawScanId: null,
-          status: 'MISSING_CHECKOUT',
-          secondaryFlags: isLate ? 'LATE_AND_MISSING_CHECKOUT' : null,
-          isLate,
-          lateMinutes,
-        });
-        continue;
-      }
-    }
-
-    results.push({
-      personId: sa.person_id,
-      workDate: sa.work_date,
-      shiftAssignmentId: sa.id,
-      shiftCode: sa.snapshot_shift_code,
-      shiftName: sa.snapshot_shift_name,
-      scheduledStart: startTs,
-      scheduledEnd: endTs,
-      cutoffTimestamp: cutoffTs,
-      checkInTime: firstCheckin.canonical_bkk_time,
-      checkOutTime: lastCheckout ? lastCheckout.canonical_bkk_time : null,
-      checkInRawScanId: firstCheckin.id,
-      checkOutRawScanId: lastCheckout ? lastCheckout.id : null,
-      status: isLate ? 'LATE' : 'NORMAL',
-      secondaryFlags: null,
-      isLate,
-      lateMinutes,
+  const scansByPerson = new Map<string, MatchingRawScanInput[]>();
+  for (const s of rawScans) {
+    const pid = String(s.matched_person_id || '').trim();
+    if (!pid) continue;
+    const list = scansByPerson.get(pid) || [];
+    list.push({
+      id: Number(s.id),
+      personId: pid,
+      canonicalBkkTime: s.canonical_bkk_time,
+      inOutMode: Number(s.in_out_mode),
     });
+    scansByPerson.set(pid, list);
   }
 
+  // Load active half-day / partial leaves across [evalDateFrom .. evalDateTo] (ATT-15)
+  const leaveParams: unknown[] = [evalDateFrom, evalDateTo];
+  let leavePersonClause = '';
+  if (options.personId) {
+    leavePersonClause = ' AND person_id = ?';
+    leaveParams.push(options.personId);
+  }
+  let rawLeaves: Array<{
+    id: number;
+    person_id: string;
+    work_date: string;
+    shift_assignment_id: number | null;
+    leave_type: string;
+    leave_start_time: string;
+    leave_end_time: string;
+    reason: string | null;
+  }> = [];
+  try {
+    rawLeaves = await dbQuery(
+      `SELECT id, person_id, work_date, shift_assignment_id, leave_type, leave_start_time, leave_end_time, reason
+       FROM attendance_leaves
+       WHERE status = 'ACTIVE'
+         AND work_date >= ? AND work_date <= ?${leavePersonClause}
+       ORDER BY id ASC`,
+      leaveParams
+    );
+  } catch {
+    rawLeaves = [];
+  }
+
+  const leavesByPerson = new Map<string, MatchingLeaveInput[]>();
+  for (const lv of rawLeaves) {
+    const pid = String(lv.person_id || '').trim();
+    const list = leavesByPerson.get(pid) || [];
+    list.push({
+      id: Number(lv.id),
+      personId: pid,
+      workDate: normalizeWorkDateString(lv.work_date),
+      shiftAssignmentId: lv.shift_assignment_id !== null ? Number(lv.shift_assignment_id) : null,
+      leaveType: lv.leave_type,
+      leaveStartTime: lv.leave_start_time,
+      leaveEndTime: lv.leave_end_time,
+      reason: lv.reason,
+    });
+    leavesByPerson.set(pid, list);
+  }
+
+  // Run Global Multi-Shift Matching per person
+  const results: CalculatedShiftAttendance[] = [];
+  for (const [personId, personShifts] of shiftsByPerson.entries()) {
+    const personScans = scansByPerson.get(personId) || [];
+    const personLeaves = leavesByPerson.get(personId) || [];
+
+    const matchResult = matchPersonShiftsGlobally({
+      shifts: personShifts,
+      rawScans: personScans,
+      leaves: personLeaves,
+      config: {
+        referenceNowBkk: nowBkk,
+        halfDayPreCheckinWindowMinutes,
+      },
+    });
+
+    for (const outcome of matchResult.outcomes) {
+      if (outcome.workDate >= options.dateFrom && outcome.workDate <= options.dateTo) {
+        results.push(mapOutcomeToCalculated(outcome));
+      }
+    }
+  }
+
+  results.sort(
+    (a, b) =>
+      a.workDate.localeCompare(b.workDate) ||
+      a.personId.localeCompare(b.personId) ||
+      String(a.scheduledStart || '').localeCompare(String(b.scheduledStart || ''))
+  );
+
   return results;
+}
+
+function mapOutcomeToCalculated(o: MatchedShiftOutcome): CalculatedShiftAttendance {
+  return {
+    personId: o.personId,
+    workDate: o.workDate,
+    shiftAssignmentId: o.shiftAssignmentId,
+    shiftCode: o.shiftCode,
+    shiftName: o.shiftName,
+    scheduledStart: o.scheduledStart,
+    scheduledEnd: o.scheduledEnd,
+    evaluatedStartTime: o.evaluatedStartTime,
+    evaluatedEndTime: o.evaluatedEndTime,
+    cutoffTimestamp: o.cutoffTimestamp,
+    checkInTime: o.checkInTime,
+    checkOutTime: o.checkOutTime,
+    checkInRawScanId: o.checkInRawScanId,
+    checkOutRawScanId: o.checkOutRawScanId,
+    status: o.status,
+    attendanceStatus: o.attendanceStatus,
+    secondaryFlags: o.secondaryFlags,
+    isLate: o.isLate,
+    lateMinutes: o.lateMinutes,
+    earlyCheckoutIndicator: o.earlyCheckoutIndicator,
+    earlyCheckoutMinutes: o.earlyCheckoutMinutes,
+    matchingRule: o.matchingRule,
+    leaveId: o.leaveId,
+    leaveType: o.leaveType,
+    leaveStartTime: o.leaveStartTime,
+    leaveEndTime: o.leaveEndTime,
+  };
+}
+
+function hasMaterialAttendanceChange(
+  prev: {
+    status: string;
+    attendance_status?: string | null;
+    check_in_time: string | null;
+    check_out_time: string | null;
+    check_in_raw_scan_id: number | null;
+    check_out_raw_scan_id: number | null;
+    late_minutes: number;
+    early_checkout_minutes?: number | null;
+    evaluated_start_time?: string | null;
+    evaluated_end_time?: string | null;
+  },
+  next: CalculatedShiftAttendance
+): boolean {
+  const prevInId = prev.check_in_raw_scan_id !== null && prev.check_in_raw_scan_id !== undefined ? Number(prev.check_in_raw_scan_id) : null;
+  const prevOutId = prev.check_out_raw_scan_id !== null && prev.check_out_raw_scan_id !== undefined ? Number(prev.check_out_raw_scan_id) : null;
+  const prevAttStatus = prev.attendance_status || (prev.status === 'NORMAL' || prev.status === 'LATE' ? 'COMPLETE' : prev.status);
+
+  return (
+    prev.status !== next.status ||
+    prevAttStatus !== next.attendanceStatus ||
+    prevInId !== next.checkInRawScanId ||
+    prevOutId !== next.checkOutRawScanId ||
+    (prev.check_in_time ?? null) !== (next.checkInTime ?? null) ||
+    (prev.check_out_time ?? null) !== (next.checkOutTime ?? null) ||
+    Number(prev.late_minutes || 0) !== Number(next.lateMinutes || 0) ||
+    Number(prev.early_checkout_minutes || 0) !== Number(next.earlyCheckoutMinutes || 0) ||
+    (prev.evaluated_start_time ?? null) !== (next.evaluatedStartTime ?? null) ||
+    (prev.evaluated_end_time ?? null) !== (next.evaluatedEndTime ?? null)
+  );
 }
 
 export async function previewReprocessRange(options: ReprocessOptions) {
   await resolveRawScanPersonnelMappings(options.dateFrom, options.dateTo);
   const projected = await computeAttendanceOutcomes(options);
+
+  const existingParams: unknown[] = [options.dateFrom, options.dateTo];
+  let personClause = '';
+  if (options.personId) {
+    personClause = ' AND person_id = ?';
+    existingParams.push(options.personId);
+  }
 
   const existing = await dbQuery<{
     id: number;
@@ -611,27 +688,42 @@ export async function previewReprocessRange(options: ReprocessOptions) {
     shift_assignment_id: number | null;
     shift_code: string | null;
     status: string;
+    attendance_status: string | null;
     late_minutes: number;
+    early_checkout_minutes: number | null;
     check_in_time: string | null;
     check_out_time: string | null;
+    check_in_raw_scan_id: number | null;
+    check_out_raw_scan_id: number | null;
+    evaluated_start_time: string | null;
+    evaluated_end_time: string | null;
+    review_status: string;
   }>(
-    `SELECT id, person_id, work_date, shift_assignment_id, shift_code, status, late_minutes, check_in_time, check_out_time
+    `SELECT id, person_id, work_date, shift_assignment_id, shift_code, status, attendance_status,
+            late_minutes, early_checkout_minutes, check_in_time, check_out_time,
+            check_in_raw_scan_id, check_out_raw_scan_id, evaluated_start_time, evaluated_end_time, review_status
      FROM attendance
-     WHERE work_date >= ? AND work_date <= ?`,
-    [options.dateFrom, options.dateTo]
+     WHERE work_date >= ? AND work_date <= ?${personClause}`,
+    existingParams
   );
 
   let changedCount = 0;
   let newRecordsCount = 0;
   let unchangedCount = 0;
+  let willFlagReReviewCount = 0;
   const diffs: Array<{
     personId: string;
     workDate: string;
     shiftCode: string | null;
     previousStatus: string | null;
     newStatus: string;
+    previousAttendanceStatus: string | null;
+    newAttendanceStatus: string;
     previousLateMinutes: number | null;
     newLateMinutes: number;
+    previousEarlyCheckoutMinutes: number | null;
+    newEarlyCheckoutMinutes: number;
+    willFlagReReview: boolean;
   }> = [];
 
   for (const item of projected) {
@@ -651,24 +743,32 @@ export async function previewReprocessRange(options: ReprocessOptions) {
         shiftCode: item.shiftCode,
         previousStatus: null,
         newStatus: item.status,
+        previousAttendanceStatus: null,
+        newAttendanceStatus: item.attendanceStatus,
         previousLateMinutes: null,
         newLateMinutes: item.lateMinutes,
+        previousEarlyCheckoutMinutes: null,
+        newEarlyCheckoutMinutes: item.earlyCheckoutMinutes,
+        willFlagReReview: false,
       });
-    } else if (
-      match.status !== item.status ||
-      Number(match.late_minutes) !== item.lateMinutes ||
-      match.check_in_time !== item.checkInTime ||
-      match.check_out_time !== item.checkOutTime
-    ) {
+    } else if (hasMaterialAttendanceChange(match, item)) {
       changedCount++;
+      const willFlagReReview =
+        match.review_status === 'REVIEWED' || match.review_status === 'VERIFIED_APPROVED';
+      if (willFlagReReview) willFlagReReviewCount++;
       diffs.push({
         personId: item.personId,
         workDate: item.workDate,
         shiftCode: item.shiftCode,
         previousStatus: match.status,
         newStatus: item.status,
+        previousAttendanceStatus: match.attendance_status,
+        newAttendanceStatus: item.attendanceStatus,
         previousLateMinutes: Number(match.late_minutes),
         newLateMinutes: item.lateMinutes,
+        previousEarlyCheckoutMinutes: Number(match.early_checkout_minutes || 0),
+        newEarlyCheckoutMinutes: item.earlyCheckoutMinutes,
+        willFlagReReview,
       });
     } else {
       unchangedCount++;
@@ -683,13 +783,17 @@ export async function previewReprocessRange(options: ReprocessOptions) {
     newRecordsCount,
     changedCount,
     unchangedCount,
+    willFlagReReviewCount,
     diffs,
   };
 }
 
 /**
- * Executes idempotent Attendance Reprocess without mutating raw_scans
- * and preserving attendance_notes, hr_review_history, and review_status.
+ * Executes idempotent Attendance Reprocess without mutating raw_scans:
+ * - Persists global matching results and enforces DB-level scan anti-reuse via attendance_raw_scan_usage (ATT-03)
+ * - Preserves attendance_notes, hr_review_history, review_reason, reviewed_by, reviewed_at (ATT-13)
+ * - Flags NEEDS_RE_REVIEW + attendance_notes.needs_re_review = 1 and records attendance_matching_history
+ *   when material matching results change on previously reviewed / noted shifts (ATT-13, TC-26)
  */
 export async function reprocessAttendanceRange(options: ReprocessOptions) {
   const mappingStats = await resolveRawScanPersonnelMappings(options.dateFrom, options.dateTo);
@@ -697,30 +801,78 @@ export async function reprocessAttendanceRange(options: ReprocessOptions) {
 
   let insertedCount = 0;
   let updatedCount = 0;
+  let changedCount = 0;
+  let reReviewFlaggedCount = 0;
   const keptAttendanceIds = new Set<number>();
+  const pendingUsageRows: Array<{
+    rawScanId: number;
+    attendanceId: number;
+    personId: string;
+    workDate: string;
+    shiftAssignmentId: number | null;
+    shiftCode: string | null;
+    usageRole: 'CHECK_IN' | 'CHECK_OUT';
+  }> = [];
 
   for (const item of projected) {
     const existing =
       item.shiftAssignmentId !== null
-        ? await dbQuery<{ id: number; review_status: string }>(
-            `SELECT id, review_status FROM attendance
+        ? await dbQuery<{
+            id: number;
+            review_status: string;
+            status: string;
+            attendance_status: string | null;
+            check_in_time: string | null;
+            check_out_time: string | null;
+            check_in_raw_scan_id: number | null;
+            check_out_raw_scan_id: number | null;
+            late_minutes: number;
+            early_checkout_minutes: number | null;
+            evaluated_start_time: string | null;
+            evaluated_end_time: string | null;
+          }>(
+            `SELECT id, review_status, status, attendance_status,
+                    check_in_time, check_out_time, check_in_raw_scan_id, check_out_raw_scan_id,
+                    late_minutes, early_checkout_minutes, evaluated_start_time, evaluated_end_time
+             FROM attendance
              WHERE person_id = ? AND work_date = ? AND shift_assignment_id = ? LIMIT 1`,
             [item.personId, item.workDate, item.shiftAssignmentId]
           )
-        : await dbQuery<{ id: number; review_status: string }>(
-            `SELECT id, review_status FROM attendance
+        : await dbQuery<{
+            id: number;
+            review_status: string;
+            status: string;
+            attendance_status: string | null;
+            check_in_time: string | null;
+            check_out_time: string | null;
+            check_in_raw_scan_id: number | null;
+            check_out_raw_scan_id: number | null;
+            late_minutes: number;
+            early_checkout_minutes: number | null;
+            evaluated_start_time: string | null;
+            evaluated_end_time: string | null;
+          }>(
+            `SELECT id, review_status, status, attendance_status,
+                    check_in_time, check_out_time, check_in_raw_scan_id, check_out_raw_scan_id,
+                    late_minutes, early_checkout_minutes, evaluated_start_time, evaluated_end_time
+             FROM attendance
              WHERE person_id = ? AND work_date = ? AND shift_assignment_id IS NULL AND shift_code = ? LIMIT 1`,
             [item.personId, item.workDate, item.shiftCode]
           );
+
+    let attendanceId: number;
 
     if (existing.length === 0) {
       const ins = await dbExecute(
         `INSERT INTO attendance (
           person_id, work_date, shift_assignment_id, shift_code, shift_name,
-          scheduled_start, scheduled_end, cutoff_timestamp,
+          scheduled_start, scheduled_end, evaluated_start_time, evaluated_end_time, cutoff_timestamp,
           check_in_time, check_out_time, check_in_raw_scan_id, check_out_raw_scan_id,
-          status, secondary_flags, is_late, late_minutes, review_status, rule_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
+          status, attendance_status, secondary_flags, is_late, late_minutes,
+          early_checkout_indicator, early_checkout_minutes,
+          review_status, rule_version, matching_rule, processed_at,
+          leave_id, leave_type, leave_start_time, leave_end_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?)`,
         [
           item.personId,
           item.workDate,
@@ -729,54 +881,174 @@ export async function reprocessAttendanceRange(options: ReprocessOptions) {
           item.shiftName,
           item.scheduledStart,
           item.scheduledEnd,
+          item.evaluatedStartTime,
+          item.evaluatedEndTime,
           item.cutoffTimestamp,
           item.checkInTime,
           item.checkOutTime,
           item.checkInRawScanId,
           item.checkOutRawScanId,
           item.status,
+          item.attendanceStatus,
           item.secondaryFlags,
           item.isLate,
           item.lateMinutes,
+          item.earlyCheckoutIndicator,
+          item.earlyCheckoutMinutes,
           ATTENDANCE_RULE_VERSION,
+          item.matchingRule,
+          item.leaveId,
+          item.leaveType,
+          item.leaveStartTime,
+          item.leaveEndTime,
         ]
       );
-      if (ins.insertId) keptAttendanceIds.add(ins.insertId);
+      attendanceId = Number(ins.insertId || 0);
+      if (attendanceId) keptAttendanceIds.add(attendanceId);
       insertedCount++;
     } else {
-      keptAttendanceIds.add(existing[0].id);
+      const prev = existing[0];
+      attendanceId = Number(prev.id);
+      keptAttendanceIds.add(attendanceId);
+
+      const changed = hasMaterialAttendanceChange(prev, item);
+      let nextReviewStatus = prev.review_status;
+
+      if (changed) {
+        changedCount++;
+        const existingNotes = await dbQuery<{ id: number }>(
+          'SELECT id FROM attendance_notes WHERE attendance_id = ? LIMIT 1',
+          [attendanceId]
+        );
+        const wasReviewedOrNoted =
+          prev.review_status === 'REVIEWED' ||
+          prev.review_status === 'VERIFIED_APPROVED' ||
+          existingNotes.length > 0;
+
+        if (wasReviewedOrNoted) {
+          nextReviewStatus = 'NEEDS_RE_REVIEW';
+          reReviewFlaggedCount++;
+          if (existingNotes.length > 0) {
+            await dbExecute(
+              'UPDATE attendance_notes SET needs_re_review = 1 WHERE attendance_id = ?',
+              [attendanceId]
+            );
+          }
+        }
+
+        await dbExecute(
+          `INSERT INTO attendance_matching_history (
+            attendance_id, person_id, work_date, shift_assignment_id,
+            previous_check_in_raw_scan_id, new_check_in_raw_scan_id,
+            previous_check_out_raw_scan_id, new_check_out_raw_scan_id,
+            previous_status, new_status,
+            previous_attendance_status, new_attendance_status,
+            previous_late_minutes, new_late_minutes,
+            previous_early_checkout_minutes, new_early_checkout_minutes,
+            previous_review_status, new_review_status,
+            matching_rule, change_reason, rule_version, triggered_by
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            attendanceId,
+            item.personId,
+            item.workDate,
+            item.shiftAssignmentId,
+            prev.check_in_raw_scan_id,
+            item.checkInRawScanId,
+            prev.check_out_raw_scan_id,
+            item.checkOutRawScanId,
+            prev.status,
+            item.status,
+            prev.attendance_status,
+            item.attendanceStatus,
+            Number(prev.late_minutes || 0),
+            item.lateMinutes,
+            Number(prev.early_checkout_minutes || 0),
+            item.earlyCheckoutMinutes,
+            prev.review_status,
+            nextReviewStatus,
+            item.matchingRule,
+            wasReviewedOrNoted
+              ? 'REPROCESS_CHANGED_REVIEWED_OR_NOTED_SHIFT'
+              : 'REPROCESS_MATCHING_UPDATED',
+            ATTENDANCE_RULE_VERSION,
+            options.actorUsername,
+          ]
+        );
+      }
+
       await dbExecute(
         `UPDATE attendance
          SET shift_code = ?, shift_name = ?, scheduled_start = ?, scheduled_end = ?,
-             cutoff_timestamp = ?, check_in_time = ?, check_out_time = ?,
+             evaluated_start_time = ?, evaluated_end_time = ?, cutoff_timestamp = ?,
+             check_in_time = ?, check_out_time = ?,
              check_in_raw_scan_id = ?, check_out_raw_scan_id = ?,
-             status = ?, secondary_flags = ?, is_late = ?, late_minutes = ?,
-             rule_version = ?, calculated_at = CURRENT_TIMESTAMP
+             status = ?, attendance_status = ?, secondary_flags = ?,
+             is_late = ?, late_minutes = ?,
+             early_checkout_indicator = ?, early_checkout_minutes = ?,
+             review_status = ?, rule_version = ?, matching_rule = ?,
+             leave_id = ?, leave_type = ?, leave_start_time = ?, leave_end_time = ?,
+             calculated_at = CURRENT_TIMESTAMP, processed_at = CURRENT_TIMESTAMP
          WHERE id = ?`,
         [
           item.shiftCode,
           item.shiftName,
           item.scheduledStart,
           item.scheduledEnd,
+          item.evaluatedStartTime,
+          item.evaluatedEndTime,
           item.cutoffTimestamp,
           item.checkInTime,
           item.checkOutTime,
           item.checkInRawScanId,
           item.checkOutRawScanId,
           item.status,
+          item.attendanceStatus,
           item.secondaryFlags,
           item.isLate,
           item.lateMinutes,
+          item.earlyCheckoutIndicator,
+          item.earlyCheckoutMinutes,
+          nextReviewStatus,
           ATTENDANCE_RULE_VERSION,
-          existing[0].id,
+          item.matchingRule,
+          item.leaveId,
+          item.leaveType,
+          item.leaveStartTime,
+          item.leaveEndTime,
+          attendanceId,
         ]
       );
       updatedCount++;
     }
+
+    if (attendanceId) {
+      if (item.checkInRawScanId !== null) {
+        pendingUsageRows.push({
+          rawScanId: item.checkInRawScanId,
+          attendanceId,
+          personId: item.personId,
+          workDate: item.workDate,
+          shiftAssignmentId: item.shiftAssignmentId,
+          shiftCode: item.shiftCode,
+          usageRole: 'CHECK_IN',
+        });
+      }
+      if (item.checkOutRawScanId !== null) {
+        pendingUsageRows.push({
+          rawScanId: item.checkOutRawScanId,
+          attendanceId,
+          personId: item.personId,
+          workDate: item.workDate,
+          shiftAssignmentId: item.shiftAssignmentId,
+          shiftCode: item.shiftCode,
+          usageRole: 'CHECK_OUT',
+        });
+      }
+    }
   }
 
-  // ลบแถว attendance ที่ยังไม่ผ่านการตรวจของ HR (review_status = 'PENDING' และไม่มีหมายเหตุ)
-  // หากเวรในวันนั้นถูกลบออกหรือตั้งเป็นไม่มีเวร (CLEARED_ALL_SHIFTS) เพื่อไม่ให้เวรที่ลบแล้วค้างในรายงาน
+  // Synchronize attendance_raw_scan_usage for the reprocessed scope (ATT-03 DB-level anti-reuse)
   const existingInRange = await dbQuery<{
     id: number;
     person_id: string;
@@ -789,6 +1061,50 @@ export async function reprocessAttendanceRange(options: ReprocessOptions) {
       : [options.dateFrom, options.dateTo]
   );
 
+  const inRangeAttendanceIds = new Set<number>(existingInRange.map((r) => Number(r.id)));
+  for (const id of keptAttendanceIds) {
+    inRangeAttendanceIds.add(id);
+  }
+
+  // Clear previous usage rows belonging to attendance records in this reprocessed range
+  for (const attId of inRangeAttendanceIds) {
+    await dbExecute('DELETE FROM attendance_raw_scan_usage WHERE attendance_id = ?', [attId]);
+  }
+
+  // Insert new usage rows; PRIMARY KEY (raw_scan_id) strictly blocks any duplicate reuse within the reprocessed set
+  const insertedScanIdsThisRun = new Set<number>();
+  for (const u of pendingUsageRows) {
+    if (insertedScanIdsThisRun.has(u.rawScanId)) {
+      throw new Error(
+        `ATT03_SCAN_REUSE_VIOLATION: raw_scan_id=${u.rawScanId} attempted reuse across shifts`
+      );
+    }
+    // If an outside-range stale record held this scan before global boundary correction, release stale claim first
+    const staleClaim = await dbQuery<{ attendance_id: number }>(
+      'SELECT attendance_id FROM attendance_raw_scan_usage WHERE raw_scan_id = ? LIMIT 1',
+      [u.rawScanId]
+    );
+    if (staleClaim.length > 0 && !keptAttendanceIds.has(Number(staleClaim[0].attendance_id))) {
+      await dbExecute('DELETE FROM attendance_raw_scan_usage WHERE raw_scan_id = ?', [u.rawScanId]);
+    }
+    await dbExecute(
+      `INSERT INTO attendance_raw_scan_usage (
+        raw_scan_id, attendance_id, person_id, work_date, shift_assignment_id, shift_code, usage_role
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        u.rawScanId,
+        u.attendanceId,
+        u.personId,
+        u.workDate,
+        u.shiftAssignmentId,
+        u.shiftCode,
+        u.usageRole,
+      ]
+    );
+    insertedScanIdsThisRun.add(u.rawScanId);
+  }
+
+  // Delete obsolete PENDING attendance rows with no notes/reviews if their shift was removed or cleared
   for (const row of existingInRange) {
     if (!keptAttendanceIds.has(row.id) && row.review_status === 'PENDING') {
       const notes = await dbQuery<{ id: number }>(
@@ -800,10 +1116,15 @@ export async function reprocessAttendanceRange(options: ReprocessOptions) {
         [row.id]
       );
       if (notes.length === 0 && reviews.length === 0) {
+        await dbExecute('DELETE FROM attendance_raw_scan_usage WHERE attendance_id = ?', [row.id]);
+        await dbExecute('DELETE FROM attendance_matching_history WHERE attendance_id = ?', [row.id]);
         await dbExecute('DELETE FROM attendance WHERE id = ?', [row.id]);
       }
     }
   }
+
+  const earlyCheckoutCount = projected.filter((p) => p.earlyCheckoutIndicator === 1).length;
+  const missingCheckinCount = projected.filter((p) => p.attendanceStatus === 'MISSING_CHECKIN').length;
 
   await writeAuditLog({
     requestId: options.requestId || 'reprocess-internal',
@@ -819,6 +1140,10 @@ export async function reprocessAttendanceRange(options: ReprocessOptions) {
       dateTo: options.dateTo,
       insertedCount,
       updatedCount,
+      changedCount,
+      reReviewFlaggedCount,
+      earlyCheckoutCount,
+      missingCheckinCount,
       mappingStats,
       ruleVersion: ATTENDANCE_RULE_VERSION,
     },
@@ -831,6 +1156,10 @@ export async function reprocessAttendanceRange(options: ReprocessOptions) {
     totalProcessed: projected.length,
     insertedCount,
     updatedCount,
+    changedCount,
+    reReviewFlaggedCount,
+    earlyCheckoutCount,
+    missingCheckinCount,
     mappingStats,
   };
 }

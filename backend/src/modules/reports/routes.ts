@@ -16,9 +16,12 @@ interface AttendanceJoinedRow {
   check_in_time: string | null;
   check_out_time: string | null;
   status: string;
+  attendance_status?: string | null;
   secondary_flags: string | null;
   is_late: number;
   late_minutes: number;
+  early_checkout_indicator?: number;
+  early_checkout_minutes?: number;
   review_status: string;
   full_name: string;
   department_name: string;
@@ -70,11 +73,15 @@ function buildAggregation(rows: AttendanceJoinedRow[]) {
   const distinctLatePersonSet = new Set<string>();
 
   let normalCount = 0;
+  let completeCount = 0;
   let lateOccurrences = 0;
   let noScanCount = 0;
+  let missingCheckinCount = 0;
   let missingCheckoutCount = 0;
+  let earlyCheckoutCount = 0;
   let pendingMappingCount = 0;
   let pendingReviewCount = 0;
+  let needsReReviewCount = 0;
   let totalLateMinutes = 0;
 
   const personRankingMap = new Map<
@@ -107,15 +114,24 @@ function buildAggregation(rows: AttendanceJoinedRow[]) {
   for (const r of rows) {
     distinctPersonSet.add(r.person_id);
     const isLateRow = Number(r.is_late) === 1 || r.status === 'LATE';
+    const isEarlyCheckoutRow = Number(r.early_checkout_indicator || 0) === 1;
     const lateMin = Number(r.late_minutes || 0);
 
     if (r.status === 'NORMAL') normalCount++;
+    if (r.attendance_status === 'COMPLETE' || r.status === 'NORMAL' || r.status === 'LATE') {
+      completeCount++;
+    }
     if (r.status === 'NO_SCAN') noScanCount++;
+    if (r.status === 'MISSING_CHECKIN' || r.attendance_status === 'MISSING_CHECKIN') {
+      missingCheckinCount++;
+    }
     if (r.status === 'MISSING_CHECKOUT') missingCheckoutCount++;
+    if (isEarlyCheckoutRow) earlyCheckoutCount++;
     if (r.status === 'PENDING_MAPPING') pendingMappingCount++;
+    if (r.review_status === 'NEEDS_RE_REVIEW') needsReReviewCount++;
     if (
-      r.review_status === 'PENDING' &&
-      (r.status !== 'NORMAL' || isLateRow)
+      (r.review_status === 'PENDING' && (r.status !== 'NORMAL' || isLateRow || isEarlyCheckoutRow)) ||
+      r.review_status === 'NEEDS_RE_REVIEW'
     ) {
       pendingReviewCount++;
     }
@@ -194,6 +210,7 @@ function buildAggregation(rows: AttendanceJoinedRow[]) {
       evaluatedPersonnelCount: distinctPersonSet.size,
       totalShifts: rows.length,
       normalCount,
+      completeCount,
       latePeople,
       lateOccurrences,
       totalLateMinutes,
@@ -202,9 +219,12 @@ function buildAggregation(rows: AttendanceJoinedRow[]) {
       avgLateMinutesPerLatePerson,
       avgLatePerPersonDenominatorLabel: 'นาทีสายรวม ÷ จำนวนคนที่สายไม่ซ้ำ (late_people)',
       noScanCount,
+      missingCheckinCount,
       missingCheckoutCount,
+      earlyCheckoutCount,
       pendingMappingCount,
       pendingReviewCount,
+      needsReReviewCount,
     },
     ranking,
     departmentBreakdown,

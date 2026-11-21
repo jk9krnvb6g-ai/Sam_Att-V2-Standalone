@@ -3,6 +3,7 @@ import { HeartHandshake, Lock, User, ArrowRight, Eye, EyeOff } from 'lucide-reac
 import { apiRequest, setStoredToken, type AuthUser, ApiClientError } from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
 import { RequiredMark } from '../components/common/SharedComponents.tsx';
+import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
 
 export function LoginView({
   dataMode = 'REAL',
@@ -73,14 +74,17 @@ export function LoginView({
         <div className="ent-card py-8 px-6 sm:px-9 space-y-6">
           <div className="border-b border-[#E7E2E5] pb-4 space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h2 className="text-[19px] font-bold text-[#273244]">
-                ลงชื่อเข้าใช้งานสำหรับบุคลากร
-              </h2>
-              {dataMode === 'DEMO' && (
-                <span className="px-2.5 py-1 rounded-md bg-amber-100 border border-amber-300 text-[#92400E] text-[12px] font-bold">
-                  โหมดข้อมูลตัวอย่าง (DEMO)
-                </span>
-              )}
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className="text-[19px] font-bold text-[#273244]">
+                  ลงชื่อเข้าใช้งานสำหรับบุคลากร
+                </h2>
+                {dataMode === 'DEMO' && (
+                  <span className="px-2.5 py-1 rounded-md bg-amber-100 border border-amber-300 text-[#92400E] text-[12px] font-bold">
+                    โหมดข้อมูลตัวอย่าง (DEMO)
+                  </span>
+                )}
+              </div>
+              <PageHelpAction guideKey="login" compact />
             </div>
             <p className="text-[14px] text-[#596579] leading-relaxed">
               ตรวจสอบเวลาเข้า–ออกงาน ตารางเวรหมุนเวียน และรายงานประจำเดือนตามสิทธิ์การปฏิบัติงาน

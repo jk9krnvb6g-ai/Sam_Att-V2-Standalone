@@ -34,9 +34,11 @@ import {
 export function AttendanceStatusText({
   status,
   secondaryFlags,
+  earlyCheckoutMinutes,
 }: {
   status: string;
   secondaryFlags?: string | null;
+  earlyCheckoutMinutes?: number | null;
 }) {
   const map: Record<
     string,
@@ -53,6 +55,12 @@ export function AttendanceStatusText({
       iconColor: 'text-[#047857]',
       textColor: 'text-[#047857] font-semibold',
     },
+    COMPLETE: {
+      thaiLabel: 'ลงเวลาครบเข้า–ออก',
+      icon: CheckCircle2,
+      iconColor: 'text-[#047857]',
+      textColor: 'text-[#047857] font-semibold',
+    },
     LATE: {
       thaiLabel: 'มาสาย',
       icon: Clock,
@@ -62,6 +70,12 @@ export function AttendanceStatusText({
     NO_SCAN: {
       thaiLabel: 'ไม่พบข้อมูลสแกน',
       icon: AlertCircle,
+      iconColor: 'text-[#B91C1C]',
+      textColor: 'text-[#B91C1C] font-semibold',
+    },
+    MISSING_CHECKIN: {
+      thaiLabel: 'ไม่สแกนเข้างาน',
+      icon: AlertTriangle,
       iconColor: 'text-[#B91C1C]',
       textColor: 'text-[#B91C1C] font-semibold',
     },
@@ -93,11 +107,20 @@ export function AttendanceStatusText({
   };
 
   const Icon = info.icon;
+  const earlyMin = Number(earlyCheckoutMinutes || 0);
 
   // แปลงรหัสสถานะรอง (Secondary Flags) ให้เป็นข้อความภาษาไทยที่เข้าใจง่าย
   const secondaryFlagThai =
     secondaryFlags === 'LATE_AND_MISSING_CHECKOUT'
       ? 'เข้างานสายร่วมกับไม่สแกนออก'
+      : secondaryFlags === 'LATE_AND_EARLY_CHECKOUT'
+      ? earlyMin > 0
+        ? `เข้างานสายร่วมกับออกก่อนเวลา ${earlyMin} นาที`
+        : 'เข้างานสายร่วมกับออกก่อนเวลา'
+      : secondaryFlags === 'EARLY_CHECKOUT'
+      ? earlyMin > 0
+        ? `ออกก่อนเวลา ${earlyMin} นาที`
+        : 'ออกก่อนเวลา'
       : secondaryFlags === 'EMPTY_FINGLE_ID'
       ? 'ยังไม่มีรหัสลายนิ้วมือในระบบ'
       : secondaryFlags === 'DUPLICATE_FINGLE_ID'
@@ -128,6 +151,14 @@ export function ReviewStatusLabel({ status }: { status: string }) {
       <span className="inline-flex items-center gap-1.5 text-[13.5px] font-semibold text-[#047857] whitespace-nowrap">
         <CheckCircle2 className="w-4 h-4 shrink-0 text-[#047857]" aria-hidden="true" />
         <span>ตรวจสอบแล้ว</span>
+      </span>
+    );
+  }
+  if (status === 'NEEDS_RE_REVIEW') {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-[13.5px] font-semibold text-[#B91C1C] whitespace-nowrap">
+        <AlertTriangle className="w-4 h-4 shrink-0 text-[#B91C1C]" aria-hidden="true" />
+        <span>ต้องตรวจสอบซ้ำ</span>
       </span>
     );
   }

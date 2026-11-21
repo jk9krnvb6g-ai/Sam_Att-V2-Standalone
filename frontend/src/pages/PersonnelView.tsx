@@ -11,7 +11,7 @@
  */
 import React, { useEffect, useState, useCallback } from 'react';
 import { RefreshCw, Search, CheckCircle2, AlertTriangle, Users } from 'lucide-react';
-import { apiRequest, ApiClientError } from '../services/api.ts';
+import { apiRequest, ApiClientError, type UserRole } from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
 import {
   PageHeader,
@@ -23,9 +23,17 @@ import {
   ProgressDialog,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
+import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
+import type { NavViewKey } from '../components/layout/Sidebar.tsx';
 import { formatThaiDate, formatThaiDateTime } from '../utils/thaiFormat.ts';
 
-export function PersonnelView() {
+export function PersonnelView({
+  userRole,
+  onNavigate,
+}: {
+  userRole?: UserRole;
+  onNavigate?: (view: NavViewKey) => void;
+}) {
   const [search, setSearch] = useState('');
   const [mappingStatus, setMappingStatus] = useState('');
   const [tab, setTab] = useState<'list' | 'issues' | 'syncHistory'>('list');
@@ -191,17 +199,25 @@ export function PersonnelView() {
         title="ทะเบียนบุคลากรและการเชื่อมโยงรหัสสแกน (HOSOffice)"
         subtitle="ดึงข้อมูลบุคลากรแบบอ่านอย่างเดียว (Read-Only) จากตารางบุคลากรหลักของโรงพยาบาล พร้อมตรวจสอบความถูกต้องของรหัสสแกนลายนิ้วมือ (FINGLE_ID)"
         actions={
-          <button
-            type="button"
-            disabled={syncing}
-            onClick={() => setConfirmSyncOpen(true)}
-            className="ent-btn-primary"
-          >
-            <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
-            <span>
-              {syncing ? 'กำลังซิงก์ข้อมูลจาก HOSOffice...' : 'ซิงก์ข้อมูลบุคลากรจาก HOSOffice'}
-            </span>
-          </button>
+          <>
+            <PageHelpAction
+              guideKey="personnel"
+              activeTabKey={tab}
+              userRole={userRole}
+              onNavigate={onNavigate}
+            />
+            <button
+              type="button"
+              disabled={syncing}
+              onClick={() => setConfirmSyncOpen(true)}
+              className="ent-btn-primary"
+            >
+              <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
+              <span>
+                {syncing ? 'กำลังซิงก์ข้อมูลจาก HOSOffice...' : 'ซิงก์ข้อมูลบุคลากรจาก HOSOffice'}
+              </span>
+            </button>
+          </>
         }
       />
 

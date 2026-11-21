@@ -154,7 +154,7 @@ async function getMysqlPool(): Promise<mysql.Pool> {
  * Translates MySQL DDL into SQLite-compatible relational DDL when executing migrations
  * in the local SQLite relational engine (strictly preserving all tables, columns, FKs, and unique constraints).
  */
-function convertMysqlDdlToSqlite(sql: string): string {
+function convertMysqlDdlToSqliteStatements(sql: string): string[] {
   const statements = sql
     .split(';')
     .map((s) => s.trim())
@@ -203,6 +203,13 @@ function convertMysqlDdlToSqlite(sql: string): string {
       }
 
       converted.push(`CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${keepLines.join(',\n  ')}\n);`);
+    } else if (/^ALTER\s+TABLE\b/i.test(stmt)) {
+      const cleanedAlter = stmt
+        .replace(/\bTINYINT\(1\)/gi, 'INTEGER')
+        .replace(/\bDATETIME\b/gi, 'TEXT')
+        .replace(/\bDATE\b/gi, 'TEXT')
+        .trim();
+      converted.push(cleanedAlter + ';');
     } else {
       const cleanedStmt = stmt
         .replace(/ON\s+DUPLICATE\s+KEY\s+UPDATE[\s\S]*$/i, '')
@@ -214,7 +221,7 @@ function convertMysqlDdlToSqlite(sql: string): string {
     }
   }
 
-  return [...converted, ...extraIndexes].join('\n');
+  return [...converted, ...extraIndexes];
 }
 
 export async function dbQuery<T = Record<string, unknown>>(
@@ -419,20 +426,37 @@ export async function runMigrations(): Promise<{ applied: string[]; totalTables:
   }
 
   const cfg = loadConfig();
-  const migrationFile = path.resolve(process.cwd(), 'database/migrations/001_initial_schema.sql');
-  const rawSql = fs.readFileSync(migrationFile, 'utf8');
-  const checksum = crypto.createHash('sha256').update(rawSql).digest('hex');
+  const migrationsDir = path.resolve(process.cwd(), 'database/migrations');
+  const migrationFiles = fs.existsSync(migrationsDir)
+    ? fs
+        .readdirSync(migrationsDir)
+        .filter((f) => f.endsWith('.sql'))
+        .sort()
+    : [];
   const applied: string[] = [];
 
   if (cfg.dbEngine === 'mysql') {
     const pool = await getMysqlPool();
+    const appliedSet = new Set<string>();
     try {
-      const [existing] = await pool.execute('SELECT version FROM schema_migrations WHERE version = ?', ['001']);
-      if ((existing as unknown[]).length > 0) {
-        return { applied: [], totalTables: 21 };
+      const [rows] = await pool.execute('SELECT version, filename FROM schema_migrations');
+      for (const r of rows as Array<{ version: string; filename: string }>) {
+        appliedSet.add(String(r.version));
+        appliedSet.add(String(r.filename));
       }
     } catch {
       // schema_migrations does not exist yet
+    }
+
+    const pendingFiles = migrationFiles.filter((file) => {
+      const match = file.match(/^(\d+)_/);
+      const ver = match ? match[1] : file;
+      return !appliedSet.has(ver) && !appliedSet.has(file);
+    });
+
+    if (pendingFiles.length === 0) {
+      const [tbls] = await pool.query('SHOW TABLES');
+      return { applied: [], totalTables: (tbls as unknown[]).length };
     }
 
     const isExplicitMigrateCli = process.argv.some((arg) => arg.includes('cli-migrate'));
@@ -440,41 +464,105 @@ export async function runMigrations(): Promise<{ applied: string[]; totalTables:
       console.log(
         '[Sam_Att DB] Production safety policy: Skipping automatic DDL migration during server startup. Run `npm run db:migrate` with admin approval when schema changes are needed.'
       );
-      return { applied: [], totalTables: 21 };
+      const [tbls] = await pool.query('SHOW TABLES');
+      return { applied: [], totalTables: (tbls as unknown[]).length };
     }
 
-    const statements = rawSql
-      .split(';')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-    for (const stmt of statements) {
-      await pool.query(stmt);
-    }
-    const [existingAfter] = await pool.execute('SELECT version FROM schema_migrations WHERE version = ?', ['001']);
-    if ((existingAfter as unknown[]).length === 0) {
-      await pool.execute(
-        'INSERT INTO schema_migrations (version, filename, checksum) VALUES (?, ?, ?)',
-        ['001', '001_initial_schema.sql', checksum]
+    for (const file of pendingFiles) {
+      const match = file.match(/^(\d+)_/);
+      const ver = match ? match[1] : file;
+      const rawSql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+      const checksum = crypto.createHash('sha256').update(rawSql).digest('hex');
+
+      const statements = rawSql
+        .split(';')
+        .map((s) =>
+          s
+            .split('\n')
+            .filter((line) => !line.trim().startsWith('--'))
+            .join('\n')
+            .trim()
+        )
+        .filter((s) => s.length > 0);
+
+      for (const stmt of statements) {
+        try {
+          await pool.query(stmt);
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const errno = (err as { errno?: number })?.errno;
+          if (/^ALTER\s+TABLE\b/i.test(stmt) && (errno === 1060 || /Duplicate column name/i.test(msg))) {
+            continue;
+          }
+          throw err;
+        }
+      }
+
+      const [existingAfter] = await pool.execute(
+        'SELECT version FROM schema_migrations WHERE version = ?',
+        [ver]
       );
-      applied.push('001_initial_schema.sql');
+      if ((existingAfter as unknown[]).length === 0) {
+        await pool.execute(
+          'INSERT INTO schema_migrations (version, filename, checksum) VALUES (?, ?, ?)',
+          [ver, file, checksum]
+        );
+        applied.push(file);
+      }
     }
-    return { applied, totalTables: 21 };
+
+    const [tbls] = await pool.query('SHOW TABLES');
+    return { applied, totalTables: (tbls as unknown[]).length };
   }
 
   const db = getSqliteInstance();
-  const sqliteSql = convertMysqlDdlToSqlite(rawSql);
-  db.exec(sqliteSql);
-
-  const existing = await dbQuery<{ version: string }>(
-    'SELECT version FROM schema_migrations WHERE version = ?',
-    ['001']
-  );
-  if (existing.length === 0) {
-    await dbExecute(
-      'INSERT INTO schema_migrations (version, filename, checksum) VALUES (?, ?, ?)',
-      ['001', '001_initial_schema.sql', checksum]
+  const appliedSet = new Set<string>();
+  try {
+    const existingRows = await dbQuery<{ version: string; filename: string }>(
+      'SELECT version, filename FROM schema_migrations'
     );
-    applied.push('001_initial_schema.sql');
+    for (const r of existingRows) {
+      appliedSet.add(String(r.version));
+      appliedSet.add(String(r.filename));
+    }
+  } catch {
+    // schema_migrations does not exist yet
+  }
+
+  for (const file of migrationFiles) {
+    const match = file.match(/^(\d+)_/);
+    const ver = match ? match[1] : file;
+    if (appliedSet.has(ver) || appliedSet.has(file)) {
+      continue;
+    }
+
+    const rawSql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
+    const checksum = crypto.createHash('sha256').update(rawSql).digest('hex');
+    const sqliteStatements = convertMysqlDdlToSqliteStatements(rawSql);
+
+    for (const stmt of sqliteStatements) {
+      try {
+        db.exec(stmt);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/^ALTER\s+TABLE\b/i.test(stmt) && /duplicate column name/i.test(msg)) {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    const existing = await dbQuery<{ version: string }>(
+      'SELECT version FROM schema_migrations WHERE version = ?',
+      [ver]
+    );
+    if (existing.length === 0) {
+      await dbExecute(
+        'INSERT INTO schema_migrations (version, filename, checksum) VALUES (?, ?, ?)',
+        [ver, file, checksum]
+      );
+      applied.push(file);
+    }
   }
 
   const tables = await dbQuery<{ name: string }>(
@@ -506,6 +594,24 @@ export async function ensureBaselineSystemCatalog(): Promise<void> {
     'ALTER TABLE sync_runs ADD COLUMN matched_in_range_count INT NOT NULL DEFAULT 0',
     'ALTER TABLE sync_runs ADD COLUMN filtered_out_count INT NOT NULL DEFAULT 0',
     'ALTER TABLE sync_runs ADD COLUMN failed_events_count INT NOT NULL DEFAULT 0',
+    // Migration 002 additive columns (Attendance Matching Engine ATT-01..ATT-16)
+    'ALTER TABLE shifts ADD COLUMN checkin_window_after_min INT NOT NULL DEFAULT 240',
+    'ALTER TABLE shifts ADD COLUMN checkout_window_before_min INT NOT NULL DEFAULT 180',
+    "ALTER TABLE attendance ADD COLUMN attendance_status VARCHAR(32) NOT NULL DEFAULT 'COMPLETE'",
+    'ALTER TABLE attendance ADD COLUMN evaluated_start_time VARCHAR(32) NULL',
+    'ALTER TABLE attendance ADD COLUMN evaluated_end_time VARCHAR(32) NULL',
+    'ALTER TABLE attendance ADD COLUMN early_checkout_indicator TINYINT(1) NOT NULL DEFAULT 0',
+    'ALTER TABLE attendance ADD COLUMN early_checkout_minutes INT NOT NULL DEFAULT 0',
+    'ALTER TABLE attendance ADD COLUMN review_reason VARCHAR(500) NULL',
+    'ALTER TABLE attendance ADD COLUMN reviewed_by VARCHAR(64) NULL',
+    'ALTER TABLE attendance ADD COLUMN reviewed_at DATETIME NULL',
+    'ALTER TABLE attendance ADD COLUMN matching_rule VARCHAR(128) NULL',
+    'ALTER TABLE attendance ADD COLUMN processed_at DATETIME NULL',
+    'ALTER TABLE attendance ADD COLUMN leave_id INT NULL',
+    'ALTER TABLE attendance ADD COLUMN leave_type VARCHAR(32) NULL',
+    'ALTER TABLE attendance ADD COLUMN leave_start_time VARCHAR(5) NULL',
+    'ALTER TABLE attendance ADD COLUMN leave_end_time VARCHAR(5) NULL',
+    'ALTER TABLE attendance_notes ADD COLUMN needs_re_review TINYINT(1) NOT NULL DEFAULT 0',
   ];
   for (const alterSql of additiveAlterStatements) {
     try {
@@ -562,7 +668,82 @@ export async function ensureBaselineSystemCatalog(): Promise<void> {
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
+    await dbExecute(`
+      CREATE TABLE IF NOT EXISTS attendance_raw_scan_usage (
+        raw_scan_id INT NOT NULL PRIMARY KEY,
+        attendance_id INT NOT NULL,
+        person_id VARCHAR(64) NOT NULL,
+        work_date DATE NOT NULL,
+        shift_assignment_id INT NULL,
+        shift_code VARCHAR(32) NULL,
+        usage_role VARCHAR(16) NOT NULL,
+        matched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_arsu_attendance (attendance_id),
+        INDEX idx_arsu_person_date (person_id, work_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await dbExecute(`
+      CREATE TABLE IF NOT EXISTS attendance_leaves (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        person_id VARCHAR(64) NOT NULL,
+        work_date DATE NOT NULL,
+        shift_assignment_id INT NULL,
+        leave_type VARCHAR(32) NOT NULL,
+        leave_start_time VARCHAR(5) NOT NULL,
+        leave_end_time VARCHAR(5) NOT NULL,
+        reason VARCHAR(500) NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+        created_by VARCHAR(64) NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_att_leaves_person_date (person_id, work_date, status)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await dbExecute(`
+      CREATE TABLE IF NOT EXISTS attendance_settings (
+        setting_key VARCHAR(64) NOT NULL PRIMARY KEY,
+        setting_value VARCHAR(255) NOT NULL,
+        description VARCHAR(500) NULL,
+        updated_by VARCHAR(64) NOT NULL DEFAULT 'system',
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await dbExecute(`
+      CREATE TABLE IF NOT EXISTS attendance_matching_history (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        attendance_id INT NOT NULL,
+        person_id VARCHAR(64) NOT NULL,
+        work_date DATE NOT NULL,
+        shift_assignment_id INT NULL,
+        previous_check_in_raw_scan_id INT NULL,
+        new_check_in_raw_scan_id INT NULL,
+        previous_check_out_raw_scan_id INT NULL,
+        new_check_out_raw_scan_id INT NULL,
+        previous_status VARCHAR(32) NULL,
+        new_status VARCHAR(32) NOT NULL,
+        previous_attendance_status VARCHAR(32) NULL,
+        new_attendance_status VARCHAR(32) NOT NULL,
+        previous_late_minutes INT NOT NULL DEFAULT 0,
+        new_late_minutes INT NOT NULL DEFAULT 0,
+        previous_early_checkout_minutes INT NOT NULL DEFAULT 0,
+        new_early_checkout_minutes INT NOT NULL DEFAULT 0,
+        previous_review_status VARCHAR(32) NULL,
+        new_review_status VARCHAR(32) NOT NULL,
+        matching_rule VARCHAR(128) NULL,
+        change_reason VARCHAR(500) NULL,
+        rule_version VARCHAR(64) NOT NULL,
+        triggered_by VARCHAR(64) NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_amh_attendance (attendance_id),
+        INDEX idx_amh_person_date (person_id, work_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
   }
+
+  await dbExecute(
+    `INSERT IGNORE INTO attendance_settings (setting_key, setting_value, description, updated_by)
+     VALUES ('half_day_pre_checkin_window_minutes', '60', 'ช่วงเวลารับสแกนเข้าก่อนเวลาเริ่มปฏิบัติงานหลังลาครึ่งวันเช้า (นาที เช่น 30, 60, 120)', 'system_baseline')`
+  );
 
   const baselineRules = [
     {

@@ -15,7 +15,7 @@
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { Download, Eye, Send, FileText } from 'lucide-react';
-import { apiRequest, downloadLatenessCsv, ApiClientError } from '../services/api.ts';
+import { apiRequest, downloadLatenessCsv, ApiClientError, type UserRole } from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
 import {
   PageHeader,
@@ -29,6 +29,8 @@ import {
   ProgressDialog,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
+import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
+import type { NavViewKey } from '../components/layout/Sidebar.tsx';
 import {
   formatThaiDate,
   formatThaiDateTime,
@@ -37,7 +39,15 @@ import {
   type PeriodMode,
 } from '../utils/thaiFormat.ts';
 
-export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
+export function ReportsView({
+  mode,
+  userRole,
+  onNavigate,
+}: {
+  mode: 'reports' | 'hosofficePush';
+  userRole?: UserRole;
+  onNavigate?: (view: NavViewKey) => void;
+}) {
   const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
 
   const [periodMode, setPeriodMode] = useState<PeriodMode>('MONTHLY');
@@ -262,6 +272,11 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
           subtitle="ตรวจสอบความสมบูรณ์ของข้อมูลด้วยโหมดจำลอง (Dry-Run Preview) ก่อนส่งข้อมูลจริง โดยระบบล็อกการเขียนข้อมูลจริงไว้จนกว่าจะได้รับการอนุมัติโครงสร้างตารางปลายทาง"
           actions={
             <>
+              <PageHelpAction
+                guideKey="hosofficePush"
+                userRole={userRole}
+                onNavigate={onNavigate}
+              />
               <button
                 type="button"
                 onClick={handlePreviewHosOfficePush}
@@ -462,14 +477,21 @@ export function ReportsView({ mode }: { mode: 'reports' | 'hosofficePush' }) {
         title="รายงานและสถิติการมาสายประจำงวด"
         subtitle="สรุปสถิติการมาสายแยกตามจำนวนคนไม่ซ้ำและจำนวนครั้งที่มาสาย พร้อมเปรียบเทียบตามกลุ่มงานและส่งออกไฟล์ CSV สำหรับงานบริหารบุคคล"
         actions={
-          <button
-            type="button"
-            onClick={handleExportCsv}
-            className="ent-btn-primary"
-          >
-            <Download className="w-4 h-4" />
-            <span>ดาวน์โหลดรายงาน CSV</span>
-          </button>
+          <>
+            <PageHelpAction
+              guideKey="reports"
+              userRole={userRole}
+              onNavigate={onNavigate}
+            />
+            <button
+              type="button"
+              onClick={handleExportCsv}
+              className="ent-btn-primary"
+            >
+              <Download className="w-4 h-4" />
+              <span>ดาวน์โหลดรายงาน CSV</span>
+            </button>
+          </>
         }
       />
 

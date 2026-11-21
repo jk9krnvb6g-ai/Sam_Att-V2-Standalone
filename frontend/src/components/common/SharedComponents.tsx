@@ -42,8 +42,8 @@ export function PageHeader({
   actions?: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3.5 sm:gap-4 pb-4 sm:pb-5 border-b border-[#E7E2F0]">
-      <div className="space-y-1.5 min-w-0">
+    <div className="flex flex-col xl:flex-row xl:items-start xl:justify-between gap-3.5 sm:gap-4 pb-4 sm:pb-5 border-b border-[#E7E2F0]">
+      <div className="space-y-1.5 min-w-0 flex-1">
         {category && (
           <div className="text-[12.5px] sm:text-[13px] font-semibold text-[#7359B4] tracking-normal">
             {category}
@@ -59,7 +59,7 @@ export function PageHeader({
         )}
       </div>
       {actions && (
-        <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2.5 w-full lg:w-auto shrink-0 [&>button]:w-full sm:[&>button]:w-auto [&>div]:w-full sm:[&>div]:w-auto">
+        <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center xl:justify-end gap-2.5 w-full xl:w-auto xl:max-w-[56%] [&>button]:w-full sm:[&>button]:w-auto [&>div]:w-full sm:[&>div]:w-auto">
           {actions}
         </div>
       )}

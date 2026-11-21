@@ -51,7 +51,12 @@ import {
   Upload,
   Edit3,
 } from 'lucide-react';
-import { apiRequest, ApiClientError, downloadShiftImportTemplateXlsx } from '../services/api.ts';
+import {
+  apiRequest,
+  ApiClientError,
+  downloadShiftImportTemplateXlsx,
+  type UserRole,
+} from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
 import {
   SortableHeader,
@@ -63,6 +68,8 @@ import {
   RequiredMark,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
+import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
+import type { NavViewKey } from '../components/layout/Sidebar.tsx';
 import {
   formatThaiDate,
   formatThaiDateTime,
@@ -301,7 +308,13 @@ function buildDatesFromRange(
   return result;
 }
 
-export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
+export function ShiftsView({
+  userRole = 'ADMIN',
+  onNavigate,
+}: {
+  userRole?: UserRole;
+  onNavigate?: (view: NavViewKey) => void;
+}) {
   const canEditShifts = userRole === 'ADMIN' || userRole === 'RESPONSIBLE_STAFF';
   const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
 
@@ -1936,20 +1949,32 @@ export function ShiftsView({ userRole = 'ADMIN' }: { userRole?: string }) {
       {/* =====================================================================
           ส่วนหัวหลักของโมดูล (Lavender & Clean White Government Workforce Header)
          ===================================================================== */}
-      <div className="bg-white border border-violet-200/90 rounded-xl p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-        <div className="space-y-1">
-          <div className="text-[12.5px] font-semibold text-violet-700">
-            ระบบบริหารตารางเวรและเวลาปฏิบัติงานบุคลากร · โรงพยาบาลสามชุก
+      <div className="bg-white border border-violet-200/90 rounded-xl p-4 sm:p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+          <div className="space-y-1 min-w-0 flex-1">
+            <div className="text-[12.5px] font-semibold text-violet-700">
+              ระบบบริหารตารางเวรและเวลาปฏิบัติงานบุคลากร · โรงพยาบาลสามชุก
+            </div>
+            <h1 className="text-[20px] sm:text-[23px] font-bold text-slate-900 tracking-tight leading-snug">
+              ตารางเวรและแม่แบบกะทำงาน
+            </h1>
+            <p className="text-[13.5px] text-slate-600 leading-relaxed">
+              จัดตารางเวรรายเดือนและรายสัปดาห์ เพิ่มเวรรายบุคคลหรือหลายคนพร้อมตรวจสอบความซ้ำซ้อนก่อนบันทึกจริง
+            </p>
           </div>
-          <h1 className="text-[20px] sm:text-[23px] font-bold text-slate-900 tracking-tight">
-            ตารางเวรและแม่แบบกะทำงาน
-          </h1>
-          <p className="text-[13.5px] text-slate-600">
-            จัดตารางเวรรายเดือนและรายสัปดาห์ เพิ่มเวรรายบุคคลหรือหลายคนพร้อมตรวจสอบความซ้ำซ้อนก่อนบันทึกจริง
-          </p>
+
+          <div className="shrink-0">
+            <PageHelpAction
+              guideKey="shifts"
+              activeTabKey={activeTab}
+              userRole={userRole}
+              onNavigate={onNavigate}
+              compact
+            />
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+        <div className="pt-3.5 border-t border-violet-100 flex flex-wrap items-center gap-2.5">
           {activeTab === 'ASSIGN_WORKSPACE' ? (
             <button
               type="button"

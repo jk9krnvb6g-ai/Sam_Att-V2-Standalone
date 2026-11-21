@@ -35,12 +35,18 @@ import {
   ProgressDialog,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
+import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
+import type { NavViewKey } from '../components/layout/Sidebar.tsx';
 import { formatThaiDateTime } from '../utils/thaiFormat.ts';
 
 export function AdminViews({
   mode,
+  userRole,
+  onNavigate,
 }: {
   mode: 'users' | 'auditLogs' | 'deployment';
+  userRole?: UserRole;
+  onNavigate?: (view: NavViewKey) => void;
 }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ code?: string; message: string } | null>(null);
@@ -195,6 +201,13 @@ export function AdminViews({
           category="ระบบและผู้ดูแลส่วนกลาง"
           title="จัดการบัญชีผู้ใช้งานและสิทธิ์การเข้าถึง"
           subtitle="กำหนดสิทธิ์การใช้งาน 3 ระดับ (ผู้ดูแลระบบ, เจ้าหน้าที่งานบุคคล, บุคลากรทั่วไป) และเชื่อมโยงบัญชีเข้ากับรหัสบุคลากรของโรงพยาบาล"
+          actions={
+            <PageHelpAction
+              guideKey="adminUsers"
+              userRole={userRole}
+              onNavigate={onNavigate}
+            />
+          }
         />
 
         <ErrorBanner error={error} onRetry={loadData} />
@@ -400,20 +413,27 @@ export function AdminViews({
           title="ประวัติการใช้งานและบันทึกความปลอดภัย (Audit Logs)"
           subtitle="บันทึกทุกกิจกรรมการเข้าสู่ระบบ การตรวจสอบเวลา การซิงก์ข้อมูล และการอัปเดตระบบ (พร้อมปิดบังรหัสผ่านอัตโนมัติ)"
           actions={
-            <div className="relative w-full sm:w-72">
-              <Search className="w-4 h-4 text-[#596579] absolute left-3.5 top-3" aria-hidden="true" />
-              <input
-                type="text"
-                aria-label="ค้นหาประวัติการใช้งาน"
-                value={logSearch}
-                onChange={(e) => {
-                  setLogSearch(e.target.value);
-                  setPage(1);
-                }}
-                placeholder="ค้นหาชื่อผู้ใช้, กิจกรรม, รหัสอ้างอิง..."
-                className="ent-input pl-10 pr-4 w-full"
+            <>
+              <PageHelpAction
+                guideKey="systemLogs"
+                userRole={userRole}
+                onNavigate={onNavigate}
               />
-            </div>
+              <div className="relative w-full sm:w-72">
+                <Search className="w-4 h-4 text-[#596579] absolute left-3.5 top-3" aria-hidden="true" />
+                <input
+                  type="text"
+                  aria-label="ค้นหาประวัติการใช้งาน"
+                  value={logSearch}
+                  onChange={(e) => {
+                    setLogSearch(e.target.value);
+                    setPage(1);
+                  }}
+                  placeholder="ค้นหาชื่อผู้ใช้, กิจกรรม, รหัสอ้างอิง..."
+                  className="ent-input pl-10 pr-4 w-full"
+                />
+              </div>
+            </>
           }
         />
 
@@ -619,6 +639,13 @@ export function AdminViews({
         category="ระบบและผู้ดูแลส่วนกลาง"
         title="อัปเดตระบบ Sam_Att"
         subtitle="อัปเดตระบบ Sam_Att V2 Standalone อัตโนมัติด้วยปุ่มเดียว (ดึงโค้ดล่าสุด · สำรองฐานข้อมูล · Build · รีสตาร์ทเฉพาะเซอร์วิส Sam_Att บนพอร์ต 4101 โดยไม่กระทบ Procurement)"
+        actions={
+          <PageHelpAction
+            guideKey="deployment"
+            userRole={userRole}
+            onNavigate={onNavigate}
+          />
+        }
       />
 
       <ErrorBanner error={error} onRetry={loadData} />

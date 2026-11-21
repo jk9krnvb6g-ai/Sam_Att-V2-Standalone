@@ -47,6 +47,8 @@ import { HrAttendanceView } from './pages/HrAttendanceView.tsx';
 import { RawScansView } from './pages/RawScansView.tsx';
 import { ReportsView } from './pages/ReportsView.tsx';
 import { AdminViews } from './pages/AdminViews.tsx';
+import { WorkflowGuideView } from './pages/WorkflowGuideView.tsx';
+import { UserManualView } from './pages/UserManualView.tsx';
 
 export default function App() {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -232,18 +234,99 @@ export default function App() {
               onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
             />
           )}
-          {activeView === 'myAttendance' && <MyAttendanceView user={user} />}
-          {activeView === 'personnel' && <PersonnelView />}
-          {activeView === 'shifts' && <ShiftsView userRole={user.role} />}
-          {activeView === 'hrAttendance' && <HrAttendanceView mode="management" />}
-          {activeView === 'attendanceReview' && <HrAttendanceView mode="review" />}
-          {activeView === 'rawScans' && <RawScansView mode="rawScans" user={user} />}
-          {activeView === 'scanners' && <RawScansView mode="scanners" user={user} />}
-          {activeView === 'reports' && <ReportsView mode="reports" />}
-          {activeView === 'hosofficePush' && <ReportsView mode="hosofficePush" />}
-          {activeView === 'adminUsers' && <AdminViews mode="users" />}
-          {activeView === 'systemLogs' && <AdminViews mode="auditLogs" />}
-          {activeView === 'deployment' && <AdminViews mode="deployment" />}
+          {activeView === 'myAttendance' && (
+            <MyAttendanceView
+              user={user}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
+          {activeView === 'personnel' && (
+            <PersonnelView
+              userRole={user.role}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
+          {activeView === 'shifts' && (
+            <ShiftsView
+              userRole={user.role}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
+          {activeView === 'hrAttendance' && (
+            <HrAttendanceView
+              mode="management"
+              userRole={user.role}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
+          {activeView === 'attendanceReview' && (
+            <HrAttendanceView
+              mode="review"
+              userRole={user.role}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
+          {activeView === 'rawScans' && (
+            <RawScansView
+              mode="rawScans"
+              user={user}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
+          {activeView === 'scanners' && (
+            <RawScansView
+              mode="scanners"
+              user={user}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
+          {activeView === 'reports' && (
+            <ReportsView
+              mode="reports"
+              userRole={user.role}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
+          {activeView === 'hosofficePush' && (
+            <ReportsView
+              mode="hosofficePush"
+              userRole={user.role}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
+          {activeView === 'adminUsers' && (
+            <AdminViews
+              mode="users"
+              userRole={user.role}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
+          {activeView === 'systemLogs' && (
+            <AdminViews
+              mode="auditLogs"
+              userRole={user.role}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
+          {activeView === 'deployment' && (
+            <AdminViews
+              mode="deployment"
+              userRole={user.role}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
+          {activeView === 'workflowGuide' && (
+            <WorkflowGuideView
+              user={user}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
+          {activeView === 'userManual' && (
+            <UserManualView
+              user={user}
+              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+            />
+          )}
         </main>
       </div>
 
@@ -336,7 +419,7 @@ export default function App() {
                 className="col-span-2 flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-[13px] font-semibold text-[#7359B4] bg-[#F3EEFC]"
               >
                 <Grid className="w-4.5 h-4.5" />
-                <span>ข้อมูลผู้ใช้</span>
+                <span>เมนู / คู่มือ</span>
               </button>
             </>
           )}

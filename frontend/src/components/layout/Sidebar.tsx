@@ -17,6 +17,8 @@ import {
   ChevronRight,
   X,
   HeartHandshake,
+  Workflow,
+  BookOpen,
 } from 'lucide-react';
 import { type AuthUser, type UserRole } from '../../services/api.ts';
 
@@ -33,7 +35,9 @@ export type NavViewKey =
   | 'hosofficePush'
   | 'adminUsers'
   | 'systemLogs'
-  | 'deployment';
+  | 'deployment'
+  | 'workflowGuide'
+  | 'userManual';
 
 interface SidebarNavItem {
   key: NavViewKey;
@@ -165,6 +169,26 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
       },
     ],
   },
+  {
+    id: 'group_help',
+    title: 'ช่วยเหลือและคู่มือการใช้งาน',
+    items: [
+      {
+        key: 'workflowGuide',
+        label: 'ผังขั้นตอนการทำงาน',
+        subLabel: 'ภาพรวมลำดับงานและผังขั้นตอนทั้งระบบ',
+        roles: ['GENERAL_USER', 'RESPONSIBLE_STAFF', 'ADMIN'],
+        icon: Workflow,
+      },
+      {
+        key: 'userManual',
+        label: 'คู่มือการใช้งาน',
+        subLabel: 'ศูนย์รวมคู่มือแบบทีละขั้นและคำถามที่พบบ่อย',
+        roles: ['GENERAL_USER', 'RESPONSIBLE_STAFF', 'ADMIN'],
+        icon: BookOpen,
+      },
+    ],
+  },
 ];
 
 export const ALLOWED_NAV_VIEWS: readonly NavViewKey[] = SIDEBAR_GROUPS.flatMap((g) =>
@@ -232,6 +256,7 @@ export function Sidebar({
     group_hr: true,
     group_scanners: true,
     group_system: true,
+    group_help: true,
   });
 
   function toggleGroup(id: string) {

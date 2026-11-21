@@ -27,6 +27,8 @@ import {
   TableEmptyState,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
+import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
+import { type NavViewKey } from '../components/layout/Sidebar.tsx';
 import {
   formatThaiDate,
   formatThaiDateTime,
@@ -35,7 +37,13 @@ import {
   type PeriodMode,
 } from '../utils/thaiFormat.ts';
 
-export function MyAttendanceView({ user }: { user: AuthUser }) {
+export function MyAttendanceView({
+  user,
+  onNavigate,
+}: {
+  user: AuthUser;
+  onNavigate?: (view: NavViewKey) => void;
+}) {
   const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
 
   const [periodMode, setPeriodMode] = useState<PeriodMode>('MONTHLY');
@@ -144,6 +152,14 @@ export function MyAttendanceView({ user }: { user: AuthUser }) {
         category="ข้อมูลส่วนบุคคล"
         title="เวลาปฏิบัติงานและตารางเวรของฉัน"
         subtitle={`แสดงข้อมูลการลงเวลาเฉพาะของ ${user.displayName} (รหัสบุคลากร: ${user.approvedPersonId || 'ยังไม่ได้ผูกชื่อบุคลากร'})`}
+        actions={
+          <PageHelpAction
+            guideKey="myAttendance"
+            activeTabKey={activeTab}
+            userRole={user.role}
+            onNavigate={onNavigate}
+          />
+        }
       />
 
       <PeriodFilterBar
@@ -269,6 +285,7 @@ export function MyAttendanceView({ user }: { user: AuthUser }) {
                       <AttendanceStatusText
                         status={row.status}
                         secondaryFlags={row.secondary_flags}
+                        earlyCheckoutMinutes={row.early_checkout_minutes}
                       />
                     </div>
 
@@ -396,7 +413,13 @@ export function MyAttendanceView({ user }: { user: AuthUser }) {
                           <AttendanceStatusText
                             status={row.status}
                             secondaryFlags={row.secondary_flags}
+                            earlyCheckoutMinutes={row.early_checkout_minutes}
                           />
+                          {row.leave_type && (
+                            <div className="text-[12px] text-[#7359B4] mt-0.5">
+                              ลาบางส่วน ({row.leave_start_time}–{row.leave_end_time} น.)
+                            </div>
+                          )}
                         </td>
                         <td className="py-4 px-4">
                           <ReviewStatusLabel status={row.review_status} />
@@ -530,6 +553,20 @@ export function MyAttendanceView({ user }: { user: AuthUser }) {
                     {r.in_out_mode === 0 ? 'สแกนเข้างาน (โหมด 0)' : 'สแกนออกงาน (โหมด 1)'} · รหัสสแกน{' '}
                     <span className="font-mono">{r.enroll_number}</span>
                   </div>
+                  <div className="text-[12.5px] font-medium text-[#596579]">
+                    สถานะการใช้จับคู่:{' '}
+                    {r.usage_role === 'CHECK_IN' ? (
+                      <span className="text-[#047857] font-semibold">
+                        ใช้เป็นสแกนเข้า ({r.used_shift_code || `เวร #${r.used_attendance_id}`})
+                      </span>
+                    ) : r.usage_role === 'CHECK_OUT' ? (
+                      <span className="text-[#2563EB] font-semibold">
+                        ใช้เป็นสแกนออก ({r.used_shift_code || `เวร #${r.used_attendance_id}`})
+                      </span>
+                    ) : (
+                      <span>สแกนเพิ่มเติม (ไม่ถูกใช้จับคู่)</span>
+                    )}
+                  </div>
                 </div>
               ))
             )}
@@ -544,7 +581,7 @@ export function MyAttendanceView({ user }: { user: AuthUser }) {
                   <th className="py-3.5 px-5 font-semibold">เครื่องสแกน</th>
                   <th className="py-3.5 px-5 font-semibold">รหัสลายนิ้วมือ</th>
                   <th className="py-3.5 px-5 font-semibold">ประเภทการสแกน</th>
-                  <th className="py-3.5 px-5 font-semibold">โหมดการยืนยันตัวตน</th>
+                  <th className="py-3.5 px-5 font-semibold">การใช้จับคู่กับตารางเวร</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#E7E2E5]">
@@ -566,10 +603,23 @@ export function MyAttendanceView({ user }: { user: AuthUser }) {
                       </td>
                       <td className="py-4 px-5 font-mono tabular-nums text-[#273244]">{r.enroll_number}</td>
                       <td className="py-4 px-5 font-medium text-[#273244]">
-                        {r.in_out_mode === 0 ? 'สแกนเข้างาน (โหมด 0)' : 'สแกนออกงาน (โหมด 1)'}
+                        <div>{r.in_out_mode === 0 ? 'สแกนเข้างาน (โหมด 0)' : 'สแกนออกงาน (โหมด 1)'}</div>
+                        <div className="text-[12px] font-mono text-[#596579]">
+                          วิธีสแกน={r.verify_mode} · รหัสงาน={r.work_code}
+                        </div>
                       </td>
-                      <td className="py-4 px-5 font-mono tabular-nums text-[#596579]">
-                        วิธีสแกน={r.verify_mode} · รหัสงาน={r.work_code}
+                      <td className="py-4 px-5 text-[13.5px]">
+                        {r.usage_role === 'CHECK_IN' ? (
+                          <span className="text-[#047857] font-semibold">
+                            ใช้เป็นสแกนเข้า ({r.used_shift_code || `เวร #${r.used_attendance_id}`})
+                          </span>
+                        ) : r.usage_role === 'CHECK_OUT' ? (
+                          <span className="text-[#2563EB] font-semibold">
+                            ใช้เป็นสแกนออก ({r.used_shift_code || `เวร #${r.used_attendance_id}`})
+                          </span>
+                        ) : (
+                          <span className="text-[#596579]">สแกนเพิ่มเติม (ไม่ถูกใช้จับคู่)</span>
+                        )}
                       </td>
                     </tr>
                   ))
@@ -605,16 +655,31 @@ export function MyAttendanceView({ user }: { user: AuthUser }) {
                   {selectedRowModal.row.scheduled_start} ถึง {selectedRowModal.row.scheduled_end}
                 </div>
               </div>
+              {selectedRowModal.row.leave_type && (
+                <div>
+                  <div className="text-[13px] text-[#596579]">ช่วงเวลาที่ใช้ประเมินจริง (หักช่วงลาครึ่งวัน)</div>
+                  <div className="font-mono font-semibold text-[#7359B4] text-[14px] mt-0.5">
+                    {selectedRowModal.row.evaluated_start_time} ถึง {selectedRowModal.row.evaluated_end_time} (ลา{' '}
+                    {selectedRowModal.row.leave_start_time}–{selectedRowModal.row.leave_end_time} น.)
+                  </div>
+                </div>
+              )}
               <div>
-                <div className="text-[13px] text-[#596579]">สถานะการลงเวลา / นาทีสาย</div>
-                <div className="mt-1 flex items-center gap-3">
+                <div className="text-[13px] text-[#596579]">สถานะการลงเวลา / นาทีสาย / ออกก่อนเวลา</div>
+                <div className="mt-1 flex flex-wrap items-center gap-3">
                   <AttendanceStatusText
                     status={selectedRowModal.row.status}
                     secondaryFlags={selectedRowModal.row.secondary_flags}
+                    earlyCheckoutMinutes={selectedRowModal.row.early_checkout_minutes}
                   />
                   {selectedRowModal.row.late_minutes > 0 && (
                     <span className="font-mono font-bold text-[#B45309]">
                       (สาย {selectedRowModal.row.late_minutes} นาที)
+                    </span>
+                  )}
+                  {Number(selectedRowModal.row.early_checkout_minutes || 0) > 0 && (
+                    <span className="font-mono font-bold text-[#B91C1C]">
+                      (ออกก่อนเวลา {selectedRowModal.row.early_checkout_minutes} นาที)
                     </span>
                   )}
                 </div>

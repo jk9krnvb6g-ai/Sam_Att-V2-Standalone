@@ -40,6 +40,8 @@ import {
   ProgressDialog,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
+import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
+import type { NavViewKey } from '../components/layout/Sidebar.tsx';
 import {
   formatThaiDate,
   formatThaiDateTime,
@@ -100,9 +102,11 @@ function formatFilterStrategyLabel(strategy?: string | null): string {
 export function RawScansView({
   mode,
   user,
+  onNavigate,
 }: {
   mode: 'rawScans' | 'scanners';
   user: AuthUser;
+  onNavigate?: (view: NavViewKey) => void;
 }) {
   const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
   const [rawScans, setRawScans] = useState<any[]>([]);
@@ -616,19 +620,26 @@ export function RawScansView({
         }
         subtitle="รับข้อมูลเหตุการณ์สแกน 6 ฟิลด์จากโปรแกรมอ่านเครื่องสแกนเดิมของโรงพยาบาล (ข้อมูลต้นฉบับถูกคุ้มครองแบบห้ามแก้ไขหรือลบ)"
         actions={
-          <button
-            type="button"
-            disabled={syncingHardware || (mode === 'scanners' && !syncRangeValidation.valid)}
-            onClick={handleRequestOpenSyncConfirm}
-            className="ent-btn-primary disabled:opacity-60"
-          >
-            <RefreshCw className={`w-4 h-4 ${syncingHardware ? 'animate-spin' : ''}`} />
-            <span>
-              {syncingHardware
-                ? 'กำลังดึงข้อมูลจากเครื่องสแกน...'
-                : 'สั่งดึงข้อมูลจากเครื่องสแกนทันที'}
-            </span>
-          </button>
+          <>
+            <PageHelpAction
+              guideKey={mode === 'scanners' ? 'scanners' : 'rawScans'}
+              userRole={user.role}
+              onNavigate={onNavigate}
+            />
+            <button
+              type="button"
+              disabled={syncingHardware || (mode === 'scanners' && !syncRangeValidation.valid)}
+              onClick={handleRequestOpenSyncConfirm}
+              className="ent-btn-primary disabled:opacity-60"
+            >
+              <RefreshCw className={`w-4 h-4 ${syncingHardware ? 'animate-spin' : ''}`} />
+              <span>
+                {syncingHardware
+                  ? 'กำลังดึงข้อมูลจากเครื่องสแกน...'
+                  : 'สั่งดึงข้อมูลจากเครื่องสแกนทันที'}
+              </span>
+            </button>
+          </>
         }
       />
 
@@ -1530,6 +1541,20 @@ export function RawScansView({
                           </span>
                         )}
                       </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[#596579]">สถานะการใช้จับคู่:</span>
+                        {rs.usage_role === 'CHECK_IN' ? (
+                          <span className="font-semibold text-[#047857]">
+                            ใช้เป็นสแกนเข้า ({rs.used_shift_code || `เวร #${rs.used_attendance_id}`})
+                          </span>
+                        ) : rs.usage_role === 'CHECK_OUT' ? (
+                          <span className="font-semibold text-[#2563EB]">
+                            ใช้เป็นสแกนออก ({rs.used_shift_code || `เวร #${rs.used_attendance_id}`})
+                          </span>
+                        ) : (
+                          <span className="text-[#596579]">สแกนเพิ่มเติม</span>
+                        )}
+                      </div>
                     </div>
 
                     <button
@@ -1629,6 +1654,19 @@ export function RawScansView({
                                 <div className="font-bold text-[#273244]">{rs.full_name}</div>
                                 <div className="text-[12.5px] font-mono text-[#596579]">
                                   {rs.matched_person_id}
+                                </div>
+                                <div className="text-[12px] mt-0.5">
+                                  {rs.usage_role === 'CHECK_IN' ? (
+                                    <span className="text-[#047857] font-semibold">
+                                      ใช้เป็นสแกนเข้า ({rs.used_shift_code || `เวร #${rs.used_attendance_id}`})
+                                    </span>
+                                  ) : rs.usage_role === 'CHECK_OUT' ? (
+                                    <span className="text-[#2563EB] font-semibold">
+                                      ใช้เป็นสแกนออก ({rs.used_shift_code || `เวร #${rs.used_attendance_id}`})
+                                    </span>
+                                  ) : (
+                                    <span className="text-[#596579]">สแกนเพิ่มเติม (ไม่ถูกใช้จับคู่)</span>
+                                  )}
                                 </div>
                               </div>
                             </div>
