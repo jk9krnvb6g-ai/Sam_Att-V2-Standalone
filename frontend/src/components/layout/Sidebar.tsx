@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   LayoutDashboard,
   Clock,
@@ -13,8 +13,6 @@ import {
   UserCog,
   FileClock,
   Rocket,
-  ChevronDown,
-  ChevronRight,
   PanelLeftClose,
   PanelLeftOpen,
   X,
@@ -257,18 +255,6 @@ export function Sidebar({
   collapsed?: boolean;
   onToggleCollapse?: () => void;
 }) {
-  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({
-    group_dashboard: true,
-    group_hr: true,
-    group_scanners: true,
-    group_system: true,
-    group_help: true,
-  });
-
-  function toggleGroup(id: string) {
-    setOpenGroups((prev) => ({ ...prev, [id]: !prev[id] }));
-  }
-
   function handleSelect(key: NavViewKey) {
     onSelectView(key);
     onCloseMobile();
@@ -278,7 +264,7 @@ export function Sidebar({
     <>
       {mobileOpen && (
         <div
-          className="fixed inset-0 z-40 bg-[#262238]/35 backdrop-blur-xs lg:hidden"
+          className="fixed inset-0 z-40 bg-[#292638]/35 backdrop-blur-xs lg:hidden"
           onClick={onCloseMobile}
           aria-hidden="true"
         />
@@ -286,48 +272,150 @@ export function Sidebar({
 
       <aside
         aria-label="เมนูนำทางหลัก"
-        className={`fixed lg:sticky lg:top-[64px] lg:h-[calc(100vh-64px)] top-0 bottom-0 left-0 z-50 bg-white border-r border-[#E6DFF0] flex flex-col shrink-0 transition-transform duration-200 ease-out ${
-          collapsed ? 'w-64 lg:w-[76px]' : 'w-[260px]'
+        className={`fixed lg:sticky lg:top-0 lg:h-screen top-0 bottom-0 left-0 z-50 bg-white border-r border-[#E8E4EF] flex flex-col shrink-0 transition-[width,transform] duration-200 ease-out ${
+          collapsed ? 'w-[264px] lg:w-[74px]' : 'w-[264px]'
         } ${mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}`}
       >
-        {/* Mobile Drawer Header */}
-        <div className="lg:hidden px-4 py-3.5 border-b border-[#E6DFF0] flex items-center justify-between bg-[#F8F7FC]">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-8 h-8 rounded-lg bg-[#8E70C9] text-white flex items-center justify-center shrink-0">
-              <HeartHandshake className="w-4 h-4" />
+        {/* Top Brand Area — Full-Height HIS Navigation Rail */}
+        <div
+          className={`h-[60px] border-b border-[#E8E4EF] flex items-center shrink-0 ${
+            collapsed ? 'px-3 lg:justify-center justify-between' : 'px-4 justify-between'
+          }`}
+        >
+          <a
+            href="/Sam_Att/"
+            className="flex items-center gap-2.5 min-w-0 group"
+            title="Sam_Att V2 Standalone — โรงพยาบาลสามชุก"
+          >
+            <div className="w-8 h-8 rounded-lg bg-[#8066B5] text-white flex items-center justify-center group-hover:bg-[#6E54A3] transition-colors shrink-0">
+              <HeartHandshake className="w-4.5 h-4.5" />
             </div>
-            <span className="font-bold text-[15px] text-[#262238] truncate">
-              โรงพยาบาลสามชุก
-            </span>
-          </div>
+            {!collapsed && (
+              <div className="min-w-0">
+                <div className="text-[14.5px] font-bold tracking-tight text-[#292638] leading-tight truncate">
+                  โรงพยาบาลสามชุก
+                </div>
+                <div className="text-[11.5px] font-medium text-[#777287] leading-tight truncate">
+                  Sam_Att V2 · เวลาปฏิบัติงาน
+                </div>
+              </div>
+            )}
+          </a>
+
           <button
             type="button"
             onClick={onCloseMobile}
-            className="p-1.5 rounded-lg text-[#746B83] hover:text-[#262238] hover:bg-[#EDE5F8] cursor-pointer"
+            className="lg:hidden p-1.5 rounded-lg text-[#777287] hover:text-[#292638] hover:bg-[#F1ECFA] cursor-pointer"
             aria-label="ปิดเมนูนำทาง"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* Desktop Expand / Collapse Utility Row */}
-        {onToggleCollapse && (
-          <div
-            className={`hidden lg:flex items-center border-b border-[#E6DFF0] px-3 py-2.5 ${
-              collapsed ? 'justify-center' : 'justify-between'
-            }`}
-          >
-            {!collapsed && (
-              <span className="text-[12px] font-semibold text-[#746B83] px-1.5 truncate">
-                เมนูระบบ Sam_Att V2
-              </span>
-            )}
+        {/* Navigation Groups — Clean, scannable, zero unnecessary accordions */}
+        <nav
+          className={`flex-1 overflow-y-auto py-4 ${
+            collapsed ? 'px-2.5 space-y-3' : 'px-3 space-y-5'
+          }`}
+        >
+          {SIDEBAR_GROUPS.map((group, groupIndex) => {
+            const visibleItems = group.items.filter((i) => i.roles.includes(user.role));
+            if (visibleItems.length === 0) return null;
+
+            return (
+              <div
+                key={group.id}
+                className={
+                  collapsed && groupIndex > 0
+                    ? 'pt-3 border-t border-[#E8E4EF] space-y-1'
+                    : 'space-y-1'
+                }
+              >
+                {!collapsed && (
+                  <div className="px-3 pb-1 text-[11px] font-bold uppercase tracking-wider text-[#777287]">
+                    {group.title}
+                  </div>
+                )}
+
+                <div className="space-y-0.5">
+                  {visibleItems.map((item) => {
+                    const Icon = item.icon;
+                    const isActive = activeView === item.key;
+
+                    return (
+                      <button
+                        key={item.key}
+                        type="button"
+                        aria-current={isActive ? 'page' : undefined}
+                        onClick={() => handleSelect(item.key)}
+                        title={collapsed ? `${item.label} — ${item.subLabel}` : item.subLabel}
+                        className={`relative w-full flex items-center rounded-lg transition-colors cursor-pointer ${
+                          collapsed
+                            ? 'justify-center px-2 py-2.5'
+                            : 'gap-2.5 px-3 py-2 text-left'
+                        } ${
+                          isActive
+                            ? 'bg-[#F1ECFA] text-[#4E3978] font-semibold'
+                            : 'text-[#292638] hover:bg-[#F8F7FC] font-medium'
+                        }`}
+                      >
+                        {isActive && (
+                          <span
+                            aria-hidden="true"
+                            className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r-full bg-[#8066B5]"
+                          />
+                        )}
+                        <Icon
+                          className={`w-[18px] h-[18px] shrink-0 ${
+                            isActive ? 'text-[#8066B5]' : 'text-[#777287]'
+                          }`}
+                        />
+                        {!collapsed && (
+                          <span className="text-[14px] leading-snug whitespace-nowrap truncate">
+                            {item.label}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+        </nav>
+
+        {/* Minimal Flat Sidebar Footer — Identity + Collapse Toggle */}
+        <div
+          className={`border-t border-[#E8E4EF] px-3 py-3 flex items-center shrink-0 bg-white ${
+            collapsed ? 'justify-center' : 'justify-between gap-2'
+          }`}
+        >
+          {!collapsed && (
+            <div className="min-w-0 pl-1">
+              <div className="text-[13px] font-semibold text-[#292638] truncate">
+                {user.displayName}
+              </div>
+              <div className="text-[11.5px] text-[#777287] flex items-center gap-1.5 truncate">
+                <span>
+                  {user.role === 'GENERAL_USER' && 'บุคลากรทั่วไป'}
+                  {user.role === 'RESPONSIBLE_STAFF' && 'งานบุคคล (HR)'}
+                  {user.role === 'ADMIN' && 'ผู้ดูแลระบบ'}
+                </span>
+                <span aria-hidden="true">·</span>
+                <span className="font-mono tabular-nums">
+                  {user.approvedPersonId || 'ยังไม่ผูก'}
+                </span>
+              </div>
+            </div>
+          )}
+
+          {onToggleCollapse && (
             <button
               type="button"
               onClick={onToggleCollapse}
               title={collapsed ? 'ขยายแถบเมนูด้านข้าง' : 'ย่อแถบเมนูด้านข้าง'}
               aria-label={collapsed ? 'ขยายแถบเมนูด้านข้าง' : 'ย่อแถบเมนูด้านข้าง'}
-              className="p-1.5 rounded-lg text-[#746B83] hover:text-[#543B7A] hover:bg-[#F2EDFA] transition-colors cursor-pointer"
+              className="hidden lg:inline-flex p-2 rounded-lg text-[#777287] hover:text-[#4E3978] hover:bg-[#F1ECFA] transition-colors shrink-0 cursor-pointer"
             >
               {collapsed ? (
                 <PanelLeftOpen className="w-4 h-4" />
@@ -335,106 +423,8 @@ export function Sidebar({
                 <PanelLeftClose className="w-4 h-4" />
               )}
             </button>
-          </div>
-        )}
-
-        {/* Navigation Groups */}
-        <nav
-          className={`flex-1 overflow-y-auto py-3.5 ${
-            collapsed ? 'px-2.5 space-y-3' : 'px-3 space-y-4'
-          }`}
-        >
-          {SIDEBAR_GROUPS.map((group, groupIndex) => {
-            const visibleItems = group.items.filter((i) => i.roles.includes(user.role));
-            if (visibleItems.length === 0) return null;
-
-            const isExpanded = collapsed ? true : (openGroups[group.id] ?? true);
-
-            return (
-              <div
-                key={group.id}
-                className={
-                  collapsed && groupIndex > 0
-                    ? 'pt-2.5 border-t border-[#E6DFF0] space-y-1'
-                    : 'space-y-1'
-                }
-              >
-                {!collapsed && (
-                  <button
-                    type="button"
-                    aria-expanded={isExpanded}
-                    onClick={() => toggleGroup(group.id)}
-                    className="w-full px-2.5 py-1 flex items-center justify-between text-[12px] font-semibold text-[#746B83] hover:text-[#543B7A] rounded-md transition-colors cursor-pointer"
-                  >
-                    <span className="truncate">{group.title}</span>
-                    {isExpanded ? (
-                      <ChevronDown className="w-3.5 h-3.5 text-[#746B83]/80 shrink-0" />
-                    ) : (
-                      <ChevronRight className="w-3.5 h-3.5 text-[#746B83]/80 shrink-0" />
-                    )}
-                  </button>
-                )}
-
-                {isExpanded && (
-                  <div className="space-y-0.5">
-                    {visibleItems.map((item) => {
-                      const Icon = item.icon;
-                      const isActive = activeView === item.key;
-
-                      return (
-                        <button
-                          key={item.key}
-                          type="button"
-                          aria-current={isActive ? 'page' : undefined}
-                          onClick={() => handleSelect(item.key)}
-                          title={collapsed ? `${item.label} — ${item.subLabel}` : item.subLabel}
-                          className={`w-full flex items-center rounded-xl transition-colors cursor-pointer ${
-                            collapsed
-                              ? 'justify-center px-2 py-2.5'
-                              : 'gap-2.5 px-3 py-2 text-left'
-                          } ${
-                            isActive
-                              ? 'bg-[#EDE5F8] text-[#543B7A] font-semibold'
-                              : 'text-[#262238] hover:bg-[#F2EDFA]/70 font-medium'
-                          }`}
-                        >
-                          <Icon
-                            className={`w-[18px] h-[18px] shrink-0 ${
-                              isActive ? 'text-[#543B7A]' : 'text-[#746B83]'
-                            }`}
-                          />
-                          {!collapsed && (
-                            <span className="text-[14px] leading-snug whitespace-nowrap truncate">
-                              {item.label}
-                            </span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </nav>
-
-        {/* Compact Footer Identity */}
-        {!collapsed && (
-          <div className="px-3.5 py-3 m-3 bg-[#F8F7FC] border border-[#E6DFF0] rounded-xl space-y-1">
-            <div className="text-[13.5px] font-bold text-[#262238] truncate">{user.displayName}</div>
-            <div className="text-[12px] text-[#746B83] flex items-center gap-1.5 truncate">
-              <span>
-                {user.role === 'GENERAL_USER' && 'บุคลากรทั่วไป'}
-                {user.role === 'RESPONSIBLE_STAFF' && 'เจ้าหน้าที่งานบุคคล'}
-                {user.role === 'ADMIN' && 'ผู้ดูแลระบบ'}
-              </span>
-              <span aria-hidden="true">·</span>
-              <span className="font-mono tabular-nums">
-                {user.approvedPersonId || 'ยังไม่ผูก'}
-              </span>
-            </div>
-          </div>
-        )}
+          )}
+        </div>
       </aside>
     </>
   );

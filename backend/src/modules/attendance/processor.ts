@@ -83,18 +83,49 @@ export interface CalculatedShiftAttendance {
   leaveEndTime: string | null;
 }
 
+const BKK_TIMESTAMP_FORMATTER = new Intl.DateTimeFormat('sv-SE', {
+  timeZone: 'Asia/Bangkok',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+
 export function getBangkokNowString(): string {
-  const formatter = new Intl.DateTimeFormat('sv-SE', {
-    timeZone: 'Asia/Bangkok',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  });
-  return formatter.format(new Date());
+  return BKK_TIMESTAMP_FORMATTER.format(new Date());
+}
+
+/**
+ * แปลงค่า Timestamp (Date / ISO / 'YYYY-MM-DD HH:mm:ss') ให้เป็นรูปแบบมาตรฐานเขตเวลา Asia/Bangkok ('YYYY-MM-DD HH:mm:ss')
+ * ป้องกันปัญหา Date object จาก MySQL2 หรือรูปแบบที่มีตัวคั่น 'T' ทำให้เปรียบเทียบวันที่/เวลาคลาดเคลื่อน
+ */
+export function normalizeBkkTimestamp(raw: unknown): string {
+  if (raw === null || raw === undefined) return '';
+  if (raw instanceof Date) {
+    return Number.isNaN(raw.getTime()) ? '' : BKK_TIMESTAMP_FORMATTER.format(raw);
+  }
+  const str = String(raw).trim();
+  if (!str) return '';
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(str)) {
+    const parsed = new Date(str);
+    if (!Number.isNaN(parsed.getTime())) {
+      return BKK_TIMESTAMP_FORMATTER.format(parsed);
+    }
+  }
+  const match = /^(\d{4}-\d{2}-\d{2})[T\s]+(\d{2}:\d{2})(?::(\d{2}))?/.exec(str);
+  if (match) {
+    return `${match[1]} ${match[2]}:${match[3] || '00'}`;
+  }
+  return str.replace('T', ' ').slice(0, 19);
+}
+
+function normalizeNullableBkkTimestamp(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  const normalized = normalizeBkkTimestamp(raw);
+  return normalized ? normalized : null;
 }
 
 export async function getHalfDayPreCheckinWindowMinutes(): Promise<number> {
@@ -114,22 +145,113 @@ export async function getHalfDayPreCheckinWindowMinutes(): Promise<number> {
   return 60;
 }
 
+interface NormalizedFingerprintMappingRow {
+  id?: number;
+  person_id: string;
+  fingle_id: string;
+  effective_from: string;
+  effective_to: string | null;
+  conflict_state: string;
+}
+
+function evaluateScanMappingAgainstRows(
+  enrollNumber: string,
+  scanDateYmd: string,
+  normalizedMappings: NormalizedFingerprintMappingRow[]
+): {
+  state: 'MATCHED' | 'UNMATCHED' | 'CONFLICT';
+  personId: string | null;
+  ruleNote: string;
+} {
+  const trimmedEnroll = String(enrollNumber || '').trim();
+  const matchingRows = normalizedMappings.filter((m) => {
+    if (m.fingle_id !== trimmedEnroll) return false;
+    if (m.effective_from > scanDateYmd) return false;
+    if (m.effective_to && m.effective_to < scanDateYmd) return false;
+    return true;
+  });
+
+  if (matchingRows.length === 1 && matchingRows[0].conflict_state === 'NONE') {
+    return {
+      state: 'MATCHED',
+      personId: matchingRows[0].person_id,
+      ruleNote: `Matched via fingerprint_mappings (${matchingRows[0].effective_from})`,
+    };
+  }
+  if (
+    matchingRows.length > 1 ||
+    (matchingRows.length === 1 && matchingRows[0].conflict_state !== 'NONE')
+  ) {
+    return {
+      state: 'CONFLICT',
+      personId: null,
+      ruleNote: 'Duplicate or conflicting FINGLE_ID mapping in effective range',
+    };
+  }
+  return {
+    state: 'UNMATCHED',
+    personId: null,
+    ruleNote: 'No active fingerprint_mapping found for enroll_number on scan date',
+  };
+}
+
+async function loadNormalizedFingerprintMappings(): Promise<NormalizedFingerprintMappingRow[]> {
+  const rawMappings = await dbQuery<{
+    id?: number;
+    person_id: string;
+    fingle_id: string;
+    effective_from: unknown;
+    effective_to: unknown;
+    conflict_state: string;
+  }>('SELECT id, person_id, fingle_id, effective_from, effective_to, conflict_state FROM fingerprint_mappings');
+
+  return rawMappings
+    .map((m) => ({
+      id: m.id,
+      person_id: String(m.person_id ?? '').trim(),
+      fingle_id: String(m.fingle_id ?? '').trim(),
+      effective_from: normalizeWorkDateString(m.effective_from),
+      effective_to:
+        m.effective_to !== null && m.effective_to !== undefined && String(m.effective_to).trim() !== ''
+          ? normalizeWorkDateString(m.effective_to)
+          : null,
+      conflict_state: String(m.conflict_state || 'NONE').trim().toUpperCase(),
+    }))
+    .filter((m) => Boolean(m.person_id && m.fingle_id && m.effective_from));
+}
+
 /**
  * จับคู่ข้อมูลสแกนดิบ (raw_scans) เข้ากับบุคลากรผ่านตาราง fingerprint_mappings ตามช่วงวันที่ที่มีผล
- * กฎสำคัญ: ห้ามแก้ไขตาราง raw_scans เด็ดขาด บันทึกผลการจับคู่ลง raw_scan_mappings เท่านั้น
+ * กฎสำคัญ:
+ * - ห้ามแก้ไขตาราง raw_scans เด็ดขาด บันทึกผลการจับคู่ลง raw_scan_mappings เท่านั้น
+ * - ใช้การ Normalize วันที่แบบ Asia/Bangkok (YYYY-MM-DD) ทั้งฝั่ง scanDate และ effective_from/effective_to
+ *   เพื่อไม่ให้เกิดปัญหา Timezone Shift (เช่น สแกนวันที่ 17 ไปจับคู่ effective_from วันที่ 18)
  */
-export async function resolveRawScanPersonnelMappings(dateFrom: string, dateTo: string): Promise<{
+export async function resolveRawScanPersonnelMappings(
+  dateFrom: string,
+  dateTo: string,
+  options?: { fingleId?: string }
+): Promise<{
+  totalEvaluated: number;
   newlyMatched: number;
+  matchedCount: number;
   unmatchedCount: number;
   conflictCount: number;
 }> {
-  const extendedStart = addDaysYmd(dateFrom, -1);
-  const extendedEnd = addDaysYmd(dateTo, 2);
+  const extendedStart = addDaysYmd(normalizeWorkDateString(dateFrom), -1);
+  const extendedEnd = addDaysYmd(normalizeWorkDateString(dateTo), 2);
+  const scanParams: unknown[] = [`${extendedStart} 00:00:00`, `${extendedEnd} 23:59:59`];
+  let fingleClause = '';
+  if (options?.fingleId) {
+    fingleClause = ' AND TRIM(rs.enroll_number) = ?';
+    scanParams.push(String(options.fingleId).trim());
+  }
+
   const scans = await dbQuery<{
     id: number;
     event_dedup_key: string;
     enroll_number: string;
-    canonical_bkk_time: string;
+    canonical_bkk_time: unknown;
     matched_person_id: string | null;
     mapping_state: string | null;
   }>(
@@ -137,20 +259,15 @@ export async function resolveRawScanPersonnelMappings(dateFrom: string, dateTo: 
             rsm.matched_person_id, rsm.mapping_state
      FROM raw_scans rs
      LEFT JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
-     WHERE rs.canonical_bkk_time >= ? AND rs.canonical_bkk_time <= ?
+     WHERE rs.canonical_bkk_time >= ? AND rs.canonical_bkk_time <= ?${fingleClause}
      ORDER BY rs.canonical_bkk_time ASC, rs.id ASC`,
-    [`${extendedStart} 00:00:00`, `${extendedEnd} 23:59:59`]
+    scanParams
   );
 
-  const mappings = await dbQuery<{
-    person_id: string;
-    fingle_id: string;
-    effective_from: string;
-    effective_to: string | null;
-    conflict_state: string;
-  }>('SELECT person_id, fingle_id, effective_from, effective_to, conflict_state FROM fingerprint_mappings');
+  const normalizedMappings = await loadNormalizedFingerprintMappings();
 
   let newlyMatched = 0;
+  let matchedCount = 0;
   let unmatchedCount = 0;
   let conflictCount = 0;
 
@@ -184,55 +301,91 @@ export async function resolveRawScanPersonnelMappings(dateFrom: string, dateTo: 
   }
 
   for (const scan of scans) {
-    const scanDate = scan.canonical_bkk_time.slice(0, 10);
-    const matchingRows = mappings.filter((m) => {
-      if (m.fingle_id !== scan.enroll_number) return false;
-      if (m.effective_from > scanDate) return false;
-      if (m.effective_to && m.effective_to < scanDate) return false;
-      return true;
-    });
+    const scanBkkTs = normalizeBkkTimestamp(scan.canonical_bkk_time);
+    const scanDate = scanBkkTs.slice(0, 10);
+    const trimmedEnroll = String(scan.enroll_number ?? '').trim();
+    const outcome = evaluateScanMappingAgainstRows(trimmedEnroll, scanDate, normalizedMappings);
 
-    if (matchingRows.length === 1 && matchingRows[0].conflict_state === 'NONE') {
-      const targetPersonId = matchingRows[0].person_id;
-      if (scan.matched_person_id !== targetPersonId || scan.mapping_state !== 'MATCHED') {
+    if (outcome.state === 'MATCHED' && outcome.personId) {
+      matchedCount++;
+      const currentPersonId = scan.matched_person_id ? String(scan.matched_person_id).trim() : null;
+      if (currentPersonId !== outcome.personId || scan.mapping_state !== 'MATCHED') {
         await upsertDerivedMapping(
-          scan.id,
+          Number(scan.id),
           scan.event_dedup_key,
-          scan.enroll_number,
-          targetPersonId,
+          trimmedEnroll,
+          outcome.personId,
           'MATCHED',
-          `Matched via fingerprint_mappings (${matchingRows[0].effective_from})`
+          outcome.ruleNote
         );
         newlyMatched++;
       }
-    } else if (matchingRows.length > 1 || (matchingRows.length === 1 && matchingRows[0].conflict_state !== 'NONE')) {
+    } else if (outcome.state === 'CONFLICT') {
       conflictCount++;
-      if (scan.mapping_state !== 'CONFLICT') {
+      if (scan.mapping_state !== 'CONFLICT' || scan.matched_person_id !== null) {
         await upsertDerivedMapping(
-          scan.id,
+          Number(scan.id),
           scan.event_dedup_key,
-          scan.enroll_number,
+          trimmedEnroll,
           null,
           'CONFLICT',
-          'Duplicate or conflicting FINGLE_ID mapping in effective range'
+          outcome.ruleNote
         );
       }
     } else {
       unmatchedCount++;
-      if (scan.mapping_state !== 'UNMATCHED') {
+      if (scan.mapping_state !== 'UNMATCHED' || scan.matched_person_id !== null) {
         await upsertDerivedMapping(
-          scan.id,
+          Number(scan.id),
           scan.event_dedup_key,
-          scan.enroll_number,
+          trimmedEnroll,
           null,
           'UNMATCHED',
-          'No active fingerprint_mapping found for enroll_number on scan date'
+          outcome.ruleNote
         );
       }
     }
   }
 
-  return { newlyMatched, unmatchedCount, conflictCount };
+  return {
+    totalEvaluated: scans.length,
+    newlyMatched,
+    matchedCount,
+    unmatchedCount,
+    conflictCount,
+  };
+}
+
+/**
+ * จำลองผลการจับคู่ Raw Scan กับบุคลากรในหน่วยความจำเท่านั้น (Read-Only สำหรับ Preview ห้ามเขียนลง DB)
+ */
+async function resolveRawScanMappingsInMemory(
+  dateFrom: string,
+  dateTo: string
+): Promise<Map<number, string>> {
+  const extendedStart = addDaysYmd(normalizeWorkDateString(dateFrom), -1);
+  const extendedEnd = addDaysYmd(normalizeWorkDateString(dateTo), 2);
+  const scans = await dbQuery<{
+    id: number;
+    enroll_number: string;
+    canonical_bkk_time: unknown;
+  }>(
+    `SELECT id, enroll_number, canonical_bkk_time
+     FROM raw_scans
+     WHERE canonical_bkk_time >= ? AND canonical_bkk_time <= ?
+     ORDER BY canonical_bkk_time ASC, id ASC`,
+    [`${extendedStart} 00:00:00`, `${extendedEnd} 23:59:59`]
+  );
+  const normalizedMappings = await loadNormalizedFingerprintMappings();
+  const matchedMap = new Map<number, string>();
+  for (const scan of scans) {
+    const scanDate = normalizeBkkTimestamp(scan.canonical_bkk_time).slice(0, 10);
+    const outcome = evaluateScanMappingAgainstRows(scan.enroll_number, scanDate, normalizedMappings);
+    if (outcome.state === 'MATCHED' && outcome.personId) {
+      matchedMap.set(Number(scan.id), outcome.personId);
+    }
+  }
+  return matchedMap;
 }
 
 function buildDateRangeList(dateFrom: string, dateTo: string): string[] {
@@ -258,9 +411,10 @@ function buildDateRangeList(dateFrom: string, dateTo: string): string[] {
  * never reuse scans, then returns only outcomes whose workDate lies in [dateFrom .. dateTo].
  */
 export async function computeAttendanceOutcomes(
-  options: ReprocessOptions
+  options: ReprocessOptions,
+  overrides?: { inMemoryMatchedPersonByScanId?: Map<number, string> }
 ): Promise<CalculatedShiftAttendance[]> {
-  const nowBkk = options.referenceNowBkk || getBangkokNowString();
+  const nowBkk = normalizeBkkTimestamp(options.referenceNowBkk || getBangkokNowString());
   const halfDayPreCheckinWindowMinutes = await getHalfDayPreCheckinWindowMinutes();
 
   const evalDateFrom = addDaysYmd(options.dateFrom, -1);
@@ -422,7 +576,9 @@ export async function computeAttendanceOutcomes(
         continue;
       }
 
-      const typeRule = rulesByCode.get(String(person.personnel_type_code || '').trim().toUpperCase());
+      const typeRule =
+        resolved.defaultRule ||
+        rulesByCode.get(String(person.personnel_type_code || '').trim().toUpperCase());
 
       for (const eff of resolved.effectiveShifts) {
         if (eff.isDefaultFromType) {
@@ -496,34 +652,68 @@ export async function computeAttendanceOutcomes(
     scanParams.push(options.personId);
   }
 
-  const rawScans = await dbQuery<{
-    id: number;
-    matched_person_id: string | null;
-    canonical_bkk_time: string;
-    in_out_mode: number;
-  }>(
-    `SELECT rs.id, rsm.matched_person_id, rs.canonical_bkk_time, rs.in_out_mode
-     FROM raw_scans rs
-     INNER JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
-     WHERE rsm.mapping_state = 'MATCHED'
-       AND rsm.matched_person_id IS NOT NULL
-       AND rs.canonical_bkk_time >= ? AND rs.canonical_bkk_time <= ?${scanPersonClause}
-     ORDER BY rs.canonical_bkk_time ASC, rs.id ASC`,
-    scanParams
-  );
-
   const scansByPerson = new Map<string, MatchingRawScanInput[]>();
-  for (const s of rawScans) {
-    const pid = String(s.matched_person_id || '').trim();
-    if (!pid) continue;
-    const list = scansByPerson.get(pid) || [];
-    list.push({
-      id: Number(s.id),
-      personId: pid,
-      canonicalBkkTime: s.canonical_bkk_time,
-      inOutMode: Number(s.in_out_mode),
-    });
-    scansByPerson.set(pid, list);
+
+  if (overrides?.inMemoryMatchedPersonByScanId) {
+    const rawScans = await dbQuery<{
+      id: number;
+      canonical_bkk_time: unknown;
+      in_out_mode: number;
+    }>(
+      `SELECT id, canonical_bkk_time, in_out_mode
+       FROM raw_scans
+       WHERE canonical_bkk_time >= ? AND canonical_bkk_time <= ?
+       ORDER BY canonical_bkk_time ASC, id ASC`,
+      [scanWindowStart, scanWindowEnd]
+    );
+
+    const targetPersonId = options.personId ? String(options.personId).trim() : null;
+    for (const s of rawScans) {
+      const pid = overrides.inMemoryMatchedPersonByScanId.get(Number(s.id));
+      if (!pid) continue;
+      if (targetPersonId && pid !== targetPersonId) continue;
+      const canonicalBkkTime = normalizeBkkTimestamp(s.canonical_bkk_time);
+      if (!canonicalBkkTime) continue;
+      const list = scansByPerson.get(pid) || [];
+      list.push({
+        id: Number(s.id),
+        personId: pid,
+        canonicalBkkTime,
+        inOutMode: Number(s.in_out_mode),
+      });
+      scansByPerson.set(pid, list);
+    }
+  } else {
+    const rawScans = await dbQuery<{
+      id: number;
+      matched_person_id: string | null;
+      canonical_bkk_time: unknown;
+      in_out_mode: number;
+    }>(
+      `SELECT rs.id, rsm.matched_person_id, rs.canonical_bkk_time, rs.in_out_mode
+       FROM raw_scans rs
+       INNER JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
+       WHERE rsm.mapping_state = 'MATCHED'
+         AND rsm.matched_person_id IS NOT NULL
+         AND rs.canonical_bkk_time >= ? AND rs.canonical_bkk_time <= ?${scanPersonClause}
+       ORDER BY rs.canonical_bkk_time ASC, rs.id ASC`,
+      scanParams
+    );
+
+    for (const s of rawScans) {
+      const pid = String(s.matched_person_id || '').trim();
+      if (!pid) continue;
+      const canonicalBkkTime = normalizeBkkTimestamp(s.canonical_bkk_time);
+      if (!canonicalBkkTime) continue;
+      const list = scansByPerson.get(pid) || [];
+      list.push({
+        id: Number(s.id),
+        personId: pid,
+        canonicalBkkTime,
+        inOutMode: Number(s.in_out_mode),
+      });
+      scansByPerson.set(pid, list);
+    }
   }
 
   // Load active half-day / partial leaves across [evalDateFrom .. evalDateTo] (ATT-15)
@@ -641,38 +831,56 @@ function hasMaterialAttendanceChange(
   prev: {
     status: string;
     attendance_status?: string | null;
-    check_in_time: string | null;
-    check_out_time: string | null;
+    check_in_time: unknown;
+    check_out_time: unknown;
     check_in_raw_scan_id: number | null;
     check_out_raw_scan_id: number | null;
     late_minutes: number;
     early_checkout_minutes?: number | null;
-    evaluated_start_time?: string | null;
-    evaluated_end_time?: string | null;
+    evaluated_start_time?: unknown;
+    evaluated_end_time?: unknown;
   },
   next: CalculatedShiftAttendance
 ): boolean {
-  const prevInId = prev.check_in_raw_scan_id !== null && prev.check_in_raw_scan_id !== undefined ? Number(prev.check_in_raw_scan_id) : null;
-  const prevOutId = prev.check_out_raw_scan_id !== null && prev.check_out_raw_scan_id !== undefined ? Number(prev.check_out_raw_scan_id) : null;
-  const prevAttStatus = prev.attendance_status || (prev.status === 'NORMAL' || prev.status === 'LATE' ? 'COMPLETE' : prev.status);
+  const prevInId =
+    prev.check_in_raw_scan_id !== null && prev.check_in_raw_scan_id !== undefined
+      ? Number(prev.check_in_raw_scan_id)
+      : null;
+  const prevOutId =
+    prev.check_out_raw_scan_id !== null && prev.check_out_raw_scan_id !== undefined
+      ? Number(prev.check_out_raw_scan_id)
+      : null;
+  const prevAttStatus =
+    prev.attendance_status ||
+    (prev.status === 'NORMAL' || prev.status === 'LATE' ? 'COMPLETE' : prev.status);
 
   return (
     prev.status !== next.status ||
     prevAttStatus !== next.attendanceStatus ||
     prevInId !== next.checkInRawScanId ||
     prevOutId !== next.checkOutRawScanId ||
-    (prev.check_in_time ?? null) !== (next.checkInTime ?? null) ||
-    (prev.check_out_time ?? null) !== (next.checkOutTime ?? null) ||
+    normalizeNullableBkkTimestamp(prev.check_in_time) !== normalizeNullableBkkTimestamp(next.checkInTime) ||
+    normalizeNullableBkkTimestamp(prev.check_out_time) !== normalizeNullableBkkTimestamp(next.checkOutTime) ||
     Number(prev.late_minutes || 0) !== Number(next.lateMinutes || 0) ||
     Number(prev.early_checkout_minutes || 0) !== Number(next.earlyCheckoutMinutes || 0) ||
-    (prev.evaluated_start_time ?? null) !== (next.evaluatedStartTime ?? null) ||
-    (prev.evaluated_end_time ?? null) !== (next.evaluatedEndTime ?? null)
+    normalizeNullableBkkTimestamp(prev.evaluated_start_time) !==
+      normalizeNullableBkkTimestamp(next.evaluatedStartTime) ||
+    normalizeNullableBkkTimestamp(prev.evaluated_end_time) !==
+      normalizeNullableBkkTimestamp(next.evaluatedEndTime)
   );
 }
 
+/**
+ * พรีวิวผลการ Reprocess แบบ Read-Only (ไม่แก้ไข raw_scan_mappings, attendance หรือตารางใดๆ)
+ */
 export async function previewReprocessRange(options: ReprocessOptions) {
-  await resolveRawScanPersonnelMappings(options.dateFrom, options.dateTo);
-  const projected = await computeAttendanceOutcomes(options);
+  const inMemoryMatchedPersonByScanId = await resolveRawScanMappingsInMemory(
+    options.dateFrom,
+    options.dateTo
+  );
+  const projected = await computeAttendanceOutcomes(options, {
+    inMemoryMatchedPersonByScanId,
+  });
 
   const existingParams: unknown[] = [options.dateFrom, options.dateTo];
   let personClause = '';
@@ -795,13 +1003,22 @@ export async function previewReprocessRange(options: ReprocessOptions) {
  * - Flags NEEDS_RE_REVIEW + attendance_notes.needs_re_review = 1 and records attendance_matching_history
  *   when material matching results change on previously reviewed / noted shifts (ATT-13, TC-26)
  */
-export async function reprocessAttendanceRange(options: ReprocessOptions) {
+let reprocessExecutionQueue: Promise<unknown> = Promise.resolve();
+
+export function reprocessAttendanceRange(options: ReprocessOptions) {
+  const run = reprocessExecutionQueue.then(() => runReprocessAttendanceRangeInternal(options));
+  reprocessExecutionQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function runReprocessAttendanceRangeInternal(options: ReprocessOptions) {
   const mappingStats = await resolveRawScanPersonnelMappings(options.dateFrom, options.dateTo);
   const projected = await computeAttendanceOutcomes(options);
 
   let insertedCount = 0;
   let updatedCount = 0;
   let changedCount = 0;
+  let unchangedCount = 0;
   let reReviewFlaggedCount = 0;
   const keptAttendanceIds = new Set<number>();
   const pendingUsageRows: Array<{
@@ -975,6 +1192,8 @@ export async function reprocessAttendanceRange(options: ReprocessOptions) {
             options.actorUsername,
           ]
         );
+      } else {
+        unchangedCount++;
       }
 
       await dbExecute(
@@ -1106,25 +1325,27 @@ export async function reprocessAttendanceRange(options: ReprocessOptions) {
 
   // Delete obsolete PENDING attendance rows with no notes/reviews if their shift was removed or cleared
   for (const row of existingInRange) {
-    if (!keptAttendanceIds.has(row.id) && row.review_status === 'PENDING') {
+    const rowId = Number(row.id);
+    if (!keptAttendanceIds.has(rowId) && row.review_status === 'PENDING') {
       const notes = await dbQuery<{ id: number }>(
         'SELECT id FROM attendance_notes WHERE attendance_id = ? LIMIT 1',
-        [row.id]
+        [rowId]
       );
       const reviews = await dbQuery<{ id: number }>(
         'SELECT id FROM hr_review_history WHERE attendance_id = ? LIMIT 1',
-        [row.id]
+        [rowId]
       );
       if (notes.length === 0 && reviews.length === 0) {
-        await dbExecute('DELETE FROM attendance_raw_scan_usage WHERE attendance_id = ?', [row.id]);
-        await dbExecute('DELETE FROM attendance_matching_history WHERE attendance_id = ?', [row.id]);
-        await dbExecute('DELETE FROM attendance WHERE id = ?', [row.id]);
+        await dbExecute('DELETE FROM attendance_raw_scan_usage WHERE attendance_id = ?', [rowId]);
+        await dbExecute('DELETE FROM attendance_matching_history WHERE attendance_id = ?', [rowId]);
+        await dbExecute('DELETE FROM attendance WHERE id = ?', [rowId]);
       }
     }
   }
 
   const earlyCheckoutCount = projected.filter((p) => p.earlyCheckoutIndicator === 1).length;
   const missingCheckinCount = projected.filter((p) => p.attendanceStatus === 'MISSING_CHECKIN').length;
+  const usageRowsCount = insertedScanIdsThisRun.size;
 
   await writeAuditLog({
     requestId: options.requestId || 'reprocess-internal',
@@ -1141,9 +1362,11 @@ export async function reprocessAttendanceRange(options: ReprocessOptions) {
       insertedCount,
       updatedCount,
       changedCount,
+      unchangedCount,
       reReviewFlaggedCount,
       earlyCheckoutCount,
       missingCheckinCount,
+      usageRowsCount,
       mappingStats,
       ruleVersion: ATTENDANCE_RULE_VERSION,
     },
@@ -1157,9 +1380,11 @@ export async function reprocessAttendanceRange(options: ReprocessOptions) {
     insertedCount,
     updatedCount,
     changedCount,
+    unchangedCount,
     reReviewFlaggedCount,
     earlyCheckoutCount,
     missingCheckinCount,
+    usageRowsCount,
     mappingStats,
   };
 }

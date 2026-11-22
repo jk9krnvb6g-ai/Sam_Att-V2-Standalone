@@ -89,9 +89,9 @@ export const DEPENDENCY_TYPE_META: Record<
   SEQUENTIAL: {
     label: 'ทำตามลำดับหลัก',
     shortDesc: 'ควรทำเรียงลำดับเพื่อให้ข้อมูลต้นทางพร้อมก่อนขั้นตอนถัดไป',
-    textColor: 'text-[#543B7A]',
-    bgColor: 'bg-[#F2EDFA]',
-    borderColor: 'border-[#E6DFF0]',
+    textColor: 'text-[#4E3978]',
+    bgColor: 'bg-[#F1ECFA]',
+    borderColor: 'border-[#E8E4EF]',
   },
   INDEPENDENT: {
     label: 'ทำได้อย่างอิสระ',
@@ -110,9 +110,9 @@ export const DEPENDENCY_TYPE_META: Record<
   ADMIN_ONLY: {
     label: 'เฉพาะผู้ดูแลระบบ (ADMIN)',
     shortDesc: 'จำกัดสิทธิ์เฉพาะผู้ดูแลระบบส่วนกลาง',
-    textColor: 'text-[#746B83]',
+    textColor: 'text-[#777287]',
     bgColor: 'bg-[#F8F7FC]',
-    borderColor: 'border-[#E6DFF0]',
+    borderColor: 'border-[#E8E4EF]',
   },
 };
 
@@ -123,9 +123,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'ตรวจสอบเวลาและตารางเวรส่วนตัว',
     shortDesc: 'สำหรับบุคลากรทุกคน ดูเวลาเข้า-ออกงาน ตารางเวร หมายเหตุ HR และประวัติสแกนของตนเอง',
     iconKey: 'userCheck',
-    accentBg: 'bg-[#F2EDFA]',
-    accentText: 'text-[#543B7A]',
-    accentBorder: 'border-[#E6DFF0]',
+    accentBg: 'bg-[#F1ECFA]',
+    accentText: 'text-[#4E3978]',
+    accentBorder: 'border-[#E8E4EF]',
     roles: ['GENERAL_USER', 'RESPONSIBLE_STAFF', 'ADMIN'],
     steps: [
       {
@@ -174,9 +174,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'บัญชีผู้ใช้งาน สิทธิ์ และความปลอดภัยระบบ',
     shortDesc: 'สร้างบัญชีผู้ใช้ ผูกรหัสบุคลากร ตรวจประวัติ Audit Trail และอัปเดตระบบสำหรับผู้ดูแลระบบ',
     iconKey: 'shield',
-    accentBg: 'bg-[#EDE5F8]',
-    accentText: 'text-[#543B7A]',
-    accentBorder: 'border-[#E6DFF0]',
+    accentBg: 'bg-[#E9DFF5]',
+    accentText: 'text-[#4E3978]',
+    accentBorder: 'border-[#E8E4EF]',
     roles: ['ADMIN'],
     steps: [
       {
@@ -243,9 +243,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'การจัดการข้อมูลบุคลากร (HOSOffice)',
     shortDesc: 'ซิงก์รายชื่อบุคลากรแบบ Read-Only จาก HOSOffice และตรวจสอบปัญหา FINGLE_ID ก่อนประมวลผล',
     iconKey: 'users',
-    accentBg: 'bg-[#F2EDFA]',
-    accentText: 'text-[#543B7A]',
-    accentBorder: 'border-[#E6DFF0]',
+    accentBg: 'bg-[#F1ECFA]',
+    accentText: 'text-[#4E3978]',
+    accentBorder: 'border-[#E8E4EF]',
     roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
     steps: [
       {
@@ -294,9 +294,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'การกำหนดแม่แบบกะและจัดตารางเวร',
     shortDesc: 'จัดการแม่แบบกะ กฎกะเริ่มต้นตามประเภทบุคลากร จัดเวรรายบุคคล/หลายคน/หลายกะ และนำเข้า Excel',
     iconKey: 'calendar',
-    accentBg: 'bg-[#EDE5F8]',
-    accentText: 'text-[#543B7A]',
-    accentBorder: 'border-[#E6DFF0]',
+    accentBg: 'bg-[#E9DFF5]',
+    accentText: 'text-[#4E3978]',
+    accentBorder: 'border-[#E8E4EF]',
     roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
     steps: [
       {
@@ -415,9 +415,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'การตรวจสอบการลงเวลาและการมาสาย',
     shortDesc: 'ตรวจสอบผลการเข้า-ออกงานทั้งโรงพยาบาล กรองสถานะมาสาย ขาดสแกน และตรวจสอบหลักฐานรายบุคคล',
     iconKey: 'clock',
-    accentBg: 'bg-[#F2EDFA]',
-    accentText: 'text-[#543B7A]',
-    accentBorder: 'border-[#E6DFF0]',
+    accentBg: 'bg-[#F1ECFA]',
+    accentText: 'text-[#4E3978]',
+    accentBorder: 'border-[#E8E4EF]',
     roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
     steps: [
       {
@@ -551,9 +551,9 @@ export const WORKFLOW_CATEGORIES: WorkflowCategory[] = [
     title: 'การตรวจสอบและส่งข้อมูลกลับ HOSOffice',
     shortDesc: 'จำลองชุดข้อมูล Dry-Run Preview ตรวจความสมบูรณ์ และส่งข้อมูลจริงตามสิทธิ์และสถานะระบบ',
     iconKey: 'send',
-    accentBg: 'bg-[#F2EDFA]',
-    accentText: 'text-[#543B7A]',
-    accentBorder: 'border-[#E6DFF0]',
+    accentBg: 'bg-[#F1ECFA]',
+    accentText: 'text-[#4E3978]',
+    accentBorder: 'border-[#E8E4EF]',
     roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
     steps: [
       {

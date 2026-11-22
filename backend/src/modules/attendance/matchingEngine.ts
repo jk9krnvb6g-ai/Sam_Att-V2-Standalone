@@ -128,18 +128,20 @@ export function addDaysYmd(dateStr: string, days: number): string {
 }
 
 export function toEpochSeconds(bkkTimestamp: string): number {
-  const trimmed = bkkTimestamp.trim();
-  const [datePart, timePart = '00:00:00'] = trimmed.split(/\s+/);
+  const trimmed = String(bkkTimestamp || '').trim();
+  const [datePart, rawTimePart = '00:00:00'] = trimmed.split(/[T\s]+/);
+  const cleanTime = rawTimePart.replace(/([.,]\d+)?(Z|[+-]\d{2}:?\d{2})?$/i, '');
   const [y, m, d] = datePart.split('-').map(Number);
-  const [hh = 0, mm = 0, ss = 0] = timePart.split(':').map(Number);
+  const [hh = 0, mm = 0, ss = 0] = cleanTime.split(':').map(Number);
   return Math.floor(Date.UTC(y, m - 1, d, hh, mm, ss) / 1000);
 }
 
 export function toEpochMinutes(bkkTimestamp: string): number {
-  const trimmed = bkkTimestamp.trim();
-  const [datePart, timePart = '00:00:00'] = trimmed.split(/\s+/);
+  const trimmed = String(bkkTimestamp || '').trim();
+  const [datePart, rawTimePart = '00:00:00'] = trimmed.split(/[T\s]+/);
+  const cleanTime = rawTimePart.replace(/([.,]\d+)?(Z|[+-]\d{2}:?\d{2})?$/i, '');
   const [y, m, d] = datePart.split('-').map(Number);
-  const [hh = 0, mm = 0] = timePart.split(':').map(Number);
+  const [hh = 0, mm = 0] = cleanTime.split(':').map(Number);
   return Math.floor(Date.UTC(y, m - 1, d, hh, mm, 0) / 60000);
 }
 

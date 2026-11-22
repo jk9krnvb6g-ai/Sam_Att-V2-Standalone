@@ -2,39 +2,43 @@
 
 @layer base {
   :root {
-    /* Typography Tokens — Professional Thai Healthcare Workspace */
+    /* Typography Tokens — Modern Thai Hospital Information System (HIS) */
     --font-sans: 'Sarabun', 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     --font-display: 'Sarabun', 'Plus Jakarta Sans', sans-serif;
     --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace;
 
-    /* Global Design System — Professional Light Lavender Healthcare Dashboard */
+    /* Exact Requested Modern HIS Soft Lavender Palette */
     --bg-canvas: #F8F7FC;
     --surface-card: #FFFFFF;
-    --lavender-light: #EDE5F8;
-    --lavender-soft: #F2EDFA;
-    --brand-primary: #8E70C9;
-    --brand-primary-hover: #795BB8;
-    --brand-primary-dark: #543B7A;
-    --border-subtle: #E6DFF0;
-    --border-default: #D5C9E8;
-    --border-focus: #8E70C9;
+    --lavender-soft: #F1ECFA;
+    --lavender-light: #E9DFF5;
+    --brand-primary: #8066B5;
+    --brand-primary-hover: #6E54A3;
+    --brand-primary-dark: #4E3978;
+    --border-subtle: #E8E4EF;
+    --border-default: #D8D1E6;
+    --border-focus: #8066B5;
 
-    /* Legacy Aliases for Seamless Backward Compatibility */
+    /* Legacy Aliases */
     --surface-canvas: var(--bg-canvas);
     --surface-secondary: var(--lavender-soft);
     --brand-soft: var(--lavender-soft);
     --brand-subtle: var(--bg-canvas);
 
     /* Text Hierarchy (WCAG AA Validated) */
-    --text-primary: #262238;
-    --text-secondary: #746B83;
-    --text-muted: #746B83;
+    --text-primary: #292638;
+    --text-secondary: #777287;
+    --text-muted: #777287;
 
     /* Semantic Status Colors */
     --status-success: #198568;
+    --status-success-bg: #EEF8F4;
     --status-warning: #B87516;
+    --status-warning-bg: #FEF7EA;
     --status-danger: #C74455;
+    --status-danger-bg: #FDF2F4;
     --status-info: #5879BC;
+    --status-info-bg: #EFF4FB;
 
     /* Spacing Scale (4 / 8 / 12 / 16 / 24 / 32) */
     --space-1: 0.25rem;
@@ -48,10 +52,10 @@
     /* Radius Scale */
     --radius-sm: 0.5rem;     /* 8px */
     --radius-md: 0.625rem;   /* 10px */
-    --radius-lg: 0.8125rem;  /* 13px (12–14px standard card radius) */
+    --radius-lg: 0.75rem;    /* 12px crisp institutional surface */
 
     /* Control Sizing */
-    --control-height: 2.5rem; /* 40px clean enterprise control height */
+    --control-height: 2.375rem; /* 38px balanced hospital control height */
   }
 
   html {
@@ -64,7 +68,7 @@
     background-color: var(--bg-canvas);
     color: var(--text-primary);
     font-size: 0.9375rem; /* 15px */
-    line-height: 1.6;
+    line-height: 1.55;
     overflow-wrap: break-word;
     overflow-x: hidden;
   }
@@ -104,42 +108,90 @@
   }
 }
 
-/* Reusable Lavender Hospital Management System Component Classes */
+/* Modern HIS Component Primitives — Single-Elevation, Crisp Hairlines, Zero Clutter */
 @layer components {
-  .ent-card {
+  .ent-card,
+  .his-surface {
     background-color: var(--surface-card);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-lg);
-    box-shadow: 0 1px 2px 0 rgba(38, 34, 56, 0.03);
   }
 
   .ent-table-wrapper {
     background-color: var(--surface-card);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-lg);
-    box-shadow: 0 1px 2px 0 rgba(38, 34, 56, 0.03);
     overflow: hidden;
+  }
+
+  /* Unified Horizontal Metric Strip (replaces boxed KPI card grids) */
+  .his-metric-strip {
+    background-color: var(--surface-card);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+  }
+
+  /* Clean Hospital Data Table Defaults */
+  .his-table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+  }
+
+  .his-table thead tr {
+    background-color: var(--bg-canvas);
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .his-table th {
+    padding: 0.75rem 1rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+
+  .his-table tbody tr {
+    border-bottom: 1px solid var(--border-subtle);
+    transition: background-color 120ms ease;
+  }
+
+  .his-table tbody tr:last-child {
+    border-bottom: none;
+  }
+
+  .his-table tbody tr:hover {
+    background-color: rgba(241, 236, 250, 0.45);
+  }
+
+  .his-table td {
+    padding: 0.8125rem 1rem;
+    font-size: 0.875rem;
+    color: var(--text-primary);
+    vertical-align: middle;
   }
 
   .overflow-x-auto {
     -webkit-overflow-scrolling: touch;
   }
 
+  /* Crisp Hospital Form Controls */
   .ent-input {
     height: var(--control-height);
-    padding: 0.45rem 0.875rem;
-    font-size: 0.875rem; /* 14px */
+    padding: 0.4375rem 0.8125rem;
+    font-size: 0.875rem;
     line-height: 1.35rem;
     background-color: var(--surface-card);
     border: 1px solid var(--border-default);
     border-radius: var(--radius-sm);
     color: var(--text-primary);
-    transition: border-color 150ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 150ms cubic-bezier(0.16, 1, 0.3, 1);
+    transition: border-color 140ms ease, box-shadow 140ms ease;
     max-width: 100%;
   }
 
   .ent-input-with-icon {
-    padding-left: 2.65rem;
+    padding-left: 2.5rem;
   }
 
   .ent-input:hover:not(:disabled) {
@@ -148,7 +200,7 @@
 
   .ent-input:focus {
     border-color: var(--brand-primary);
-    box-shadow: 0 0 0 3px rgba(142, 112, 201, 0.16);
+    box-shadow: 0 0 0 3px rgba(128, 102, 181, 0.14);
   }
 
   .ent-input:disabled {
@@ -159,16 +211,16 @@
 
   .ent-label {
     display: block;
-    font-size: 0.875rem; /* 14px */
+    font-size: 0.84375rem;
     font-weight: 600;
     color: var(--text-primary);
     margin-bottom: 0.375rem;
   }
 
-  /* Primary Button — Lavender */
+  /* Primary Button — Deep Lavender #8066B5 */
   .ent-btn-primary {
     min-height: var(--control-height);
-    padding: 0.5rem 1.125rem;
+    padding: 0.45rem 1.05rem;
     font-size: 0.875rem;
     font-weight: 600;
     color: #FFFFFF;
@@ -178,9 +230,9 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 0.5rem;
+    gap: 0.45rem;
     text-align: center;
-    transition: background-color 150ms cubic-bezier(0.16, 1, 0.3, 1), transform 100ms ease, opacity 150ms ease;
+    transition: background-color 140ms ease, transform 90ms ease, opacity 140ms ease;
     cursor: pointer;
   }
 
@@ -193,14 +245,14 @@
   }
 
   .ent-btn-primary:disabled {
-    opacity: 0.52;
+    opacity: 0.5;
     cursor: not-allowed;
   }
 
-  /* Secondary Button — White with Soft Lavender Border */
+  /* Secondary Button — Crisp White with Hairline Border */
   .ent-btn-secondary {
     min-height: var(--control-height);
-    padding: 0.5rem 1rem;
+    padding: 0.45rem 0.95rem;
     font-size: 0.875rem;
     font-weight: 600;
     color: var(--text-primary);
@@ -210,9 +262,9 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 0.5rem;
+    gap: 0.45rem;
     text-align: center;
-    transition: background-color 150ms cubic-bezier(0.16, 1, 0.3, 1), border-color 150ms ease, color 150ms ease;
+    transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
     cursor: pointer;
   }
 
@@ -223,14 +275,14 @@
   }
 
   .ent-btn-secondary:disabled {
-    opacity: 0.52;
+    opacity: 0.5;
     cursor: not-allowed;
   }
 
   /* Danger Button — Semantic Crimson */
   .ent-btn-danger {
     min-height: var(--control-height);
-    padding: 0.5rem 1rem;
+    padding: 0.45rem 0.95rem;
     font-size: 0.875rem;
     font-weight: 600;
     color: #FFFFFF;
@@ -240,9 +292,9 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    gap: 0.5rem;
+    gap: 0.45rem;
     text-align: center;
-    transition: background-color 150ms ease, opacity 150ms ease;
+    transition: background-color 140ms ease, opacity 140ms ease;
     cursor: pointer;
   }
 
@@ -251,14 +303,14 @@
   }
 
   .ent-btn-danger:disabled {
-    opacity: 0.52;
+    opacity: 0.5;
     cursor: not-allowed;
   }
 
-  /* Ghost Button — Subtle Details / Row Actions */
+  /* Ghost Button — Subtle Row & Utility Actions */
   .ent-btn-ghost {
-    min-height: 2.25rem;
-    padding: 0.375rem 0.75rem;
+    min-height: 2.125rem;
+    padding: 0.35rem 0.7rem;
     font-size: 0.84375rem;
     font-weight: 600;
     color: var(--brand-primary-dark);
@@ -269,7 +321,7 @@
     align-items: center;
     justify-content: center;
     gap: 0.375rem;
-    transition: background-color 150ms ease, color 150ms ease;
+    transition: background-color 140ms ease, color 140ms ease;
     cursor: pointer;
   }
 
@@ -305,14 +357,17 @@
   }
 
   .ent-tab-btn {
-    padding: 0.45rem 0.9rem;
+    padding: 0.425rem 0.875rem;
     font-size: 0.875rem;
     font-weight: 600;
-    border-radius: 0.5rem;
+    border-radius: 0.45rem;
     color: var(--text-secondary);
-    transition: background-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+    transition: background-color 140ms ease, color 140ms ease;
     white-space: nowrap;
     cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
   }
 
   .ent-tab-btn:hover {
@@ -322,11 +377,47 @@
   .ent-tab-btn-active {
     background-color: var(--brand-primary);
     color: #FFFFFF;
-    box-shadow: 0 1px 2px rgba(84, 59, 122, 0.16);
   }
 
   .ent-tab-btn-active:hover {
     color: #FFFFFF;
+  }
+
+  /* Institutional Underline Tab Bar (Clean Horizontal Hospital Tabs) */
+  .his-tab-underline-bar {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    align-items: center;
+    gap: 0.25rem;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .his-tab-underline-btn {
+    position: relative;
+    padding: 0.7rem 1rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 140ms ease, border-color 140ms ease, background-color 140ms ease;
+    cursor: pointer;
+  }
+
+  .his-tab-underline-btn:hover {
+    color: var(--text-primary);
+    background-color: rgba(241, 236, 250, 0.4);
+  }
+
+  .his-tab-underline-btn-active {
+    color: var(--brand-primary-dark);
+    border-bottom-color: var(--brand-primary);
+    background-color: rgba(241, 236, 250, 0.35);
   }
 }
 

@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import { type AuthUser } from '../services/api.ts';
 import { type NavViewKey } from '../components/layout/Sidebar.tsx';
-import { PageHeader } from '../components/common/SharedComponents.tsx';
+import { PageHeader, TabBar, StatusBadge } from '../components/common/SharedComponents.tsx';
 import {
   PageHelpAction,
   ExpandableStepList,
@@ -143,11 +143,11 @@ export function UserManualView({
       />
 
       {/* แถบค้นหาและเลือกหมวดหมู่ */}
-      <div className="ent-card p-4 sm:p-5 space-y-4">
+      <div className="his-surface p-4 sm:p-5 space-y-4">
         <div className="flex flex-col md:flex-row md:items-center gap-3">
           <div className="relative flex-1">
             <Search
-              className="w-4 h-4 text-[#746B83] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+              className="w-4 h-4 text-[#777287] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
               aria-hidden="true"
             />
             <input
@@ -162,47 +162,34 @@ export function UserManualView({
               <button
                 type="button"
                 onClick={() => setSearchQuery('')}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-md text-[#746B83] hover:text-[#262238] hover:bg-[#F2EDFA] cursor-pointer"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-md text-[#777287] hover:text-[#292638] hover:bg-[#F1ECFA] cursor-pointer"
                 aria-label="ล้างคำค้นหา"
               >
                 <X className="w-4 h-4" />
               </button>
             )}
           </div>
-          <div className="text-[13px] text-[#746B83] tabular-nums shrink-0">
-            พบ <strong className="text-[#543B7A]">{filteredGuides.length}</strong> หัวข้อคู่มือ ·{' '}
-            <strong className="text-[#543B7A]">{filteredFaqs.length}</strong> คำถามที่พบบ่อย
+          <div className="text-[13px] text-[#777287] tabular-nums shrink-0">
+            พบ <strong className="text-[#4E3978]">{filteredGuides.length}</strong> หัวข้อคู่มือ ·{' '}
+            <strong className="text-[#4E3978]">{filteredFaqs.length}</strong> คำถามที่พบบ่อย
           </div>
         </div>
 
-        {/* ปุ่มหมวดหมู่คู่มือ */}
-        <div className="ent-tab-bar w-full">
-          <button
-            type="button"
-            onClick={() => setSelectedCategory('ALL')}
-            className={`ent-tab-btn ${selectedCategory === 'ALL' ? 'ent-tab-btn-active' : ''}`}
-          >
-            คู่มือทั้งหมด ({allVisibleGuides.length})
-          </button>
-
-          {visibleCategories.map((cat) => (
-            <button
-              key={cat.id}
-              type="button"
-              onClick={() => setSelectedCategory(cat.id)}
-              className={`ent-tab-btn ${selectedCategory === cat.id ? 'ent-tab-btn-active' : ''}`}
-            >
-              {cat.label}
-            </button>
-          ))}
-
-          <button
-            type="button"
-            onClick={() => setSelectedCategory('FAQ')}
-            className={`ent-tab-btn ${selectedCategory === 'FAQ' ? 'ent-tab-btn-active' : ''}`}
-          >
-            คำถามที่พบบ่อย ({allVisibleFaqs.length})
-          </button>
+        {/* แถบหมวดหมู่คู่มือแบบ Underline */}
+        <div className="border-b border-[#E8E4EF]">
+          <TabBar
+            variant="underline"
+            activeKey={selectedCategory}
+            onChange={(k) => setSelectedCategory(k as 'ALL' | 'FAQ' | ManualCategoryId)}
+            items={[
+              { key: 'ALL', label: 'คู่มือทั้งหมด', count: allVisibleGuides.length },
+              ...visibleCategories.map((cat) => ({
+                key: cat.id,
+                label: cat.label,
+              })),
+              { key: 'FAQ', label: 'คำถามที่พบบ่อย', count: allVisibleFaqs.length },
+            ]}
+          />
         </div>
       </div>
 
@@ -210,18 +197,18 @@ export function UserManualView({
       {selectedCategory !== 'FAQ' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
           {/* คอลัมน์ซ้าย: รายการหัวข้อคู่มือตามเมนูจริง */}
-          <aside className="lg:col-span-4 ent-card overflow-hidden lg:sticky lg:top-20">
-            <div className="px-4 py-3.5 bg-[#F8F7FC] border-b border-[#E6DFF0] flex items-center justify-between">
-              <span className="text-[14px] font-bold text-[#262238]">
+          <aside className="lg:col-span-4 his-surface overflow-hidden lg:sticky lg:top-20">
+            <div className="px-4 py-3.5 bg-[#F8F7FC] border-b border-[#E8E4EF] flex items-center justify-between">
+              <span className="text-[14px] font-bold text-[#292638]">
                 หัวข้อคู่มือตามเมนูจริง
               </span>
-              <span className="text-[12.5px] font-mono text-[#543B7A] font-semibold tabular-nums">
+              <span className="text-[12.5px] font-mono text-[#4E3978] font-semibold tabular-nums">
                 {filteredGuides.length} หัวข้อ
               </span>
             </div>
 
             {filteredGuides.length === 0 ? (
-              <div className="p-6 text-center space-y-2 text-[13.5px] text-[#746B83]">
+              <div className="p-6 text-center space-y-2 text-[13.5px] text-[#777287]">
                 <p>ไม่พบหัวข้อคู่มือที่ตรงกับคำค้นหา “{searchQuery}”</p>
                 <button
                   type="button"
@@ -229,13 +216,13 @@ export function UserManualView({
                     setSearchQuery('');
                     setSelectedCategory('ALL');
                   }}
-                  className="text-[#543B7A] font-semibold hover:underline cursor-pointer"
+                  className="text-[#4E3978] font-semibold hover:underline cursor-pointer"
                 >
                   ล้างการค้นหาและแสดงทั้งหมด
                 </button>
               </div>
             ) : (
-              <div className="divide-y divide-[#F2EDFA] max-h-[560px] overflow-y-auto">
+              <div className="divide-y divide-[#F1ECFA] max-h-[580px] overflow-y-auto">
                 {filteredGuides.map((g, idx) => {
                   const isSelected = activeGuide?.key === g.key;
                   return (
@@ -245,25 +232,25 @@ export function UserManualView({
                       onClick={() => handleSelectGuide(g.key)}
                       className={`w-full px-4 py-3.5 text-left transition-colors cursor-pointer flex items-start gap-3 ${
                         isSelected
-                          ? 'bg-[#F2EDFA] text-[#543B7A]'
-                          : 'bg-white hover:bg-[#F8F7FC] text-[#262238]'
+                          ? 'bg-[#F1ECFA] text-[#4E3978] border-l-[3px] border-l-[#8066B5]'
+                          : 'bg-white hover:bg-[#F8F7FC] text-[#292638]'
                       }`}
                     >
                       <span
                         className={`w-6 h-6 rounded-full font-mono text-[12px] font-bold flex items-center justify-center shrink-0 mt-0.5 tabular-nums ${
                           isSelected
-                            ? 'bg-[#8E70C9] text-white'
-                            : 'bg-[#EDE5F8] text-[#543B7A]'
+                            ? 'bg-[#8066B5] text-white'
+                            : 'bg-[#E9DFF5] text-[#4E3978]'
                         }`}
                       >
                         {idx + 1}
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className="text-[14px] font-bold leading-snug">{g.menuLabel}</div>
-                        <div className="text-[12.5px] text-[#746B83] mt-0.5 line-clamp-2 leading-snug">
+                        <div className="text-[12.5px] text-[#777287] mt-0.5 line-clamp-2 leading-snug">
                           {g.shortDesc}
                         </div>
-                        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 text-[11.5px] text-[#746B83] tabular-nums">
+                        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 text-[11.5px] text-[#777287] tabular-nums">
                           <span>{g.steps.length} ขั้นตอน</span>
                           <span aria-hidden="true">·</span>
                           <span
@@ -287,26 +274,22 @@ export function UserManualView({
           {/* คอลัมน์ขวา: รายละเอียดคู่มือครบทั้ง 8 ส่วน */}
           <article className="lg:col-span-8 space-y-5">
             {activeGuide ? (
-              <div className="ent-card overflow-hidden">
-                <div className="p-5 sm:p-6 bg-[#F8F7FC] border-b border-[#E6DFF0] flex flex-col sm:flex-row sm:items-start justify-between gap-4">
+              <div className="his-surface overflow-hidden">
+                <div className="p-5 sm:p-6 bg-[#F8F7FC] border-b border-[#E8E4EF] flex flex-col sm:flex-row sm:items-start justify-between gap-4">
                   <div className="space-y-1.5 min-w-0">
-                    <div className="flex flex-wrap items-center gap-2 text-[12.5px] font-semibold text-[#543B7A]">
+                    <div className="flex flex-wrap items-center gap-2 text-[12.5px] font-semibold text-[#4E3978]">
                       <span>{activeGuide.menuLabel}</span>
-                      <span aria-hidden="true" className="text-[#E6DFF0]">·</span>
-                      <span
-                        className={
-                          activeGuide.readinessStatus === 'READY'
-                            ? 'text-[#198568]'
-                            : 'text-[#B87516]'
-                        }
+                      <StatusBadge
+                        tone={activeGuide.readinessStatus === 'READY' ? 'success' : 'warning'}
+                        dot
                       >
                         {activeGuide.readinessLabel}
-                      </span>
+                      </StatusBadge>
                     </div>
-                    <h2 className="text-[19px] sm:text-[22px] font-bold text-[#262238] leading-snug">
+                    <h2 className="text-[19px] sm:text-[21px] font-bold text-[#292638] leading-snug">
                       {activeGuide.title}
                     </h2>
-                    <p className="text-[13.5px] text-[#746B83] leading-relaxed">
+                    <p className="text-[13.5px] text-[#777287] leading-relaxed">
                       {activeGuide.shortDesc}
                     </p>
                   </div>
@@ -327,30 +310,30 @@ export function UserManualView({
 
                 <div className="p-5 sm:p-6 space-y-6">
                   {activeGuide.readinessStatus === 'CONDITIONAL' && activeGuide.readinessNote && (
-                    <div className="p-4 rounded-xl bg-[#FEF8ED] border border-[#F3DFBC] text-[#B87516] flex items-start gap-2.5 text-[13.5px] leading-relaxed">
+                    <div className="p-4 rounded-xl bg-[#FEF7EA] border border-[#F2DCBA] text-[#B87516] flex items-start gap-2.5 text-[13.5px] leading-relaxed">
                       <Info className="w-5 h-5 shrink-0 mt-0.5" aria-hidden="true" />
                       <div>
                         <div className="font-bold">{activeGuide.readinessLabel}</div>
-                        <p className="mt-0.5 text-[#262238]">{activeGuide.readinessNote}</p>
+                        <p className="mt-0.5 text-[#292638]">{activeGuide.readinessNote}</p>
                       </div>
                     </div>
                   )}
 
                   {/* 1. เมนูนี้ใช้ทำอะไร & 2. ผู้ใช้งานที่มีสิทธิ์ */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="p-4 rounded-xl bg-[#F8F7FC] space-y-1.5">
-                      <h3 className="text-[14.5px] font-bold text-[#543B7A]">
+                    <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-1.5">
+                      <h3 className="text-[14px] font-bold text-[#4E3978]">
                         1. เมนูนี้ใช้ทำอะไร
                       </h3>
-                      <p className="text-[13.5px] text-[#262238] leading-relaxed">
+                      <p className="text-[13.5px] text-[#292638] leading-relaxed">
                         {activeGuide.whatItDoes}
                       </p>
                     </div>
-                    <div className="p-4 rounded-xl bg-[#F8F7FC] space-y-1.5">
-                      <h3 className="text-[14.5px] font-bold text-[#543B7A]">
+                    <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-1.5">
+                      <h3 className="text-[14px] font-bold text-[#4E3978]">
                         2. ผู้ใช้งานที่มีสิทธิ์
                       </h3>
-                      <p className="text-[13.5px] text-[#262238] leading-relaxed">
+                      <p className="text-[13.5px] text-[#292638] leading-relaxed">
                         {activeGuide.allowedRolesSummary}
                       </p>
                     </div>
@@ -358,14 +341,14 @@ export function UserManualView({
 
                   {/* 3. สิ่งที่ต้องเตรียมก่อนเริ่ม */}
                   <div className="space-y-2">
-                    <h3 className="text-[15px] font-bold text-[#543B7A]">
+                    <h3 className="text-[15px] font-bold text-[#4E3978]">
                       3. สิ่งที่ต้องเตรียมก่อนเริ่ม
                     </h3>
-                    <ul className="space-y-1.5 text-[14px] text-[#262238]">
+                    <ul className="space-y-1.5 text-[13.5px] text-[#292638]">
                       {activeGuide.prerequisites.map((pre, idx) => (
                         <li key={idx} className="flex items-start gap-2">
                           <CheckCircle2
-                            className="w-4 h-4 text-[#198568] shrink-0 mt-1"
+                            className="w-4 h-4 text-[#198568] shrink-0 mt-0.5"
                             aria-hidden="true"
                           />
                           <span>{pre}</span>
@@ -375,9 +358,9 @@ export function UserManualView({
                   </div>
 
                   {/* 4. ขั้นตอนการใช้งานจริงตามลำดับ */}
-                  <div className="space-y-3 pt-4 border-t border-[#E6DFF0]">
+                  <div className="space-y-3 pt-4 border-t border-[#E8E4EF]">
                     <div className="space-y-2">
-                      <h3 className="text-[15.5px] font-bold text-[#543B7A]">
+                      <h3 className="text-[15px] font-bold text-[#4E3978]">
                         4. ขั้นตอนการใช้งานจริงตามลำดับ (กดเพื่อขยาย/ย่อแต่ละขั้นตอน)
                       </h3>
 
@@ -410,8 +393,8 @@ export function UserManualView({
 
                     {activeTaskGroup ? (
                       <div className="space-y-3">
-                        <div className="p-3.5 rounded-xl bg-[#F2EDFA] border border-[#E6DFF0] text-[13.5px] text-[#262238]">
-                          <strong className="text-[#543B7A]">{activeTaskGroup.label}:</strong>{' '}
+                        <div className="p-3.5 rounded-xl bg-[#F1ECFA] border border-[#E8E4EF] text-[13.5px] text-[#292638]">
+                          <strong className="text-[#4E3978]">{activeTaskGroup.label}:</strong>{' '}
                           {activeTaskGroup.summary}
                         </div>
                         <ExpandableStepList steps={activeTaskGroup.steps} defaultExpandedAll />
@@ -422,17 +405,17 @@ export function UserManualView({
                   </div>
 
                   {/* 5. ตัวอย่างการใช้งานจริง */}
-                  <div className="p-4 sm:p-5 rounded-xl bg-[#F8F7FC] space-y-2">
-                    <h3 className="text-[15px] font-bold text-[#543B7A]">
+                  <div className="p-4 sm:p-5 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-2">
+                    <h3 className="text-[15px] font-bold text-[#4E3978]">
                       5. ตัวอย่างการใช้งานจริง
                     </h3>
-                    <div className="space-y-1.5 text-[14px] text-[#262238] leading-relaxed">
+                    <div className="space-y-1.5 text-[13.5px] text-[#292638] leading-relaxed">
                       <div>
-                        <span className="font-semibold text-[#746B83]">สถานการณ์:</span>{' '}
+                        <span className="font-semibold text-[#777287]">สถานการณ์:</span>{' '}
                         {activeGuide.example.scenario}
                       </div>
                       <div>
-                        <span className="font-semibold text-[#746B83]">วิธีดำเนินการ:</span>{' '}
+                        <span className="font-semibold text-[#777287]">วิธีดำเนินการ:</span>{' '}
                         {activeGuide.example.action}
                       </div>
                       <div>
@@ -444,11 +427,11 @@ export function UserManualView({
 
                   {/* 6. ผลลัพธ์ที่ควรปรากฏ & 7. ข้อควรระวัง */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="p-4 rounded-xl bg-[#EDF8F4] border border-[#C2E6DA] space-y-2">
+                    <div className="p-4 rounded-xl bg-[#EEF8F4] border border-[#C3E5D8] space-y-2">
                       <h3 className="text-[14.5px] font-bold text-[#198568]">
                         6. ผลลัพธ์หลังทำสำเร็จ
                       </h3>
-                      <ul className="space-y-1.5 text-[13.5px] text-[#262238]">
+                      <ul className="space-y-1.5 text-[13.5px] text-[#292638]">
                         {activeGuide.expectedResults.map((res, idx) => (
                           <li key={idx} className="flex items-start gap-2">
                             <CheckCircle2
@@ -461,12 +444,12 @@ export function UserManualView({
                       </ul>
                     </div>
 
-                    <div className="p-4 rounded-xl bg-[#FEF8ED] border border-[#F3DFBC] space-y-2">
+                    <div className="p-4 rounded-xl bg-[#FEF7EA] border border-[#F2DCBA] space-y-2">
                       <h3 className="text-[14.5px] font-bold text-[#B87516] flex items-center gap-1.5">
                         <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
                         <span>7. ข้อควรระวัง</span>
                       </h3>
-                      <ul className="space-y-1.5 text-[13.5px] text-[#262238] list-disc pl-5">
+                      <ul className="space-y-1.5 text-[13.5px] text-[#292638] list-disc pl-5">
                         {activeGuide.precautions.map((item, idx) => (
                           <li key={idx}>{item}</li>
                         ))}
@@ -475,19 +458,16 @@ export function UserManualView({
                   </div>
 
                   {/* 8. ปัญหาที่พบบ่อยและแนวทางแก้ไข */}
-                  <div className="space-y-3 pt-4 border-t border-[#E6DFF0]">
-                    <h3 className="text-[15px] font-bold text-[#543B7A] flex items-center gap-1.5">
-                      <Wrench className="w-4 h-4 text-[#8E70C9] shrink-0" aria-hidden="true" />
+                  <div className="space-y-3 pt-4 border-t border-[#E8E4EF]">
+                    <h3 className="text-[15px] font-bold text-[#4E3978] flex items-center gap-1.5">
+                      <Wrench className="w-4 h-4 text-[#8066B5] shrink-0" aria-hidden="true" />
                       <span>8. ปัญหาที่พบบ่อยและแนวทางแก้ไข</span>
                     </h3>
-                    <div className="space-y-2.5">
+                    <div className="divide-y divide-[#E8E4EF] border border-[#E8E4EF] rounded-xl overflow-hidden bg-white">
                       {activeGuide.troubleshooting.map((tb, idx) => (
-                        <div
-                          key={idx}
-                          className="p-3.5 rounded-xl bg-[#F8F7FC] space-y-1 text-[13.5px]"
-                        >
-                          <div className="font-semibold text-[#262238]">ปัญหา: {tb.problem}</div>
-                          <div className="text-[#746B83]">แนวทางแก้ไข: {tb.solution}</div>
+                        <div key={idx} className="p-3.5 space-y-1 text-[13.5px]">
+                          <div className="font-semibold text-[#292638]">ปัญหา: {tb.problem}</div>
+                          <div className="text-[#777287]">แนวทางแก้ไข: {tb.solution}</div>
                         </div>
                       ))}
                     </div>
@@ -495,7 +475,7 @@ export function UserManualView({
                 </div>
               </div>
             ) : (
-              <div className="ent-card p-10 text-center text-[#746B83]">
+              <div className="his-surface p-10 text-center text-[#777287]">
                 เลือกหัวข้อคู่มือจากรายการด้านซ้ายเพื่ออ่านรายละเอียด
               </div>
             )}
@@ -504,29 +484,29 @@ export function UserManualView({
       )}
 
       {/* FAQ Accordion */}
-      <section aria-labelledby="manual-faq-heading" className="ent-card overflow-hidden">
-        <div className="px-5 py-4 bg-[#F8F7FC] border-b border-[#E6DFF0] flex flex-wrap items-center justify-between gap-2">
+      <section aria-labelledby="manual-faq-heading" className="his-surface overflow-hidden">
+        <div className="px-5 py-4 bg-[#F8F7FC] border-b border-[#E8E4EF] flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-[#EDE5F8] text-[#543B7A] flex items-center justify-center shrink-0">
+            <div className="w-9 h-9 rounded-xl bg-[#E9DFF5] text-[#4E3978] flex items-center justify-center shrink-0">
               <HelpCircle className="w-5 h-5" aria-hidden="true" />
             </div>
             <div>
-              <h2 id="manual-faq-heading" className="text-[17px] font-bold text-[#262238]">
+              <h2 id="manual-faq-heading" className="text-[16px] font-bold text-[#292638]">
                 คำถามที่พบบ่อยและแนวทางแก้ปัญหาเบื้องต้น (FAQ)
               </h2>
-              <p className="text-[13px] text-[#746B83]">
+              <p className="text-[13px] text-[#777287]">
                 รวมปัญหาที่เจ้าหน้าที่โรงพยาบาลพบบ่อยพร้อมคำตอบที่ทำตามได้ทันที
               </p>
             </div>
           </div>
-          <span className="text-[13px] font-mono font-semibold text-[#543B7A] tabular-nums">
+          <span className="text-[13px] font-mono font-semibold text-[#4E3978] tabular-nums">
             {filteredFaqs.length} ข้อ
           </span>
         </div>
 
-        <div className="divide-y divide-[#F2EDFA]">
+        <div className="divide-y divide-[#F1ECFA]">
           {filteredFaqs.length === 0 ? (
-            <div className="p-8 text-center text-[14px] text-[#746B83]">
+            <div className="p-8 text-center text-[14px] text-[#777287]">
               ไม่พบคำถามที่ตรงกับคำค้นหา “{searchQuery}”
             </div>
           ) : (
@@ -546,23 +526,23 @@ export function UserManualView({
                     className="w-full px-5 py-4 flex items-start justify-between gap-4 text-left hover:bg-[#F8F7FC] transition-colors cursor-pointer"
                   >
                     <div className="flex items-start gap-3 min-w-0">
-                      <span className="w-6 h-6 rounded-full bg-[#EDE5F8] text-[#543B7A] font-mono text-[12px] font-bold flex items-center justify-center shrink-0 mt-0.5 tabular-nums">
+                      <span className="w-6 h-6 rounded-full bg-[#E9DFF5] text-[#4E3978] font-mono text-[12px] font-bold flex items-center justify-center shrink-0 mt-0.5 tabular-nums">
                         {idx + 1}
                       </span>
-                      <span className="text-[14.5px] font-semibold text-[#262238] leading-snug">
+                      <span className="text-[14.5px] font-semibold text-[#292638] leading-snug">
                         {faq.question}
                       </span>
                     </div>
                     {isOpen ? (
-                      <ChevronUp className="w-4.5 h-4.5 text-[#8E70C9] shrink-0 mt-0.5" aria-hidden="true" />
+                      <ChevronUp className="w-4 h-4 text-[#8066B5] shrink-0 mt-0.5" aria-hidden="true" />
                     ) : (
-                      <ChevronDown className="w-4.5 h-4.5 text-[#746B83] shrink-0 mt-0.5" aria-hidden="true" />
+                      <ChevronDown className="w-4 h-4 text-[#777287] shrink-0 mt-0.5" aria-hidden="true" />
                     )}
                   </button>
 
                   {isOpen && (
-                    <div className="px-5 pb-4 pl-14 space-y-3 text-[13.5px] text-[#746B83] leading-relaxed">
-                      <p className="text-[#262238]">{faq.answer}</p>
+                    <div className="px-5 pb-4 pl-14 space-y-3 text-[13.5px] text-[#777287] leading-relaxed">
+                      <p className="text-[#292638]">{faq.answer}</p>
                       <div className="flex flex-wrap items-center gap-2.5">
                         {faq.relatedGuideKey && (
                           <button
@@ -572,7 +552,7 @@ export function UserManualView({
                               handleSelectGuide(faq.relatedGuideKey!);
                               window.scrollTo({ top: 0, behavior: 'smooth' });
                             }}
-                            className="text-[13px] font-semibold text-[#543B7A] hover:text-[#795BB8] hover:underline inline-flex items-center gap-1 cursor-pointer"
+                            className="text-[13px] font-semibold text-[#4E3978] hover:text-[#6E54A3] hover:underline inline-flex items-center gap-1 cursor-pointer"
                           >
                             <BookOpen className="w-3.5 h-3.5" aria-hidden="true" />
                             <span>อ่านคู่มือหัวข้อที่เกี่ยวข้อง</span>
@@ -582,7 +562,7 @@ export function UserManualView({
                           <button
                             type="button"
                             onClick={() => handleSafeNavigate(faq.relatedView!)}
-                            className="text-[13px] font-semibold text-[#543B7A] bg-[#F2EDFA] hover:bg-[#EDE5F8] px-3 py-1 rounded-lg inline-flex items-center gap-1 transition-colors cursor-pointer"
+                            className="ent-btn-soft h-8 px-3 text-[12.5px]"
                           >
                             <span>ไปยังเมนูจริง</span>
                             <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />

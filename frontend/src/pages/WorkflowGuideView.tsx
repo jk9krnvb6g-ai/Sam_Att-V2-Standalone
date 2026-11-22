@@ -5,7 +5,7 @@
  * ============================================================================
  * แสดงภาพรวมผังการทำงานทั้งระบบของ Sam_Att V2 Standalone:
  * 1. ผังความสัมพันธ์ระหว่างงานแบบ Responsive Grid (ลดการเลื่อนแนวนอน)
- * 2. การ์ดหมวดงานทั้งหมดตามสิทธิ์ผู้ใช้ในโทนสีม่วงอ่อน (Lavender Design System)
+ * 2. การ์ดหมวดงานทั้งหมดตามสิทธิ์ผู้ใช้ในโทนสีม่วงอ่อน (Modern HIS Lavender)
  * 3. Timeline แนวตั้งแสดงรายละเอียดแต่ละขั้นตอน + ขั้นตอนย่อยแบบขยาย/ย่อ + ปุ่ม "ไปยังเมนู"
  * 4. กล่อง "จุดที่ต้องระวังในสายงานนี้" เฉพาะแต่ละหมวดงาน
  *
@@ -34,7 +34,7 @@ import {
 } from 'lucide-react';
 import { type AuthUser } from '../services/api.ts';
 import { type NavViewKey } from '../components/layout/Sidebar.tsx';
-import { PageHeader } from '../components/common/SharedComponents.tsx';
+import { PageHeader, StatusBadge } from '../components/common/SharedComponents.tsx';
 import {
   PageHelpAction,
   ContextualHelpDrawer,
@@ -155,17 +155,17 @@ export function WorkflowGuideView({
          ===================================================================== */}
       <section
         aria-labelledby="workflow-relationship-heading"
-        className="ent-card p-5 sm:p-6 space-y-4"
+        className="his-surface p-5 sm:p-6 space-y-4"
       >
         <div className="flex flex-col lg:flex-row lg:items-start justify-between gap-3">
           <div className="space-y-1">
             <h2
               id="workflow-relationship-heading"
-              className="text-[17.5px] sm:text-[18.5px] font-bold text-[#262238]"
+              className="text-[17px] font-bold text-[#292638]"
             >
               ภาพรวมความสัมพันธ์ระหว่างขั้นตอนการทำงาน
             </h2>
-            <p className="text-[13.5px] text-[#746B83] leading-relaxed">
+            <p className="text-[13px] text-[#777287] leading-relaxed">
               ไม่จำเป็นต้องทำทุกขั้นตอนทุกวัน — แยกประเภทงานชัดเจนระหว่างงานตามลำดับ งานอิสระ และงานเฉพาะเมื่อจำเป็น
             </p>
           </div>
@@ -213,12 +213,12 @@ export function WorkflowGuideView({
                 onClick={() => handleSelectCategory(node.categoryId, node.stepId)}
                 className={`p-3.5 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between gap-2.5 ${
                   isCurrentCategory
-                    ? 'bg-[#F2EDFA] border-[#8E70C9] ring-1 ring-[#8E70C9]/30'
-                    : 'bg-white border-[#E6DFF0] hover:border-[#8E70C9]/60 hover:bg-[#F8F7FC]'
+                    ? 'bg-[#F1ECFA] border-[#8066B5] ring-1 ring-[#8066B5]/25'
+                    : 'bg-white border-[#E8E4EF] hover:border-[#8066B5]/50 hover:bg-[#F8F7FC]'
                 } ${isDimmed ? 'opacity-35' : 'opacity-100'}`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="w-6 h-6 rounded-full bg-[#EDE5F8] text-[#543B7A] font-mono text-[12px] font-bold flex items-center justify-center tabular-nums shrink-0">
+                  <span className="w-6 h-6 rounded-full bg-[#E9DFF5] text-[#4E3978] font-mono text-[12px] font-bold flex items-center justify-center tabular-nums shrink-0">
                     {node.order}
                   </span>
                   <span className={`text-[11.5px] font-semibold ${meta.textColor} truncate`}>
@@ -226,10 +226,10 @@ export function WorkflowGuideView({
                   </span>
                 </div>
                 <div>
-                  <div className="text-[13.5px] font-bold text-[#262238] leading-snug">
+                  <div className="text-[13.5px] font-bold text-[#292638] leading-snug">
                     {node.label}
                   </div>
-                  <div className="text-[12px] text-[#746B83] mt-0.5 leading-snug">
+                  <div className="text-[12px] text-[#777287] mt-0.5 leading-snug">
                     {node.shortNote}
                   </div>
                 </div>
@@ -239,13 +239,13 @@ export function WorkflowGuideView({
         </div>
 
         {/* Legend */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 pt-3 border-t border-[#E6DFF0] text-[12.5px]">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 pt-3 border-t border-[#E8E4EF] text-[12.5px]">
           {visibleDependencyTypes.map((dt) => {
             const meta = DEPENDENCY_TYPE_META[dt];
             return (
               <div key={dt} className="px-3 py-2 rounded-lg bg-[#F8F7FC] space-y-0.5">
                 <div className={`font-bold ${meta.textColor}`}>{meta.label}</div>
-                <div className="text-[#746B83] leading-snug">{meta.shortDesc}</div>
+                <div className="text-[#777287] leading-snug">{meta.shortDesc}</div>
               </div>
             );
           })}
@@ -259,11 +259,11 @@ export function WorkflowGuideView({
         <div>
           <h2
             id="workflow-categories-heading"
-            className="text-[17.5px] sm:text-[18.5px] font-bold text-[#262238]"
+            className="text-[17px] font-bold text-[#292638]"
           >
             เลือกหมวดงานเพื่อดูลำดับขั้นตอน ({categories.length} หมวดตามสิทธิ์ของคุณ)
           </h2>
-          <p className="text-[13.5px] text-[#746B83]">
+          <p className="text-[13px] text-[#777287]">
             คลิกที่การ์ดหมวดงานเพื่อแสดง Timeline ขั้นตอนการทำงานและจุดที่ต้องระวังด้านล่าง
           </p>
         </div>
@@ -279,44 +279,42 @@ export function WorkflowGuideView({
                 onClick={() => handleSelectCategory(cat.id, null)}
                 className={`p-5 rounded-xl border text-left transition-all flex flex-col justify-between gap-4 cursor-pointer ${
                   isSelected
-                    ? 'bg-[#F2EDFA]/70 border-[#8E70C9] ring-1 ring-[#8E70C9]/30'
-                    : 'bg-white border-[#E6DFF0] hover:border-[#8E70C9]/60 hover:bg-[#F8F7FC]'
+                    ? 'bg-[#F1ECFA]/70 border-[#8066B5] ring-1 ring-[#8066B5]/25'
+                    : 'bg-white border-[#E8E4EF] hover:border-[#8066B5]/50 hover:bg-[#F8F7FC]'
                 }`}
               >
                 <div className="space-y-3">
                   <div className="flex items-center justify-between gap-2">
-                    <div
-                      className={`w-10 h-10 rounded-xl ${cat.accentBg} ${cat.accentText} border ${cat.accentBorder} flex items-center justify-center shrink-0`}
-                    >
+                    <div className="w-10 h-10 rounded-xl bg-[#F1ECFA] text-[#8066B5] border border-[#E8E4EF] flex items-center justify-center shrink-0">
                       <CategoryIcon iconKey={cat.iconKey} className="w-5 h-5" />
                     </div>
                     <div className="text-right">
-                      <div className="text-[12px] font-semibold text-[#543B7A] tabular-nums">
+                      <div className="text-[12px] font-semibold text-[#4E3978] tabular-nums">
                         หมวดที่ {cat.number}
                       </div>
-                      <div className="text-[12px] text-[#746B83] tabular-nums">
+                      <div className="text-[12px] text-[#777287] tabular-nums">
                         {cat.steps.length} ขั้นตอน
                       </div>
                     </div>
                   </div>
 
                   <div className="space-y-1">
-                    <h3 className="text-[15px] font-bold text-[#262238] leading-snug">
+                    <h3 className="text-[15px] font-bold text-[#292638] leading-snug">
                       {cat.title}
                     </h3>
-                    <p className="text-[13px] text-[#746B83] leading-relaxed line-clamp-3">
+                    <p className="text-[13px] text-[#777287] leading-relaxed line-clamp-3">
                       {cat.shortDesc}
                     </p>
                   </div>
                 </div>
 
-                <div className="pt-3 border-t border-[#E6DFF0] flex items-center justify-between text-[13px] font-semibold">
-                  <span className={isSelected ? 'text-[#543B7A]' : 'text-[#746B83]'}>
+                <div className="pt-3 border-t border-[#E8E4EF] flex items-center justify-between text-[13px] font-semibold">
+                  <span className={isSelected ? 'text-[#4E3978]' : 'text-[#777287]'}>
                     {isSelected ? 'กำลังแสดงด้านล่าง' : 'ดูขั้นตอนการทำงาน'}
                   </span>
                   <ArrowRight
                     className={`w-4 h-4 transition-transform ${
-                      isSelected ? 'text-[#8E70C9] translate-x-0.5' : 'text-[#746B83]'
+                      isSelected ? 'text-[#8066B5] translate-x-0.5' : 'text-[#777287]'
                     }`}
                     aria-hidden="true"
                   />
@@ -334,26 +332,24 @@ export function WorkflowGuideView({
         <section
           ref={timelineRef}
           aria-labelledby="selected-category-timeline-heading"
-          className="ent-card overflow-hidden"
+          className="his-surface overflow-hidden"
         >
-          <div className="px-5 sm:px-6 py-5 bg-[#F8F7FC] border-b border-[#E6DFF0] flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="px-5 sm:px-6 py-5 bg-[#F8F7FC] border-b border-[#E8E4EF] flex flex-col md:flex-row md:items-center justify-between gap-3">
             <div className="flex items-start gap-3.5">
-              <div
-                className={`w-11 h-11 rounded-xl ${selectedCategory.accentBg} ${selectedCategory.accentText} border ${selectedCategory.accentBorder} flex items-center justify-center shrink-0 mt-0.5`}
-              >
+              <div className="w-11 h-11 rounded-xl bg-[#F1ECFA] text-[#8066B5] border border-[#E8E4EF] flex items-center justify-center shrink-0 mt-0.5">
                 <CategoryIcon iconKey={selectedCategory.iconKey} className="w-5 h-5" />
               </div>
               <div className="space-y-1">
-                <div className="text-[12.5px] font-semibold text-[#543B7A]">
+                <div className="text-[12.5px] font-semibold text-[#4E3978]">
                   หมวดที่ {selectedCategory.number} · {selectedCategory.steps.length} ขั้นตอน
                 </div>
                 <h2
                   id="selected-category-timeline-heading"
-                  className="text-[19px] sm:text-[21px] font-bold text-[#262238]"
+                  className="text-[18.5px] sm:text-[20px] font-bold text-[#292638]"
                 >
                   {selectedCategory.title}
                 </h2>
-                <p className="text-[13.5px] text-[#746B83]">{selectedCategory.shortDesc}</p>
+                <p className="text-[13px] text-[#777287]">{selectedCategory.shortDesc}</p>
               </div>
             </div>
           </div>
@@ -374,7 +370,7 @@ export function WorkflowGuideView({
                       {!isLast && (
                         <span
                           aria-hidden="true"
-                          className="absolute left-[18px] sm:left-[20px] top-10 bottom-[-24px] w-[2px] bg-[#EDE5F8]"
+                          className="absolute left-[18px] sm:left-[20px] top-10 bottom-[-24px] w-[2px] bg-[#E9DFF5]"
                         />
                       )}
 
@@ -382,8 +378,8 @@ export function WorkflowGuideView({
                         aria-hidden="true"
                         className={`absolute left-0 top-1 w-9 h-9 sm:w-10 sm:h-10 rounded-full font-mono text-[14px] font-bold flex items-center justify-center tabular-nums border-2 ${
                           isHighlighted
-                            ? 'bg-[#8E70C9] text-white border-[#8E70C9]'
-                            : 'bg-[#EDE5F8] text-[#543B7A] border-white ring-1 ring-[#E6DFF0]'
+                            ? 'bg-[#8066B5] text-white border-[#8066B5]'
+                            : 'bg-[#E9DFF5] text-[#4E3978] border-white ring-1 ring-[#E8E4EF]'
                         }`}
                       >
                         {step.stepNumber}
@@ -392,47 +388,43 @@ export function WorkflowGuideView({
                       <div
                         className={`rounded-xl border p-4 sm:p-5 space-y-3.5 transition-colors ${
                           isHighlighted
-                            ? 'bg-[#F8F7FC] border-[#8E70C9]'
-                            : 'bg-white border-[#E6DFF0]'
+                            ? 'bg-[#F8F7FC] border-[#8066B5]'
+                            : 'bg-white border-[#E8E4EF]'
                         }`}
                       >
                         <div className="space-y-1.5">
-                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px]">
+                          <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
                             <span className={`font-bold ${meta.textColor}`}>{meta.label}</span>
-                            <span aria-hidden="true" className="text-[#E6DFF0]">·</span>
-                            <span className="text-[#746B83]">{step.frequencyHint}</span>
-                            <span aria-hidden="true" className="text-[#E6DFF0]">·</span>
-                            <span
-                              className={`font-semibold ${
-                                step.readinessStatus === 'READY'
-                                  ? 'text-[#198568]'
-                                  : 'text-[#B87516]'
-                              }`}
+                            <span aria-hidden="true" className="text-[#D8D1E6]">·</span>
+                            <span className="text-[#777287]">{step.frequencyHint}</span>
+                            <StatusBadge
+                              tone={step.readinessStatus === 'READY' ? 'success' : 'warning'}
+                              dot
                             >
                               {step.readinessLabel}
-                            </span>
+                            </StatusBadge>
                           </div>
 
-                          <h3 className="text-[16px] sm:text-[17px] font-bold text-[#262238] leading-snug">
+                          <h3 className="text-[16px] font-bold text-[#292638] leading-snug">
                             {step.title}
                           </h3>
-                          <p className="text-[13.5px] sm:text-[14px] text-[#746B83] leading-relaxed">
+                          <p className="text-[13.5px] text-[#777287] leading-relaxed">
                             {step.description}
                           </p>
                         </div>
 
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-[#F2EDFA] text-[13px]">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-[#F1ECFA] text-[13px]">
                           <div>
-                            <div className="font-semibold text-[#543B7A]">
+                            <div className="font-semibold text-[#4E3978]">
                               บทบาทผู้ใช้งานที่เกี่ยวข้อง
                             </div>
-                            <div className="text-[#262238] mt-0.5">{step.roleLabel}</div>
+                            <div className="text-[#292638] mt-0.5">{step.roleLabel}</div>
                           </div>
                           <div>
-                            <div className="font-semibold text-[#543B7A]">
+                            <div className="font-semibold text-[#4E3978]">
                               สิ่งที่ต้องเตรียมก่อนเริ่ม
                             </div>
-                            <ul className="mt-0.5 space-y-1 text-[#262238]">
+                            <ul className="mt-0.5 space-y-1 text-[#292638]">
                               {step.prerequisites.map((pre, pIdx) => (
                                 <li key={pIdx} className="flex items-start gap-1.5">
                                   <CheckCircle2
@@ -446,7 +438,7 @@ export function WorkflowGuideView({
                           </div>
                         </div>
 
-                        <div className="pt-2 border-t border-[#F2EDFA]">
+                        <div className="pt-2 border-t border-[#F1ECFA]">
                           <button
                             type="button"
                             aria-expanded={isChecklistOpen}
@@ -456,7 +448,7 @@ export function WorkflowGuideView({
                                 [step.id]: !prev[step.id],
                               }))
                             }
-                            className="text-[13px] font-semibold text-[#543B7A] hover:text-[#795BB8] hover:underline inline-flex items-center gap-1.5 cursor-pointer"
+                            className="text-[13px] font-semibold text-[#4E3978] hover:text-[#6E54A3] hover:underline inline-flex items-center gap-1.5 cursor-pointer"
                           >
                             {isChecklistOpen ? (
                               <>
@@ -472,11 +464,11 @@ export function WorkflowGuideView({
                           </button>
 
                           {isChecklistOpen && (
-                            <ol className="mt-2.5 space-y-1.5 pl-4 list-decimal text-[13px] text-[#262238] bg-[#F8F7FC] border border-[#E6DFF0] rounded-xl p-3.5">
+                            <ol className="mt-2.5 space-y-1.5 pl-4 list-decimal text-[13px] text-[#292638] bg-[#F8F7FC] border border-[#E8E4EF] rounded-xl p-3.5">
                               {linkedGuide.steps.map((sub, sIdx) => (
                                 <li key={sIdx} className="leading-relaxed">
                                   <span className="font-semibold">{sub.title}:</span>{' '}
-                                  <span className="text-[#746B83]">{sub.detail}</span>
+                                  <span className="text-[#777287]">{sub.detail}</span>
                                 </li>
                               ))}
                             </ol>
@@ -494,7 +486,7 @@ export function WorkflowGuideView({
                               <ArrowRight className="w-4 h-4 shrink-0" aria-hidden="true" />
                             </button>
                           ) : (
-                            <div className="px-3.5 py-2 rounded-lg bg-[#F8F7FC] border border-[#E6DFF0] text-[13px] text-[#746B83] inline-flex items-center gap-2">
+                            <div className="px-3.5 py-2 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] text-[13px] text-[#777287] inline-flex items-center gap-2">
                               <Lock className="w-4 h-4 shrink-0" aria-hidden="true" />
                               <span>จำกัดสิทธิ์เฉพาะ {step.roleLabel}</span>
                             </div>
@@ -505,7 +497,7 @@ export function WorkflowGuideView({
                             onClick={() => setDrawerGuideKey(step.guideKey)}
                             className="ent-btn-secondary"
                           >
-                            <BookOpen className="w-4 h-4 text-[#8E70C9] shrink-0" aria-hidden="true" />
+                            <BookOpen className="w-4 h-4 text-[#8066B5] shrink-0" aria-hidden="true" />
                             <span>ดูวิธีใช้งานละเอียด</span>
                           </button>
                         </div>
@@ -517,26 +509,26 @@ export function WorkflowGuideView({
             </div>
 
             <aside className="space-y-4">
-              <div className="rounded-xl bg-[#FEF8ED] border border-[#F3DFBC] p-4 sm:p-5 space-y-3">
+              <div className="rounded-xl bg-[#FEF7EA] border border-[#F2DCBA] p-4 sm:p-5 space-y-3">
                 <div className="flex items-center gap-2 text-[#B87516]">
                   <AlertTriangle className="w-5 h-5 shrink-0" aria-hidden="true" />
                   <h3 className="text-[15px] font-bold">จุดที่ต้องระวังในสายงานนี้</h3>
                 </div>
-                <ul className="space-y-2 text-[13.5px] text-[#262238] leading-relaxed list-disc pl-5">
+                <ul className="space-y-2 text-[13.5px] text-[#292638] leading-relaxed list-disc pl-5">
                   {selectedCategory.precautions.map((item, idx) => (
                     <li key={idx}>{item}</li>
                   ))}
                 </ul>
               </div>
 
-              <div className="rounded-xl bg-[#F8F7FC] border border-[#E6DFF0] p-4 sm:p-5 space-y-2">
-                <div className="flex items-center gap-2 text-[#543B7A]">
-                  <Info className="w-4.5 h-4.5 text-[#8E70C9] shrink-0" aria-hidden="true" />
+              <div className="rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] p-4 sm:p-5 space-y-2">
+                <div className="flex items-center gap-2 text-[#4E3978]">
+                  <Info className="w-4 h-4 text-[#8066B5] shrink-0" aria-hidden="true" />
                   <h3 className="text-[14.5px] font-bold">วิธีใช้งานร่วมกับคู่มือประจำหน้า</h3>
                 </div>
-                <p className="text-[13px] text-[#746B83] leading-relaxed">
-                  เมื่อกดปุ่ม <strong className="text-[#262238]">“ไปยังเมนู”</strong> เพื่อไปปฏิบัติงานจริง ท่านสามารถกดปุ่ม{' '}
-                  <strong className="text-[#543B7A]">“วิธีใช้งานหน้านี้”</strong> บริเวณส่วนหัวของทุกหน้าเพื่อเปิดดูขั้นตอนข้างหน้าจอได้ตลอดเวลา โดยไม่ทำให้ข้อมูลที่กำลังกรอกหายไป
+                <p className="text-[13px] text-[#777287] leading-relaxed">
+                  เมื่อกดปุ่ม <strong className="text-[#292638]">“ไปยังเมนู”</strong> เพื่อไปปฏิบัติงานจริง ท่านสามารถกดปุ่ม{' '}
+                  <strong className="text-[#4E3978]">“วิธีใช้งานหน้านี้”</strong> บริเวณส่วนหัวของทุกหน้าเพื่อเปิดดูขั้นตอนข้างหน้าจอได้ตลอดเวลา โดยไม่ทำให้ข้อมูลที่กำลังกรอกหายไป
                 </p>
               </div>
             </aside>

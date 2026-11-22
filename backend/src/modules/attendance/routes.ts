@@ -9,6 +9,10 @@ import {
 } from './processor.ts';
 import { addDaysYmd } from './matchingEngine.ts';
 import { writeAuditLog } from '../audit/service.ts';
+import {
+  assertRoleAuthorizedForDateRange,
+  ScannerSyncRangeError,
+} from '../scanners/syncRange.ts';
 
 export const attendanceRouter = Router();
 
@@ -612,6 +616,25 @@ attendanceRouter.post(
         ? String(req.body.referenceNowBkk).trim()
         : undefined;
 
+      try {
+        assertRoleAuthorizedForDateRange({
+          role: req.user!.role,
+          syncMode: 'CUSTOM_RANGE',
+          dateFrom,
+          dateTo,
+        });
+      } catch (authErr: unknown) {
+        if (authErr instanceof ScannerSyncRangeError) {
+          res.status(authErr.statusCode).json({
+            error: authErr.code,
+            message: authErr.message,
+            requestId: req.requestId,
+          });
+          return;
+        }
+        throw authErr;
+      }
+
       const preview = await previewReprocessRange({
         dateFrom,
         dateTo,
@@ -640,6 +663,25 @@ attendanceRouter.post(
       const referenceNowBkk = req.body?.referenceNowBkk
         ? String(req.body.referenceNowBkk).trim()
         : undefined;
+
+      try {
+        assertRoleAuthorizedForDateRange({
+          role: req.user!.role,
+          syncMode: 'CUSTOM_RANGE',
+          dateFrom,
+          dateTo,
+        });
+      } catch (authErr: unknown) {
+        if (authErr instanceof ScannerSyncRangeError) {
+          res.status(authErr.statusCode).json({
+            error: authErr.code,
+            message: authErr.message,
+            requestId: req.requestId,
+          });
+          return;
+        }
+        throw authErr;
+      }
 
       const result = await reprocessAttendanceRange({
         dateFrom,

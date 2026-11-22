@@ -130,6 +130,7 @@ async function apiCall(
 }
 
 describe('Scanner Sync Backend — Multi-Day Buffer, Timeout, Fail-Closed Parsing & Safety (SCAN-01..SCAN-20)', () => {
+  let adminToken = '';
   let staffToken = '';
   const capturedDiagnostics: ScannerSyncDiagnosticLog[] = [];
 
@@ -167,6 +168,13 @@ describe('Scanner Sync Backend — Multi-Day Buffer, Timeout, Fail-Closed Parsin
     });
     const addr = httpsServer.address() as AddressInfo;
     baseUrl = `https://127.0.0.1:${addr.port}`;
+
+    const loginAdminRes = await apiCall('/api/Sam_Att/auth/login', {
+      method: 'POST',
+      body: { username: 'admin', password: 'Admin@SamAtt2026' },
+    });
+    assert.equal(loginAdminRes.status, 200);
+    adminToken = loginAdminRes.data.token;
 
     const loginRes = await apiCall('/api/Sam_Att/auth/login', {
       method: 'POST',
@@ -376,11 +384,15 @@ describe('Scanner Sync Backend — Multi-Day Buffer, Timeout, Fail-Closed Parsin
       assert.equal(res30d.data.matchedInRange, 4);
       assert.deepEqual(capturedCalls.at(-1)?.args, ['--days', '30', '--preview']);
 
-      // SCAN-06: ALL_SUPPORTED (alias -> ALL, 90 days)
+      // SCAN-06: ALL_SUPPORTED (alias -> ALL, 90 days, ADMIN + Reauth)
       const res90d = await apiCall('/api/Sam_Att/scanners/sync', {
         method: 'POST',
-        token: staffToken,
-        body: { syncMode: 'ALL_SUPPORTED' },
+        token: adminToken,
+        body: {
+          syncMode: 'ALL_SUPPORTED',
+          impactAcknowledged: true,
+          confirmPassword: 'Admin@SamAtt2026',
+        },
       });
       assert.equal(res90d.status, 200);
       assert.equal(res90d.data.syncMode, 'ALL');
@@ -512,8 +524,12 @@ describe('Scanner Sync Backend — Multi-Day Buffer, Timeout, Fail-Closed Parsin
 
       const res = await apiCall('/api/Sam_Att/scanners/sync', {
         method: 'POST',
-        token: staffToken,
-        body: { syncMode: 'ALL' },
+        token: adminToken,
+        body: {
+          syncMode: 'ALL',
+          impactAcknowledged: true,
+          confirmPassword: 'Admin@SamAtt2026',
+        },
       });
       assert.equal(res.status, 413);
       assert.equal(res.data.error, 'SCANNER_OUTPUT_TOO_LARGE');
@@ -590,8 +606,12 @@ describe('Scanner Sync Backend — Multi-Day Buffer, Timeout, Fail-Closed Parsin
       });
       const res = await apiCall('/api/Sam_Att/scanners/sync', {
         method: 'POST',
-        token: staffToken,
-        body: { syncMode: 'ALL' },
+        token: adminToken,
+        body: {
+          syncMode: 'ALL',
+          impactAcknowledged: true,
+          confirmPassword: 'Admin@SamAtt2026',
+        },
       });
       assert.equal(res.status, 503);
       assert.equal(res.data.error, 'SCANNER_TIMEOUT');

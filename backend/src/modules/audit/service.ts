@@ -8,14 +8,16 @@ export interface AuditLogInput {
   action: string;
   targetType: string;
   targetId?: string | null;
-  result: 'SUCCESS' | 'FAILURE' | 'DENIED' | 'BLOCKED';
+  result: 'SUCCESS' | 'PARTIAL_SUCCESS' | 'FAILURE' | 'DENIED' | 'BLOCKED';
   errorCode?: string | null;
   detail?: Record<string, unknown> | null;
 }
 
 const SENSITIVE_KEYS = new Set([
   'password',
-  'passwordHash',
+  'confirmpassword',
+  'confirm_password',
+  'passwordhash',
   'password_hash',
   'token',
   'jwt',

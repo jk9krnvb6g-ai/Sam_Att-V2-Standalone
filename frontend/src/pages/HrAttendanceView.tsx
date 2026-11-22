@@ -19,6 +19,8 @@ import {
 } from '../components/StatusText.tsx';
 import {
   PageHeader,
+  MetricStrip,
+  StatusBadge,
   PeriodFilterBar,
   SlideOverDrawer,
   SortableHeader,
@@ -238,6 +240,37 @@ export function HrAttendanceView({
     const start = (page - 1) * pageSize;
     return filteredAndSortedItems.slice(start, start + pageSize);
   }, [filteredAndSortedItems, page, pageSize]);
+
+  // Operational summary metrics derived from filtered rows
+  const stats = useMemo(() => {
+    let normal = 0;
+    let lateOrEarly = 0;
+    let missingOrNoScan = 0;
+    let pendingReview = 0;
+    for (const r of filteredAndSortedItems) {
+      if (r.status === 'NORMAL') normal += 1;
+      if (r.status === 'LATE' || r.status === 'EARLY_CHECKOUT' || Number(r.late_minutes) > 0) {
+        lateOrEarly += 1;
+      }
+      if (
+        r.status === 'NO_SCAN' ||
+        r.status === 'MISSING_CHECKIN' ||
+        r.status === 'MISSING_CHECKOUT'
+      ) {
+        missingOrNoScan += 1;
+      }
+      if (r.review_status === 'PENDING_REVIEW' || r.status === 'NEEDS_RE_REVIEW') {
+        pendingReview += 1;
+      }
+    }
+    return {
+      total: filteredAndSortedItems.length,
+      normal,
+      lateOrEarly,
+      missingOrNoScan,
+      pendingReview,
+    };
+  }, [filteredAndSortedItems]);
 
   async function handleAddNote() {
     if (!selectedRow) return;
@@ -459,7 +492,10 @@ export function HrAttendanceView({
             )}
 
             <div className="relative w-full sm:w-60">
-              <Search className="w-4 h-4 text-[#746B83] absolute left-3.5 top-3" aria-hidden="true" />
+              <Search
+                className="w-4 h-4 text-[#777287] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                aria-hidden="true"
+              />
               <input
                 type="text"
                 aria-label="ค้นหาชื่อบุคลากรหรือรหัส"
@@ -479,14 +515,53 @@ export function HrAttendanceView({
       <ErrorBanner error={error} onRetry={loadData} />
       <NotificationBanner message={notice} onClose={() => setNotice(null)} />
 
+      {/* Unified Operational Metric Strip */}
+      <MetricStrip
+        items={[
+          {
+            label: 'รายการเวรที่แสดง',
+            value: `${stats.total.toLocaleString('th-TH')} เวร`,
+            subtext: `${formatThaiDate(resolvedRange.dateFrom)} – ${formatThaiDate(resolvedRange.dateTo)}`,
+            tone: 'primary',
+          },
+          {
+            label: 'ลงเวลาปกติ',
+            value: `${stats.normal.toLocaleString('th-TH')} เวร`,
+            subtext:
+              stats.total > 0
+                ? `${Math.round((stats.normal / stats.total) * 100)}% ของรายการที่กรอง`
+                : 'สแกนเข้า–ออกครบถ้วน',
+            tone: 'success',
+          },
+          {
+            label: 'มาสาย / ออกก่อนเวลา',
+            value: `${stats.lateOrEarly.toLocaleString('th-TH')} เวร`,
+            subtext: 'เกินเวลาผ่อนผันหรือออกก่อนเลิกงาน',
+            tone: stats.lateOrEarly > 0 ? 'warning' : 'neutral',
+          },
+          {
+            label: mode === 'review' ? 'รอตรวจ / ต้องตรวจซ้ำ' : 'ขาดสแกน / ไม่ครบคู่',
+            value: `${(mode === 'review' ? stats.pendingReview : stats.missingOrNoScan).toLocaleString('th-TH')} เวร`,
+            subtext:
+              mode === 'review'
+                ? 'รายการที่ยังไม่รับรองผล HR'
+                : 'ไม่พบสแกนเข้า–ออกหรือขาดฝั่งใดฝั่งหนึ่ง',
+            tone:
+              (mode === 'review' ? stats.pendingReview : stats.missingOrNoScan) > 0
+                ? 'danger'
+                : 'success',
+          },
+        ]}
+      />
+
       {mode === 'review' && (
-        <div className="ent-card p-5 sm:p-6 space-y-4">
+        <div className="his-surface p-5 sm:p-6 space-y-4">
           <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
             <div className="space-y-1">
-              <h2 className="text-[17px] sm:text-[18px] font-bold text-[#262238]">
+              <h2 className="text-[16.5px] font-bold text-[#292638]">
                 คำนวณผลเวลาปฏิบัติงานซ้ำ (Reprocess)
               </h2>
-              <p className="text-[13.5px] text-[#746B83]">
+              <p className="text-[13px] text-[#777287]">
                 ใช้เมื่อมีการปรับตารางเวรหรืออัปเดตการเชื่อมโยงรหัสสแกน โดยคงข้อมูลสแกนต้นฉบับและหมายเหตุเดิมครบถ้วน
               </p>
             </div>
@@ -500,7 +575,7 @@ export function HrAttendanceView({
                   onChange={(e) => setReprocessFrom(e.target.value)}
                   className="ent-input font-mono tabular-nums w-full sm:w-auto"
                 />
-                <span className="text-[13px] text-[#746B83] text-center">ถึง</span>
+                <span className="text-[13px] text-[#777287] text-center">ถึง</span>
                 <input
                   type="date"
                   aria-label="คำนวณซ้ำถึงวันที่"
@@ -514,7 +589,7 @@ export function HrAttendanceView({
                 onClick={handlePreviewReprocess}
                 className="ent-btn-secondary w-full sm:w-auto"
               >
-                <Eye className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
+                <Eye className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
                 <span>1. ดูตัวอย่างผลกระทบ</span>
               </button>
               <button
@@ -529,12 +604,12 @@ export function HrAttendanceView({
           </div>
 
           {previewResult && (
-            <div className="border border-[#E6DFF0] bg-[#F2EDFA] rounded-xl p-4 text-[13.5px] space-y-1">
-              <div className="font-bold text-[#543B7A]">
+            <div className="border border-[#D8D1E6] bg-[#F1ECFA] rounded-xl p-4 text-[13.5px] space-y-1">
+              <div className="font-bold text-[#4E3978]">
                 ผลการจำลองการคำนวณซ้ำ ({formatThaiDate(previewResult.dateFrom)} ถึง{' '}
                 {formatThaiDate(previewResult.dateTo)}):
               </div>
-              <div className="text-[#262238] tabular-nums">
+              <div className="text-[#292638] tabular-nums">
                 ประเมินทั้งหมด <strong>{previewResult.totalEvaluated}</strong> เวร · รายการใหม่{' '}
                 <strong>{previewResult.newRecordsCount}</strong> · เปลี่ยนแปลงสถานะ{' '}
                 <strong>{previewResult.changedCount}</strong> · คงเดิม{' '}
@@ -546,15 +621,15 @@ export function HrAttendanceView({
       )}
 
       {/* Main Attendance Table (Mobile Card List + Desktop Table) */}
-      <div className="ent-table-wrapper">
+      <div className="his-surface overflow-hidden">
         {loading ? (
           <TableLoadingSkeleton rows={6} cols={6} />
         ) : (
           <>
             {/* Mobile Card View (< md) */}
-            <div className="md:hidden divide-y divide-[#E6DFF0]">
+            <div className="md:hidden divide-y divide-[#E8E4EF]">
               {pagedItems.length === 0 ? (
-                <div className="p-8 text-center text-[14px] text-[#746B83]">
+                <div className="p-8 text-center text-[14px] text-[#777287]">
                   ไม่พบรายการลงเวลาตามตัวกรองที่เลือก
                 </div>
               ) : (
@@ -564,31 +639,31 @@ export function HrAttendanceView({
                     <div key={row.id} className="p-4 space-y-3 bg-white">
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <div className="font-bold text-[15px] text-[#262238]">{row.full_name}</div>
-                          <div className="text-[12.5px] text-[#746B83] mt-0.5">
+                          <div className="font-bold text-[15px] text-[#292638]">{row.full_name}</div>
+                          <div className="text-[12.5px] text-[#777287] mt-0.5">
                             <span className="font-mono">{row.person_id}</span> · สแกน{' '}
                             <span className="font-mono">{row.fingle_id || '—'}</span>
                           </div>
-                          <div className="text-[12.5px] text-[#746B83] truncate">
+                          <div className="text-[12.5px] text-[#777287] truncate">
                             {row.department_name}
                           </div>
                         </div>
                         <div className="text-right shrink-0">
-                          <div className="font-semibold text-[13.5px] text-[#262238]">
+                          <div className="font-semibold text-[13.5px] text-[#292638]">
                             {formatThaiDate(row.work_date)}
                           </div>
-                          <div className="text-[12px] font-mono text-[#746B83] tabular-nums">
+                          <div className="text-[12px] font-mono text-[#777287] tabular-nums">
                             {row.shift_name} ({row.scheduled_start?.slice(11, 16)}–
                             {row.scheduled_end?.slice(11, 16)})
                           </div>
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2.5 p-3 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0] text-[13px]">
+                      <div className="grid grid-cols-2 gap-2.5 p-3 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] text-[13px]">
                         <div>
-                          <div className="text-[#746B83] text-[12px]">เวลาสแกนเข้า</div>
+                          <div className="text-[#777287] text-[12px]">เวลาสแกนเข้า</div>
                           {row.check_in_time ? (
-                            <div className="font-mono font-bold text-[#262238] mt-0.5 tabular-nums">
+                            <div className="font-mono font-bold text-[#292638] mt-0.5 tabular-nums">
                               {row.check_in_time.slice(11, 16)} น.
                             </div>
                           ) : (
@@ -596,9 +671,9 @@ export function HrAttendanceView({
                           )}
                         </div>
                         <div>
-                          <div className="text-[#746B83] text-[12px]">เวลาสแกนออก</div>
+                          <div className="text-[#777287] text-[12px]">เวลาสแกนออก</div>
                           {row.check_out_time ? (
-                            <div className="font-mono font-bold text-[#262238] mt-0.5 tabular-nums">
+                            <div className="font-mono font-bold text-[#292638] mt-0.5 tabular-nums">
                               {row.check_out_time.slice(11, 16)} น.
                             </div>
                           ) : (
@@ -629,7 +704,7 @@ export function HrAttendanceView({
                       </div>
 
                       {rowNotes.length > 0 && (
-                        <div className="p-2.5 rounded-lg bg-[#F2EDFA] border border-[#E6DFF0] text-[12.5px] text-[#543B7A] space-y-1">
+                        <div className="p-2.5 rounded-lg bg-[#F1ECFA] border border-[#E8E4EF] text-[12.5px] text-[#4E3978] space-y-1">
                           {rowNotes.map((n) => (
                             <div key={n.id}>
                               <strong>{REASON_LABELS[n.reason_type] || n.reason_type}:</strong>{' '}
@@ -644,7 +719,7 @@ export function HrAttendanceView({
                         onClick={() => setSelectedRow(row)}
                         className="ent-btn-secondary w-full"
                       >
-                        <PanelRightOpen className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
+                        <PanelRightOpen className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
                         <span>{mode === 'review' ? 'ตรวจสอบหลักฐาน / บันทึกหมายเหตุ' : 'ดูรายละเอียดหลักฐาน'}</span>
                       </button>
                     </div>
@@ -655,9 +730,9 @@ export function HrAttendanceView({
 
             {/* Desktop Table View (>= md) */}
             <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-left border-collapse text-[14px]">
+              <table className="his-table">
                 <thead>
-                  <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
+                  <tr>
                     <SortableHeader
                       label="วันที่ปฏิบัติงาน"
                       sortKey="work_date"
@@ -679,8 +754,8 @@ export function HrAttendanceView({
                       sortDir={sortDir}
                       onSort={handleSort}
                     />
-                    <th className="py-3.5 px-4 text-[13px] font-semibold">สแกนเข้า</th>
-                    <th className="py-3.5 px-4 text-[13px] font-semibold">สแกนออก</th>
+                    <th>สแกนเข้า</th>
+                    <th>สแกนออก</th>
                     <SortableHeader
                       label="นาทีสาย"
                       sortKey="late_minutes"
@@ -711,10 +786,10 @@ export function HrAttendanceView({
                       sortDir={sortDir}
                       onSort={handleSort}
                     />
-                    <th className="py-3.5 px-4 text-[13px] font-semibold text-right">รายละเอียด</th>
+                    <th className="text-right">รายละเอียด</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#E6DFF0]">
+                <tbody>
                   {pagedItems.length === 0 ? (
                     <TableEmptyState colSpan={10} title="ไม่พบรายการลงเวลาตามตัวกรองที่เลือก" />
                   ) : (
@@ -722,35 +797,35 @@ export function HrAttendanceView({
                       const rowNotes = notes.filter((n) => n.attendance_id === row.id);
                       const earlyMins = Number(row.early_checkout_minutes || 0);
                       return (
-                        <tr key={row.id} className="hover:bg-[#F8F7FC] transition-colors">
-                          <td className="py-3.5 px-4">
-                            <div className="font-semibold text-[#262238]">
+                        <tr key={row.id}>
+                          <td>
+                            <div className="font-semibold text-[#292638]">
                               {formatThaiDate(row.work_date)}
                             </div>
-                            <div className="text-[12px] font-mono text-[#746B83] tabular-nums mt-0.5">
+                            <div className="text-[12px] font-mono text-[#777287] tabular-nums mt-0.5">
                               เวร #{row.id}
                             </div>
                           </td>
-                          <td className="py-3.5 px-4">
-                            <div className="font-semibold text-[14.5px] text-[#262238]">{row.full_name}</div>
-                            <div className="text-[12px] text-[#746B83] mt-0.5">
+                          <td>
+                            <div className="font-semibold text-[14px] text-[#292638]">{row.full_name}</div>
+                            <div className="text-[12px] text-[#777287] mt-0.5">
                               <span className="font-mono">{row.person_id}</span> · สแกน{' '}
                               <span className="font-mono">{row.fingle_id || '—'}</span> · {row.department_name}
                             </div>
                           </td>
-                          <td className="py-3.5 px-4">
-                            <div className="font-semibold text-[#262238]">{row.shift_name}</div>
-                            <div className="text-[12px] font-mono text-[#746B83] tabular-nums mt-0.5">
+                          <td>
+                            <div className="font-semibold text-[#292638]">{row.shift_name}</div>
+                            <div className="text-[12px] font-mono text-[#777287] tabular-nums mt-0.5">
                               {row.scheduled_start?.slice(11, 16)}–{row.scheduled_end?.slice(11, 16)} น.
                             </div>
                           </td>
-                          <td className="py-3.5 px-4 font-mono tabular-nums">
+                          <td className="font-mono tabular-nums">
                             {row.check_in_time ? (
                               <div>
-                                <div className="font-semibold text-[#262238]">
+                                <div className="font-semibold text-[#292638]">
                                   {row.check_in_time.slice(11, 16)} น.
                                 </div>
-                                <div className="text-[11.5px] text-[#746B83]">
+                                <div className="text-[11.5px] text-[#777287]">
                                   #{row.check_in_raw_scan_id}
                                 </div>
                               </div>
@@ -760,13 +835,13 @@ export function HrAttendanceView({
                               </span>
                             )}
                           </td>
-                          <td className="py-3.5 px-4 font-mono tabular-nums">
+                          <td className="font-mono tabular-nums">
                             {row.check_out_time ? (
                               <div>
-                                <div className="font-semibold text-[#262238]">
+                                <div className="font-semibold text-[#292638]">
                                   {row.check_out_time.slice(11, 16)} น.
                                 </div>
-                                <div className="text-[11.5px] text-[#746B83]">
+                                <div className="text-[11.5px] text-[#777287]">
                                   #{row.check_out_raw_scan_id}
                                 </div>
                               </div>
@@ -776,39 +851,39 @@ export function HrAttendanceView({
                               </span>
                             )}
                           </td>
-                          <td className="py-3.5 px-4 text-right font-mono tabular-nums">
+                          <td className="text-right font-mono tabular-nums">
                             {row.late_minutes > 0 ? (
                               <span className="font-bold text-[#B87516]">{row.late_minutes} น.</span>
                             ) : (
-                              <span className="text-[#746B83]">0</span>
+                              <span className="text-[#777287]">0</span>
                             )}
                           </td>
-                          <td className="py-3.5 px-4 text-right font-mono tabular-nums">
+                          <td className="text-right font-mono tabular-nums">
                             {earlyMins > 0 ? (
                               <span className="font-bold text-[#C74455]">{earlyMins} น.</span>
                             ) : (
-                              <span className="text-[#746B83]">0</span>
+                              <span className="text-[#777287]">0</span>
                             )}
                           </td>
-                          <td className="py-3.5 px-4">
+                          <td>
                             <AttendanceStatusText
                               status={row.status}
                               secondaryFlags={row.secondary_flags}
                               earlyCheckoutMinutes={row.early_checkout_minutes}
                             />
                             {row.leave_type && (
-                              <div className="text-[12px] text-[#543B7A] mt-0.5">
+                              <div className="text-[12px] text-[#4E3978] mt-1">
                                 ลาบางส่วน ({row.leave_start_time}–{row.leave_end_time} น.)
                               </div>
                             )}
                           </td>
-                          <td className="py-3.5 px-4">
+                          <td>
                             <ReviewStatusLabel status={row.review_status} />
                             {row.review_reason && (
-                              <div className="text-[12px] text-[#746B83] mt-0.5">{row.review_reason}</div>
+                              <div className="text-[12px] text-[#777287] mt-1">{row.review_reason}</div>
                             )}
                             {rowNotes.map((n) => (
-                              <div key={n.id} className="text-[12px] text-[#543B7A] mt-1">
+                              <div key={n.id} className="text-[12px] text-[#4E3978] mt-1">
                                 {REASON_LABELS[n.reason_type] || n.reason_type}: {n.note_text}
                                 {Number(n.needs_re_review) === 1 && (
                                   <span className="ml-1 text-[#C74455] font-semibold">(ต้องตรวจซ้ำ)</span>
@@ -816,13 +891,13 @@ export function HrAttendanceView({
                               </div>
                             ))}
                           </td>
-                          <td className="py-3.5 px-4 text-right">
+                          <td className="text-right">
                             <button
                               type="button"
                               onClick={() => setSelectedRow(row)}
-                              className="h-9 px-3 text-[13px] font-semibold bg-white border border-[#E6DFF0] rounded-lg hover:bg-[#F2EDFA] hover:border-[#8E70C9]/50 hover:text-[#543B7A] inline-flex items-center gap-1.5 whitespace-nowrap text-[#262238] transition-colors cursor-pointer"
+                              className="ent-btn-secondary h-8 px-3 text-[12.5px] whitespace-nowrap"
                             >
-                              <PanelRightOpen className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
+                              <PanelRightOpen className="w-3.5 h-3.5 text-[#8066B5]" aria-hidden="true" />
                               <span>{mode === 'review' ? 'ตรวจสอบ / หมายเหตุ' : 'ดูรายละเอียด'}</span>
                             </button>
                           </td>
@@ -859,14 +934,14 @@ export function HrAttendanceView({
       >
         {selectedRow && (
           <div className="space-y-6">
-            {/* Employee & Shift Summary Card */}
-            <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0] space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E6DFF0] pb-3">
+            {/* Employee & Shift Summary */}
+            <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E8E4EF] pb-3">
                 <div>
-                  <div className="text-[12.5px] text-[#746B83]">รหัสบุคลากร · รหัสลายนิ้วมือ · กลุ่มงาน</div>
-                  <div className="font-mono font-bold text-[#262238] text-[14px] mt-0.5">
+                  <div className="text-[12px] text-[#777287]">รหัสบุคลากร · รหัสลายนิ้วมือ · กลุ่มงาน</div>
+                  <div className="font-mono font-bold text-[#292638] text-[13.5px] mt-0.5">
                     {selectedRow.person_id} · สแกน {selectedRow.fingle_id || '—'} ·{' '}
-                    <span className="font-sans font-medium text-[#746B83]">{selectedRow.department_name}</span>
+                    <span className="font-sans font-medium text-[#777287]">{selectedRow.department_name}</span>
                   </div>
                 </div>
                 <AttendanceStatusText
@@ -879,40 +954,40 @@ export function HrAttendanceView({
               {(selectedRow.leave_type || Number(selectedRow.early_checkout_minutes || 0) > 0) && (
                 <div className="flex flex-wrap gap-2 text-[12.5px]">
                   {selectedRow.leave_type && (
-                    <span className="px-2.5 py-1 rounded-md bg-[#F2EDFA] border border-[#E6DFF0] text-[#543B7A] font-semibold">
+                    <StatusBadge tone="primary">
                       ลาบางส่วน {selectedRow.leave_start_time}–{selectedRow.leave_end_time} น. (ประเมินช่วง{' '}
                       {selectedRow.evaluated_start_time?.slice(11, 16)}–{selectedRow.evaluated_end_time?.slice(11, 16)} น.)
-                    </span>
+                    </StatusBadge>
                   )}
                   {Number(selectedRow.early_checkout_minutes || 0) > 0 && (
-                    <span className="px-2.5 py-1 rounded-md bg-[#FDF2F3] border border-[#F3CCD0] text-[#C74455] font-semibold">
+                    <StatusBadge tone="danger">
                       ออกก่อนเวลา {selectedRow.early_checkout_minutes} นาที
-                    </span>
+                    </StatusBadge>
                   )}
                 </div>
               )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[13.5px]">
-                <div className="p-3 rounded-lg bg-white border border-[#E6DFF0]">
-                  <div className="text-[12.5px] text-[#746B83]">หลักฐานเวลาสแกนเข้า</div>
-                  <div className="font-mono font-semibold text-[#262238] mt-1 tabular-nums">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[13px]">
+                <div className="p-3 rounded-lg bg-white border border-[#E8E4EF]">
+                  <div className="text-[12px] text-[#777287]">หลักฐานเวลาสแกนเข้า</div>
+                  <div className="font-mono font-semibold text-[#292638] mt-1 tabular-nums">
                     {selectedRow.check_in_time
                       ? formatThaiDateTime(selectedRow.check_in_time)
                       : 'ไม่พบข้อมูลสแกนเข้า'}
                   </div>
-                  <div className="font-mono text-[12px] text-[#746B83] mt-0.5">
+                  <div className="font-mono text-[11.5px] text-[#777287] mt-0.5">
                     Raw Scan: #{selectedRow.check_in_raw_scan_id || '—'}
                   </div>
                 </div>
 
-                <div className="p-3 rounded-lg bg-white border border-[#E6DFF0]">
-                  <div className="text-[12.5px] text-[#746B83]">หลักฐานเวลาสแกนออก</div>
-                  <div className="font-mono font-semibold text-[#262238] mt-1 tabular-nums">
+                <div className="p-3 rounded-lg bg-white border border-[#E8E4EF]">
+                  <div className="text-[12px] text-[#777287]">หลักฐานเวลาสแกนออก</div>
+                  <div className="font-mono font-semibold text-[#292638] mt-1 tabular-nums">
                     {selectedRow.check_out_time
                       ? formatThaiDateTime(selectedRow.check_out_time)
                       : 'ไม่พบข้อมูลสแกนออก'}
                   </div>
-                  <div className="font-mono text-[12px] text-[#746B83] mt-0.5">
+                  <div className="font-mono text-[11.5px] text-[#777287] mt-0.5">
                     Raw Scan: #{selectedRow.check_out_raw_scan_id || '—'}
                   </div>
                 </div>
@@ -921,38 +996,38 @@ export function HrAttendanceView({
 
             {/* Raw Scan Usage Trace (ATT-09: Used vs Extra Unused Scans) */}
             <div className="space-y-2.5">
-              <div className="border-b border-[#E6DFF0] pb-1.5">
-                <h4 className="text-[15px] font-bold text-[#262238]">
+              <div className="border-b border-[#E8E4EF] pb-1.5">
+                <h4 className="text-[14.5px] font-bold text-[#292638]">
                   รายการสแกนทั้งหมดของบุคลากรในช่วงเวรนี้ ({selectedRowScans.length} รายการ)
                 </h4>
-                <p className="text-[12.5px] text-[#746B83]">
+                <p className="text-[12.5px] text-[#777287]">
                   แสดงสแกนที่ถูกนำไปจับคู่เป็นเข้า/ออกงาน กะอื่น และสแกนเพิ่มเติมที่ไม่ได้ถูกใช้ซ้ำ
                 </p>
               </div>
               {loadingDrawerScans ? (
-                <div className="text-[13px] text-[#746B83] py-2">กำลังโหลดรายการสแกน...</div>
+                <div className="text-[13px] text-[#777287] py-2">กำลังโหลดรายการสแกน...</div>
               ) : selectedRowScans.length === 0 ? (
-                <div className="text-[13px] text-[#746B83] py-2">ไม่พบข้อมูลสแกนดิบในช่วงเวลาใกล้เคียง</div>
+                <div className="text-[13px] text-[#777287] py-2">ไม่พบข้อมูลสแกนดิบในช่วงเวลาใกล้เคียง</div>
               ) : (
-                <div className="divide-y divide-[#E6DFF0] border border-[#E6DFF0] rounded-xl bg-white text-[13px]">
+                <div className="divide-y divide-[#E8E4EF] border border-[#E8E4EF] rounded-xl bg-white text-[13px]">
                   {selectedRowScans.map((sc) => (
                     <div key={sc.id} className="px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2">
                       <div>
-                        <span className="font-mono font-bold text-[#262238] tabular-nums">{sc.canonical_bkk_time}</span>
-                        <span className="text-[12px] font-mono text-[#746B83] ml-2">
+                        <span className="font-mono font-bold text-[#292638] tabular-nums">{sc.canonical_bkk_time}</span>
+                        <span className="text-[12px] font-mono text-[#777287] ml-2">
                           (สแกน #{sc.id} · เครื่อง #{sc.machine_no})
                         </span>
                       </div>
-                      <span
-                        className={`text-[12.5px] font-semibold ${
+                      <StatusBadge
+                        tone={
                           sc.relationToShift === 'USED_AS_IN_THIS_SHIFT'
-                            ? 'text-[#198568]'
+                            ? 'success'
                             : sc.relationToShift === 'USED_AS_OUT_THIS_SHIFT'
-                            ? 'text-[#5879BC]'
+                            ? 'info'
                             : sc.relationToShift === 'USED_BY_OTHER_SHIFT'
-                            ? 'text-[#543B7A]'
-                            : 'text-[#746B83]'
-                        }`}
+                            ? 'primary'
+                            : 'neutral'
+                        }
                       >
                         {sc.relationToShift === 'USED_AS_IN_THIS_SHIFT'
                           ? 'ใช้เป็นสแกนเข้ากะนี้'
@@ -961,13 +1036,13 @@ export function HrAttendanceView({
                           : sc.relationToShift === 'USED_BY_OTHER_SHIFT'
                           ? `ใช้โดยกะอื่น (${sc.usage_shift_code || `#${sc.usage_attendance_id}`})`
                           : 'สแกนเพิ่มเติม (ไม่ถูกใช้)'}
-                      </span>
+                      </StatusBadge>
                     </div>
                   ))}
                 </div>
               )}
               {selectedRowHistory.length > 0 && (
-                <div className="p-3 rounded-xl bg-[#FEF8ED] border border-[#F3DFBC] text-[12.5px] text-[#262238] space-y-1">
+                <div className="p-3 rounded-xl bg-[#FEF7EA] border border-[#F2DCBA] text-[12.5px] text-[#292638] space-y-1">
                   <div className="font-bold text-[#B87516]">ประวัติการเปลี่ยนแปลงผลจับคู่ (Reprocess):</div>
                   {selectedRowHistory.slice(0, 3).map((mh) => (
                     <div key={mh.id} className="font-mono">
@@ -979,12 +1054,12 @@ export function HrAttendanceView({
             </div>
 
             {/* Compact Half-Day Leave Recording (ATT-15 — never modifies shift template) */}
-            <div className="space-y-3 p-4 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0]">
+            <div className="space-y-3 p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF]">
               <div>
-                <h4 className="text-[14.5px] font-bold text-[#262238]">
+                <h4 className="text-[14.5px] font-bold text-[#292638]">
                   บันทึกการลาครึ่งวันสำหรับเวรนี้ (ไม่แก้ไขแม่แบบกะ)
                 </h4>
-                <p className="text-[12.5px] text-[#746B83]">
+                <p className="text-[12.5px] text-[#777287]">
                   ระบบจะปรับช่วงเวลาที่ใช้ประเมินมาสาย/ออกก่อนเวลาเฉพาะรายการนี้และคำนวณเวลาใหม่ทันที
                 </p>
               </div>
@@ -1044,11 +1119,11 @@ export function HrAttendanceView({
 
             {/* HR Note & Verification Form */}
             <div className="space-y-4">
-              <div className="border-b border-[#E6DFF0] pb-2">
-                <h4 className="text-[15.5px] font-bold text-[#262238]">
+              <div className="border-b border-[#E8E4EF] pb-2">
+                <h4 className="text-[15px] font-bold text-[#292638]">
                   บันทึกเหตุผลและรับรองผลการตรวจสอบ
                 </h4>
-                <p className="text-[13px] text-[#746B83]">
+                <p className="text-[12.5px] text-[#777287]">
                   การบันทึกหมายเหตุจะจัดเก็บแยกในตารางประวัติโดยไม่แก้ไขเวลาสแกนต้นฉบับจากเครื่องสแกน
                 </p>
               </div>
@@ -1104,7 +1179,7 @@ export function HrAttendanceView({
                   onClick={handleAddNote}
                   className="ent-btn-secondary w-full sm:w-auto"
                 >
-                  <FileText className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
+                  <FileText className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
                   <span>บันทึกหมายเหตุ</span>
                 </button>
                 <button
@@ -1122,37 +1197,37 @@ export function HrAttendanceView({
       </SlideOverDrawer>
 
       {mode === 'review' && reviewHistory.length > 0 && (
-        <div className="ent-table-wrapper">
-          <div className="px-5 py-4 border-b border-[#E6DFF0] bg-[#F8F7FC]">
-            <h2 className="text-[17px] font-bold text-[#262238]">
+        <div className="his-surface overflow-hidden">
+          <div className="px-5 py-4 border-b border-[#E8E4EF] bg-[#F8F7FC]">
+            <h2 className="text-[16px] font-bold text-[#292638]">
               ประวัติการรับรองผลตรวจสอบล่าสุดโดยเจ้าหน้าที่ HR
             </h2>
           </div>
           <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-[14px]">
+            <table className="his-table">
               <thead>
-                <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
-                  <th className="py-3.5 px-5 font-semibold text-[13px]">วันและเวลาที่ตรวจสอบ</th>
-                  <th className="py-3.5 px-5 font-semibold text-[13px]">รหัสเวร · บุคลากร</th>
-                  <th className="py-3.5 px-5 font-semibold text-[13px]">ผลการพิจารณา</th>
-                  <th className="py-3.5 px-5 font-semibold text-[13px]">ความเห็นเจ้าหน้าที่</th>
-                  <th className="py-3.5 px-5 font-semibold text-[13px]">ผู้ตรวจสอบ</th>
+                <tr>
+                  <th>วันและเวลาที่ตรวจสอบ</th>
+                  <th>รหัสเวร · บุคลากร</th>
+                  <th>ผลการพิจารณา</th>
+                  <th>ความเห็นเจ้าหน้าที่</th>
+                  <th>ผู้ตรวจสอบ</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#E6DFF0]">
+              <tbody>
                 {reviewHistory.map((h) => (
-                  <tr key={h.id} className="hover:bg-[#F8F7FC]">
-                    <td className="py-3.5 px-5 font-mono tabular-nums text-[#262238]">
+                  <tr key={h.id}>
+                    <td className="font-mono tabular-nums text-[#292638]">
                       {formatThaiDateTime(h.reviewed_at)}
                     </td>
-                    <td className="py-3.5 px-5 font-mono text-[#262238]">
+                    <td className="font-mono text-[#292638]">
                       เวร #{h.attendance_id} · {h.person_id} ({formatThaiDate(h.work_date)})
                     </td>
-                    <td className="py-3.5 px-5">
+                    <td>
                       <ReviewStatusLabel status={h.new_review_status} />
                     </td>
-                    <td className="py-3.5 px-5 text-[#262238]">{h.review_comment}</td>
-                    <td className="py-3.5 px-5 font-mono text-[#746B83]">{h.reviewed_by}</td>
+                    <td className="text-[#292638]">{h.review_comment}</td>
+                    <td className="font-mono text-[#777287]">{h.reviewed_by}</td>
                   </tr>
                 ))}
               </tbody>

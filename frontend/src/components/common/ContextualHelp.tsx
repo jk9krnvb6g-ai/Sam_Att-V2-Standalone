@@ -46,7 +46,6 @@ export function canRoleAccessView(view: NavViewKey, role?: UserRole | null): boo
 
 /**
  * ปุ่มมาตรฐาน "วิธีใช้งานหน้านี้" สำหรับวางบริเวณ Header ของทุกหน้า
- * จัดการสถานะเปิด-ปิด Drawer ภายในตัวเองเพื่อไม่กระทบ State ของฟอร์มในหน้านั้น
  */
 export function PageHelpAction({
   guideKey,
@@ -76,14 +75,14 @@ export function PageHelpAction({
         aria-expanded={open}
         data-testid={`contextual-help-btn-${guideKey}`}
         className={`${
-          compact ? 'h-9 px-3 text-[13px]' : 'min-h-[40px] px-3.5 py-2 text-[13.5px]'
-        } rounded-lg border border-[#E6DFF0] bg-[#F2EDFA] hover:bg-[#EDE5F8] hover:border-[#8E70C9]/50 text-[#543B7A] font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
+          compact ? 'h-9 px-3 text-[13px]' : 'min-h-[38px] px-3.5 py-1.5 text-[13.5px]'
+        } rounded-lg border border-[#E8E4EF] bg-[#F1ECFA] hover:bg-[#E9DFF5] hover:border-[#8066B5]/40 text-[#4E3978] font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer`}
         title={`เปิดคู่มือวิธีใช้งานหน้านี้ (${label})`}
       >
         {iconType === 'help' ? (
-          <HelpCircle className="w-4 h-4 text-[#8E70C9] shrink-0" aria-hidden="true" />
+          <HelpCircle className="w-4 h-4 text-[#8066B5] shrink-0" aria-hidden="true" />
         ) : (
-          <BookOpen className="w-4 h-4 text-[#8E70C9] shrink-0" aria-hidden="true" />
+          <BookOpen className="w-4 h-4 text-[#8066B5] shrink-0" aria-hidden="true" />
         )}
         <span>{label}</span>
       </button>
@@ -101,7 +100,7 @@ export function PageHelpAction({
 }
 
 /**
- * รายการขั้นตอนแบบหมายเลขที่กดขยาย/ย่อคำอธิบายได้ (ใช้ร่วมกันทั้ง Drawer และหน้าคู่มือเต็ม)
+ * รายการขั้นตอนแบบหมายเลขที่กดขยาย/ย่อคำอธิบายได้
  */
 export function ExpandableStepList({
   steps,
@@ -148,52 +147,49 @@ export function ExpandableStepList({
           <button
             type="button"
             onClick={toggleAll}
-            className="text-[12.5px] font-semibold text-[#543B7A] hover:text-[#795BB8] hover:underline cursor-pointer"
+            className="text-[12.5px] font-semibold text-[#8066B5] hover:text-[#4E3978] hover:underline cursor-pointer"
           >
             {allExpanded ? 'ย่อคำอธิบายทั้งหมด' : 'ขยายคำอธิบายทุกขั้นตอน'}
           </button>
         </div>
       )}
 
-      <ol className="space-y-2">
+      <ol className="his-surface divide-y divide-[#E8E4EF] overflow-hidden">
         {steps.map((step, idx) => {
           const isOpen = Boolean(expandedIndices[idx]);
           return (
-            <li
-              key={`${step.title}-${idx}`}
-              className="rounded-xl border border-[#E6DFF0] bg-white overflow-hidden"
-            >
+            <li key={`${step.title}-${idx}`} className="bg-white">
               <button
                 type="button"
                 aria-expanded={isOpen}
                 onClick={() => toggleOne(idx)}
-                className="w-full px-3.5 py-3 flex items-start justify-between gap-3 text-left hover:bg-[#F8F7FC] transition-colors cursor-pointer"
+                className="w-full px-4 py-3 flex items-start justify-between gap-3 text-left hover:bg-[#F8F7FC] transition-colors cursor-pointer"
               >
                 <div className="flex items-start gap-3 min-w-0">
-                  <span className="w-6 h-6 rounded-full bg-[#EDE5F8] text-[#543B7A] font-mono text-[12.5px] font-bold flex items-center justify-center shrink-0 mt-0.5 tabular-nums">
+                  <span className="w-6 h-6 rounded-full bg-[#F1ECFA] text-[#4E3978] font-mono text-[12px] font-bold flex items-center justify-center shrink-0 mt-0.5 tabular-nums">
                     {idx + 1}
                   </span>
-                  <span className="text-[14px] font-semibold text-[#262238] leading-snug">
+                  <span className="text-[14px] font-semibold text-[#292638] leading-snug">
                     {step.title}
                   </span>
                 </div>
                 {isOpen ? (
-                  <ChevronUp className="w-4 h-4 text-[#8E70C9] shrink-0 mt-1" aria-hidden="true" />
+                  <ChevronUp className="w-4 h-4 text-[#8066B5] shrink-0 mt-1" aria-hidden="true" />
                 ) : (
-                  <ChevronDown className="w-4 h-4 text-[#746B83] shrink-0 mt-1" aria-hidden="true" />
+                  <ChevronDown className="w-4 h-4 text-[#777287] shrink-0 mt-1" aria-hidden="true" />
                 )}
               </button>
 
               {isOpen && (
-                <div className="px-3.5 pb-3.5 pt-1.5 pl-[3.25rem] space-y-2 text-[13.5px] text-[#746B83] leading-relaxed border-t border-[#F2EDFA]">
-                  <p className="text-[#262238]">{step.detail}</p>
+                <div className="px-4 pb-3.5 pt-1 pl-[3.25rem] space-y-2 text-[13.5px] text-[#777287] leading-relaxed">
+                  <p className="text-[#292638]">{step.detail}</p>
                   {step.uiLocation && (
-                    <div className="text-[12.5px] text-[#543B7A] bg-[#F8F7FC] border border-[#E6DFF0] rounded-lg px-2.5 py-1.5">
+                    <div className="text-[12.5px] text-[#4E3978] bg-[#F8F7FC] border border-[#E8E4EF] rounded-lg px-3 py-1.5">
                       <span className="font-semibold">ตำแหน่งบนหน้าจอ:</span> {step.uiLocation}
                     </div>
                   )}
                   {step.note && (
-                    <div className="text-[12.5px] text-[#B87516] bg-[#FEF8ED] border border-[#F3DFBC] rounded-lg px-2.5 py-1.5">
+                    <div className="text-[12.5px] text-[#B87516] bg-[#FEF7EA] border border-[#B87516]/20 rounded-lg px-3 py-1.5">
                       <span className="font-semibold">หมายเหตุ:</span> {step.note}
                     </div>
                   )}
@@ -209,7 +205,6 @@ export function ExpandableStepList({
 
 /**
  * แผงลิ้นชักคู่มือการใช้งานประจำหน้า (Slide-Over Contextual Help Drawer)
- * แสดงครบทั้ง 8 หัวข้อมาตรฐานโดยไม่กระทบสถานะฟอร์มที่กำลังกรอกอยู่
  */
 export function ContextualHelpDrawer({
   open,
@@ -229,7 +224,6 @@ export function ContextualHelpDrawer({
   const guide = getGuideEntry(guideKey);
   const [selectedTaskGroupId, setSelectedTaskGroupId] = useState<string>('ALL');
 
-  // อัปเดตกลุ่มงานที่เน้นตาม Tab ปัจจุบันของหน้าจอเมื่อเปิด Drawer
   useEffect(() => {
     if (!open) return;
     if (activeTabKey && guide.taskGroups?.length) {
@@ -242,7 +236,6 @@ export function ContextualHelpDrawer({
     setSelectedTaskGroupId('ALL');
   }, [open, activeTabKey, guideKey, guide.taskGroups]);
 
-  // รองรับปุ่ม ESC เพื่อปิดแผงคู่มือ
   useEffect(() => {
     if (!open) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -276,7 +269,7 @@ export function ContextualHelpDrawer({
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-[#262238]/35 backdrop-blur-xs flex justify-end"
+      className="fixed inset-0 z-50 bg-[#292638]/35 backdrop-blur-xs flex justify-end"
       onClick={onClose}
       role="dialog"
       aria-modal="true"
@@ -284,24 +277,23 @@ export function ContextualHelpDrawer({
       data-testid="contextual-help-drawer"
     >
       <div
-        className="bg-[#F8F7FC] border-l border-[#E6DFF0] w-full max-w-2xl h-full shadow-2xl flex flex-col overflow-hidden"
+        className="bg-[#F8F7FC] border-l border-[#E8E4EF] w-full max-w-2xl h-full shadow-xl flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
-        <div className="px-4 sm:px-6 py-4 bg-white border-b border-[#E6DFF0] flex items-start justify-between gap-3 shrink-0">
+        <div className="px-4 sm:px-6 py-4 bg-white border-b border-[#E8E4EF] flex items-start justify-between gap-3 shrink-0">
           <div className="space-y-1 min-w-0">
-            <div className="flex flex-wrap items-center gap-2 text-[12.5px] font-semibold text-[#543B7A]">
+            <div className="flex flex-wrap items-center gap-2 text-[12.5px] font-semibold text-[#4E3978]">
               <span>คู่มือการใช้งานประจำหน้า</span>
-              <span aria-hidden="true" className="text-[#E6DFF0]">·</span>
-              <span className="text-[#8E70C9]">{guide.menuLabel}</span>
+              <span aria-hidden="true" className="text-[#E8E4EF]">·</span>
+              <span className="text-[#8066B5]">{guide.menuLabel}</span>
             </div>
             <h2
               id="contextual-help-drawer-title"
-              className="text-[17.5px] sm:text-[19px] font-bold text-[#262238] tracking-tight leading-snug"
+              className="text-[17.5px] sm:text-[19px] font-bold text-[#292638] tracking-tight leading-snug"
             >
               {guide.title}
             </h2>
-            <p className="text-[13px] text-[#746B83]">
+            <p className="text-[13px] text-[#777287]">
               เปิดอ่านและปิดกลับไปทำงานต่อได้ทันที ข้อมูลที่กรอกค้างไว้ในหน้าจอจะไม่สูญหาย
             </p>
           </div>
@@ -309,7 +301,7 @@ export function ContextualHelpDrawer({
           <button
             type="button"
             onClick={onClose}
-            className="p-2 rounded-lg text-[#746B83] hover:text-[#262238] hover:bg-[#F2EDFA] transition-colors shrink-0 cursor-pointer"
+            className="p-2 rounded-lg text-[#777287] hover:text-[#292638] hover:bg-[#F1ECFA] transition-colors shrink-0 cursor-pointer"
             title="ปิดคู่มือ (Esc)"
             aria-label="ปิดคู่มือการใช้งาน"
           >
@@ -317,55 +309,50 @@ export function ContextualHelpDrawer({
           </button>
         </div>
 
-        {/* Body */}
         <div className="p-4 sm:p-6 overflow-y-auto flex-1 space-y-5 text-[14px]">
-          {/* สถานะความพร้อมใช้งานตามจริง */}
           {guide.readinessStatus === 'CONDITIONAL' && guide.readinessNote && (
-            <div className="p-3.5 rounded-xl bg-[#FEF8ED] border border-[#F3DFBC] text-[#B87516] flex items-start gap-2.5 text-[13px] leading-relaxed">
+            <div className="p-3.5 rounded-xl bg-[#FEF7EA] border border-[#B87516]/25 text-[#B87516] flex items-start gap-2.5 text-[13px] leading-relaxed">
               <Info className="w-4.5 h-4.5 shrink-0 mt-0.5 text-[#B87516]" aria-hidden="true" />
               <div>
                 <div className="font-bold">{guide.readinessLabel}</div>
-                <p className="mt-0.5 text-[#262238]">{guide.readinessNote}</p>
+                <p className="mt-0.5 text-[#292638]">{guide.readinessNote}</p>
               </div>
             </div>
           )}
 
-          {/* 1. เมนูนี้ใช้ทำอะไร & 2. ผู้ใช้งานที่มีสิทธิ์ */}
-          <div className="rounded-xl bg-white border border-[#E6DFF0] p-4 space-y-3">
-            <div>
-              <h3 className="text-[14px] font-bold text-[#543B7A]">1. เมนูนี้ใช้ทำอะไร</h3>
-              <p className="mt-1 text-[13.5px] text-[#262238] leading-relaxed">
+          {/* 1-3 รวมในพื้นผิวเดียวคั่นด้วย hairline divider */}
+          <div className="his-surface divide-y divide-[#E8E4EF]">
+            <div className="p-4">
+              <h3 className="text-[14px] font-bold text-[#4E3978]">1. เมนูนี้ใช้ทำอะไร</h3>
+              <p className="mt-1 text-[13.5px] text-[#292638] leading-relaxed">
                 {guide.whatItDoes}
               </p>
             </div>
-            <div className="pt-3 border-t border-[#F2EDFA]">
-              <h3 className="text-[14px] font-bold text-[#543B7A]">2. ผู้ใช้งานที่มีสิทธิ์</h3>
-              <p className="mt-1 text-[13.5px] text-[#262238] leading-relaxed">
+            <div className="p-4">
+              <h3 className="text-[14px] font-bold text-[#4E3978]">2. ผู้ใช้งานที่มีสิทธิ์</h3>
+              <p className="mt-1 text-[13.5px] text-[#292638] leading-relaxed">
                 {guide.allowedRolesSummary}
               </p>
             </div>
+            <div className="p-4 space-y-2">
+              <h3 className="text-[14px] font-bold text-[#4E3978]">3. สิ่งที่ต้องเตรียมก่อนเริ่ม</h3>
+              <ul className="space-y-1.5 text-[13.5px] text-[#292638]">
+                {guide.prerequisites.map((item, idx) => (
+                  <li key={idx} className="flex items-start gap-2">
+                    <CheckCircle2
+                      className="w-4 h-4 text-[#198568] shrink-0 mt-0.5"
+                      aria-hidden="true"
+                    />
+                    <span>{item}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
 
-          {/* 3. สิ่งที่ต้องเตรียมก่อนเริ่ม */}
-          <div className="rounded-xl bg-white border border-[#E6DFF0] p-4 space-y-2">
-            <h3 className="text-[14px] font-bold text-[#543B7A]">3. สิ่งที่ต้องเตรียมก่อนเริ่ม</h3>
-            <ul className="space-y-1.5 text-[13.5px] text-[#262238]">
-              {guide.prerequisites.map((item, idx) => (
-                <li key={idx} className="flex items-start gap-2">
-                  <CheckCircle2
-                    className="w-4 h-4 text-[#198568] shrink-0 mt-0.5"
-                    aria-hidden="true"
-                  />
-                  <span>{item}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          {/* 4. ขั้นตอนการใช้งานจริงตามลำดับ (รองรับการสลับตาม Tab / งานย่อย) */}
           <div className="space-y-3">
             <div className="flex flex-col gap-2">
-              <h3 className="text-[14.5px] font-bold text-[#543B7A]">
+              <h3 className="text-[14.5px] font-bold text-[#4E3978]">
                 4. ขั้นตอนการใช้งานจริงตามลำดับ
               </h3>
               {guide.taskGroups && guide.taskGroups.length > 0 && (
@@ -397,8 +384,8 @@ export function ContextualHelpDrawer({
 
             {activeTaskGroup ? (
               <div className="space-y-2.5">
-                <div className="p-3 rounded-xl bg-[#F2EDFA] border border-[#E6DFF0] text-[13px] text-[#262238]">
-                  <span className="font-bold text-[#543B7A]">{activeTaskGroup.label}:</span>{' '}
+                <div className="p-3 rounded-xl bg-[#F1ECFA] border border-[#E8E4EF] text-[13px] text-[#292638]">
+                  <span className="font-bold text-[#4E3978]">{activeTaskGroup.label}:</span>{' '}
                   {activeTaskGroup.summary}
                 </div>
                 <ExpandableStepList steps={activeTaskGroup.steps} defaultExpandedAll />
@@ -408,16 +395,15 @@ export function ContextualHelpDrawer({
             )}
           </div>
 
-          {/* 5. ตัวอย่างการใช้งานจริง */}
-          <div className="rounded-xl bg-white border border-[#E6DFF0] p-4 space-y-2.5">
-            <h3 className="text-[14px] font-bold text-[#543B7A]">5. ตัวอย่างการใช้งานจริง</h3>
-            <div className="space-y-1.5 text-[13.5px] text-[#262238] leading-relaxed">
+          <div className="his-surface p-4 space-y-2.5">
+            <h3 className="text-[14px] font-bold text-[#4E3978]">5. ตัวอย่างการใช้งานจริง</h3>
+            <div className="space-y-1.5 text-[13.5px] text-[#292638] leading-relaxed">
               <div>
-                <span className="font-semibold text-[#746B83]">สถานการณ์:</span>{' '}
+                <span className="font-semibold text-[#777287]">สถานการณ์:</span>{' '}
                 {guide.example.scenario}
               </div>
               <div>
-                <span className="font-semibold text-[#746B83]">วิธีทำ:</span>{' '}
+                <span className="font-semibold text-[#777287]">วิธีทำ:</span>{' '}
                 {guide.example.action}
               </div>
               <div>
@@ -427,12 +413,11 @@ export function ContextualHelpDrawer({
             </div>
           </div>
 
-          {/* 6. ผลลัพธ์ที่ควรปรากฏหลังดำเนินการสำเร็จ */}
-          <div className="rounded-xl bg-[#EDF8F4] border border-[#C2E6DA] p-4 space-y-2">
+          <div className="rounded-xl bg-[#EEF8F4] border border-[#198568]/20 p-4 space-y-2">
             <h3 className="text-[14px] font-bold text-[#198568]">
               6. ผลลัพธ์ที่ควรปรากฏหลังดำเนินการสำเร็จ
             </h3>
-            <ul className="space-y-1.5 text-[13.5px] text-[#262238]">
+            <ul className="space-y-1.5 text-[13.5px] text-[#292638]">
               {guide.expectedResults.map((res, idx) => (
                 <li key={idx} className="flex items-start gap-2">
                   <CheckCircle2
@@ -445,55 +430,53 @@ export function ContextualHelpDrawer({
             </ul>
           </div>
 
-          {/* 7. ข้อควรระวัง */}
-          <div className="rounded-xl bg-[#FEF8ED] border border-[#F3DFBC] p-4 space-y-2">
+          <div className="rounded-xl bg-[#FEF7EA] border border-[#B87516]/20 p-4 space-y-2">
             <h3 className="text-[14px] font-bold text-[#B87516] flex items-center gap-1.5">
               <AlertTriangle className="w-4 h-4 text-[#B87516] shrink-0" aria-hidden="true" />
               <span>7. ข้อควรระวัง</span>
             </h3>
-            <ul className="space-y-1.5 text-[13.5px] text-[#262238] list-disc pl-5">
+            <ul className="space-y-1.5 text-[13.5px] text-[#292638] list-disc pl-5">
               {guide.precautions.map((item, idx) => (
                 <li key={idx}>{item}</li>
               ))}
             </ul>
           </div>
 
-          {/* 8. ปัญหาที่พบบ่อยและแนวทางแก้ไข */}
-          <div className="rounded-xl bg-white border border-[#E6DFF0] p-4 space-y-3">
-            <h3 className="text-[14px] font-bold text-[#543B7A] flex items-center gap-1.5">
-              <Wrench className="w-4 h-4 text-[#8E70C9] shrink-0" aria-hidden="true" />
-              <span>8. ปัญหาที่พบบ่อยและแนวทางแก้ไข</span>
-            </h3>
-            <div className="space-y-2.5">
+          <div className="his-surface overflow-hidden">
+            <div className="px-4 py-3 border-b border-[#E8E4EF] flex items-center gap-1.5">
+              <Wrench className="w-4 h-4 text-[#8066B5] shrink-0" aria-hidden="true" />
+              <h3 className="text-[14px] font-bold text-[#4E3978]">
+                8. ปัญหาที่พบบ่อยและแนวทางแก้ไข
+              </h3>
+            </div>
+            <div className="divide-y divide-[#E8E4EF]">
               {guide.troubleshooting.map((tb, idx) => (
-                <div
-                  key={idx}
-                  className="p-3 rounded-lg bg-[#F8F7FC] border border-[#E6DFF0] space-y-1 text-[13.5px]"
-                >
-                  <div className="font-semibold text-[#262238]">ปัญหา: {tb.problem}</div>
-                  <div className="text-[#746B83]">แนวทางแก้ไข: {tb.solution}</div>
+                <div key={idx} className="px-4 py-3 space-y-1 text-[13.5px]">
+                  <div className="font-semibold text-[#292638]">ปัญหา: {tb.problem}</div>
+                  <div className="text-[#777287]">แนวทางแก้ไข: {tb.solution}</div>
                 </div>
               ))}
             </div>
           </div>
 
-          {/* หน้าที่เกี่ยวข้อง (เฉพาะหน้าที่ผู้ใช้มีสิทธิ์เข้าถึง) */}
           {onNavigate && visibleRelatedLinks.length > 0 && (
-            <div className="rounded-xl bg-white border border-[#E6DFF0] p-4 space-y-2.5">
-              <h3 className="text-[14px] font-bold text-[#543B7A]">เมนูที่เกี่ยวข้อง</h3>
-              <div className="space-y-2">
+            <div className="his-surface overflow-hidden">
+              <div className="px-4 py-3 border-b border-[#E8E4EF]">
+                <h3 className="text-[14px] font-bold text-[#4E3978]">เมนูที่เกี่ยวข้อง</h3>
+              </div>
+              <div className="divide-y divide-[#E8E4EF]">
                 {visibleRelatedLinks.map((link) => (
                   <button
                     key={link.view}
                     type="button"
                     onClick={() => handleSafeNavigate(link.view)}
-                    className="w-full p-3 rounded-lg border border-[#E6DFF0] bg-[#F8F7FC] hover:bg-[#F2EDFA] hover:border-[#8E70C9]/50 flex items-center justify-between gap-3 text-left transition-colors cursor-pointer"
+                    className="w-full px-4 py-3 hover:bg-[#F1ECFA]/60 flex items-center justify-between gap-3 text-left transition-colors cursor-pointer"
                   >
                     <div className="min-w-0">
-                      <div className="text-[13.5px] font-bold text-[#543B7A]">{link.label}</div>
-                      <div className="text-[12.5px] text-[#746B83]">{link.reason}</div>
+                      <div className="text-[13.5px] font-bold text-[#4E3978]">{link.label}</div>
+                      <div className="text-[12.5px] text-[#777287]">{link.reason}</div>
                     </div>
-                    <ArrowRight className="w-4 h-4 text-[#8E70C9] shrink-0" aria-hidden="true" />
+                    <ArrowRight className="w-4 h-4 text-[#8066B5] shrink-0" aria-hidden="true" />
                   </button>
                 ))}
               </div>
@@ -501,14 +484,13 @@ export function ContextualHelpDrawer({
           )}
         </div>
 
-        {/* Footer */}
-        <div className="px-4 sm:px-6 py-3.5 bg-white border-t border-[#E6DFF0] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 shrink-0">
+        <div className="px-4 sm:px-6 py-3.5 bg-white border-t border-[#E8E4EF] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 shrink-0">
           <div className="flex flex-wrap items-center gap-2">
             {onNavigate && canRoleAccessView('workflowGuide', userRole) && guideKey !== 'workflowGuide' && (
               <button
                 type="button"
                 onClick={() => handleSafeNavigate('workflowGuide')}
-                className="px-3 py-2 rounded-lg text-[13px] font-semibold text-[#543B7A] bg-[#F2EDFA] hover:bg-[#EDE5F8] inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                className="px-3 py-2 rounded-lg text-[13px] font-semibold text-[#4E3978] bg-[#F1ECFA] hover:bg-[#E9DFF5] inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
               >
                 <Compass className="w-4 h-4 shrink-0" aria-hidden="true" />
                 <span>ผังขั้นตอนการทำงาน</span>
@@ -518,7 +500,7 @@ export function ContextualHelpDrawer({
               <button
                 type="button"
                 onClick={() => handleSafeNavigate('userManual')}
-                className="px-3 py-2 rounded-lg text-[13px] font-semibold text-[#543B7A] bg-white border border-[#E6DFF0] hover:bg-[#F8F7FC] inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                className="px-3 py-2 rounded-lg text-[13px] font-semibold text-[#4E3978] bg-white border border-[#E8E4EF] hover:bg-[#F8F7FC] inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
               >
                 <BookOpen className="w-4 h-4 shrink-0" aria-hidden="true" />
                 <span>เปิดศูนย์คู่มือทั้งหมด</span>

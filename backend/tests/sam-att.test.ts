@@ -620,6 +620,7 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     const hwSync = await apiCall('/api/Sam_Att/scanners/sync', {
       method: 'POST',
       token: staffToken,
+      body: { syncMode: 'TODAY' },
     });
     assert.equal(hwSync.status, 503);
     assert.equal(hwSync.data.error, 'BLOCKED_BY_EXTERNAL_CONTRACT');
@@ -698,6 +699,7 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       const syncTimeoutRes = await apiCall('/api/Sam_Att/scanners/sync', {
         method: 'POST',
         token: staffToken,
+        body: { syncMode: 'TODAY' },
       });
       assert.equal(syncTimeoutRes.status, 503);
       assert.equal(syncTimeoutRes.data.error, 'SCANNER_TIMEOUT');
@@ -707,6 +709,7 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       const syncBadJsonRes = await apiCall('/api/Sam_Att/scanners/sync', {
         method: 'POST',
         token: staffToken,
+        body: { syncMode: 'TODAY' },
       });
       assert.equal(syncBadJsonRes.status, 422);
       assert.equal(syncBadJsonRes.data.error, 'INVALID_EXE_JSON_OUTPUT');
@@ -717,6 +720,7 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
         const concurrentRes = await apiCall('/api/Sam_Att/scanners/sync', {
           method: 'POST',
           token: staffToken,
+          body: { syncMode: 'TODAY' },
         });
         assert.equal(concurrentRes.status, 409);
         assert.equal(concurrentRes.data.error, 'SYNC_ALREADY_RUNNING');
@@ -798,7 +802,12 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
 
       const cliWrapperSyncRes = await apiCall('/api/Sam_Att/scanners/sync', {
         method: 'POST',
-        token: staffToken,
+        token: adminToken,
+        body: {
+          syncMode: 'ALL',
+          impactAcknowledged: true,
+          confirmPassword: 'Admin@SamAtt2026',
+        },
       });
       assert.equal(cliWrapperSyncRes.status, 200);
       assert.equal(cliWrapperSyncRes.data.totalRead, 2);
@@ -4467,8 +4476,12 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       );
       const allModeRes = await apiCall('/api/Sam_Att/scanners/sync', {
         method: 'POST',
-        token: staffToken,
-        body: { syncMode: 'ALL' },
+        token: adminToken,
+        body: {
+          syncMode: 'ALL',
+          impactAcknowledged: true,
+          confirmPassword: 'Admin@SamAtt2026',
+        },
       });
       assert.equal(allModeRes.status, 200);
       assert.equal(allModeRes.data.syncMode, 'ALL');

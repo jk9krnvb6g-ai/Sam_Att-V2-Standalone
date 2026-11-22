@@ -5,7 +5,7 @@
  * ============================================================================
  * หลักการออกแบบ:
  * - ใช้สีตามความหมายร่วมกับไอคอนและข้อความภาษาไทยชัดเจน (ไม่ใช้สีเพียงอย่างเดียว)
- * - ใช้สีจาก Design System กลาง (Success #198568, Warning #B87516, Danger #C74455, Info #5879BC, Primary Dark #543B7A)
+ * - ใช้สีจาก Design System กลาง (#8066B5, #4E3978, #292638, #777287, #198568, #B87516, #C74455, #5879BC)
  */
 import React from 'react';
 import {
@@ -35,65 +35,65 @@ export function AttendanceStatusText({
     {
       thaiLabel: string;
       icon: React.ComponentType<{ className?: string }>;
+      badgeClass: string;
       iconColor: string;
-      textColor: string;
     }
   > = {
     NORMAL: {
       thaiLabel: 'ลงเวลาปกติ',
       icon: CheckCircle2,
+      badgeClass: 'bg-[#EEF8F4] text-[#198568] border-[#198568]/20',
       iconColor: 'text-[#198568]',
-      textColor: 'text-[#198568] font-semibold',
     },
     COMPLETE: {
       thaiLabel: 'ลงเวลาครบเข้า–ออก',
       icon: CheckCircle2,
+      badgeClass: 'bg-[#EEF8F4] text-[#198568] border-[#198568]/20',
       iconColor: 'text-[#198568]',
-      textColor: 'text-[#198568] font-semibold',
     },
     LATE: {
       thaiLabel: 'มาสาย',
       icon: Clock,
+      badgeClass: 'bg-[#FEF7EA] text-[#B87516] border-[#B87516]/25',
       iconColor: 'text-[#B87516]',
-      textColor: 'text-[#B87516] font-semibold',
     },
     NO_SCAN: {
       thaiLabel: 'ไม่พบข้อมูลสแกน',
       icon: AlertCircle,
+      badgeClass: 'bg-[#FDF2F4] text-[#C74455] border-[#C74455]/25',
       iconColor: 'text-[#C74455]',
-      textColor: 'text-[#C74455] font-semibold',
     },
     MISSING_CHECKIN: {
       thaiLabel: 'ไม่สแกนเข้างาน',
       icon: AlertTriangle,
+      badgeClass: 'bg-[#FDF2F4] text-[#C74455] border-[#C74455]/25',
       iconColor: 'text-[#C74455]',
-      textColor: 'text-[#C74455] font-semibold',
     },
     MISSING_CHECKOUT: {
       thaiLabel: 'ไม่สแกนออกงาน',
       icon: AlertTriangle,
+      badgeClass: 'bg-[#FEF7EA] text-[#B87516] border-[#B87516]/25',
       iconColor: 'text-[#B87516]',
-      textColor: 'text-[#B87516] font-semibold',
     },
     NO_SCHEDULE: {
       thaiLabel: 'ไม่มีตารางเวร',
       icon: CalendarOff,
-      iconColor: 'text-[#746B83]',
-      textColor: 'text-[#746B83] font-medium',
+      badgeClass: 'bg-[#F8F7FC] text-[#777287] border-[#E8E4EF]',
+      iconColor: 'text-[#777287]',
     },
     PENDING_MAPPING: {
       thaiLabel: 'รอเชื่อมโยงรหัสสแกน',
       icon: Link2Off,
+      badgeClass: 'bg-[#EFF4FB] text-[#5879BC] border-[#5879BC]/25',
       iconColor: 'text-[#5879BC]',
-      textColor: 'text-[#5879BC] font-semibold',
     },
   };
 
   const info = map[status] || {
     thaiLabel: status,
     icon: Clock,
-    iconColor: 'text-[#746B83]',
-    textColor: 'text-[#262238] font-medium',
+    badgeClass: 'bg-[#F8F7FC] text-[#292638] border-[#E8E4EF]',
+    iconColor: 'text-[#777287]',
   };
 
   const Icon = info.icon;
@@ -117,13 +117,15 @@ export function AttendanceStatusText({
       : secondaryFlags;
 
   return (
-    <div className="flex flex-col gap-0.5">
-      <div className="inline-flex items-center gap-1.5 whitespace-nowrap">
-        <Icon className={`w-4 h-4 shrink-0 ${info.iconColor}`} aria-hidden="true" />
-        <span className={`text-[13.5px] leading-snug ${info.textColor}`}>{info.thaiLabel}</span>
-      </div>
+    <div className="flex flex-col items-start gap-1">
+      <span
+        className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md border text-[12.5px] font-semibold whitespace-nowrap ${info.badgeClass}`}
+      >
+        <Icon className={`w-3.5 h-3.5 shrink-0 ${info.iconColor}`} aria-hidden="true" />
+        <span>{info.thaiLabel}</span>
+      </span>
       {secondaryFlagThai && (
-        <span className="text-[12px] text-[#B87516] pl-5.5 leading-snug">
+        <span className="text-[12px] text-[#B87516] leading-snug">
           {secondaryFlagThai}
         </span>
       )}
@@ -134,23 +136,23 @@ export function AttendanceStatusText({
 export function ReviewStatusLabel({ status }: { status: string }) {
   if (status === 'VERIFIED_APPROVED' || status === 'REVIEWED') {
     return (
-      <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-[#198568] whitespace-nowrap">
-        <CheckCircle2 className="w-4 h-4 shrink-0 text-[#198568]" aria-hidden="true" />
+      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-[#EEF8F4] border border-[#198568]/20 text-[12.5px] font-semibold text-[#198568] whitespace-nowrap">
+        <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-[#198568]" aria-hidden="true" />
         <span>ตรวจสอบแล้ว</span>
       </span>
     );
   }
   if (status === 'NEEDS_RE_REVIEW') {
     return (
-      <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-[#C74455] whitespace-nowrap">
-        <AlertTriangle className="w-4 h-4 shrink-0 text-[#C74455]" aria-hidden="true" />
+      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-[#FDF2F4] border border-[#C74455]/20 text-[12.5px] font-semibold text-[#C74455] whitespace-nowrap">
+        <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-[#C74455]" aria-hidden="true" />
         <span>ต้องตรวจสอบซ้ำ</span>
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-[#746B83] whitespace-nowrap">
-      <Clock className="w-3.5 h-3.5 shrink-0 text-[#746B83]" aria-hidden="true" />
+    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-[#F8F7FC] border border-[#E8E4EF] text-[12.5px] font-medium text-[#777287] whitespace-nowrap">
+      <Clock className="w-3.5 h-3.5 shrink-0 text-[#777287]" aria-hidden="true" />
       <span>รอตรวจสอบ</span>
     </span>
   );
@@ -159,8 +161,8 @@ export function ReviewStatusLabel({ status }: { status: string }) {
 export function RoleLabel({ role }: { role: string }) {
   if (role === 'ADMIN') {
     return (
-      <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-[#543B7A] whitespace-nowrap">
-        <ShieldCheck className="w-4 h-4 text-[#8E70C9] shrink-0" aria-hidden="true" />
+      <span className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-[#4E3978] whitespace-nowrap">
+        <ShieldCheck className="w-4 h-4 text-[#8066B5] shrink-0" aria-hidden="true" />
         <span>ผู้ดูแลระบบ</span>
       </span>
     );
@@ -174,8 +176,8 @@ export function RoleLabel({ role }: { role: string }) {
     );
   }
   return (
-    <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-[#746B83] whitespace-nowrap">
-      <User className="w-4 h-4 text-[#746B83] shrink-0" aria-hidden="true" />
+    <span className="inline-flex items-center gap-1.5 text-[13px] font-medium text-[#777287] whitespace-nowrap">
+      <User className="w-4 h-4 text-[#777287] shrink-0" aria-hidden="true" />
       <span>บุคลากรทั่วไป</span>
     </span>
   );
@@ -193,7 +195,7 @@ export function ErrorBanner({
   return (
     <div
       role="alert"
-      className="border border-[#C74455]/30 bg-[#FDF2F4] px-4 sm:px-5 py-3.5 rounded-xl text-[13.5px] text-[#262238] flex flex-col sm:flex-row sm:items-center justify-between gap-3.5"
+      className="border border-[#C74455]/25 bg-[#FDF2F4] px-4 sm:px-5 py-3.5 rounded-xl text-[13.5px] text-[#292638] flex flex-col sm:flex-row sm:items-center justify-between gap-3.5"
     >
       <div className="flex items-start gap-3 min-w-0">
         <AlertTriangle className="w-5 h-5 text-[#C74455] shrink-0 mt-0.5" aria-hidden="true" />
@@ -201,24 +203,24 @@ export function ErrorBanner({
           <div className="font-semibold flex flex-wrap items-center gap-2 text-[14px] text-[#C74455]">
             <span>ไม่สามารถดำเนินการได้</span>
             {error.code && (
-              <span className="font-mono text-[12px] text-[#746B83] font-medium">
+              <span className="font-mono text-[12px] text-[#777287] font-medium">
                 · รหัส: {error.code}
               </span>
             )}
             {error.requestId && (
-              <span className="font-mono text-[12px] text-[#746B83] font-medium">
+              <span className="font-mono text-[12px] text-[#777287] font-medium">
                 · Ref: {error.requestId}
               </span>
             )}
           </div>
-          <p className="text-[#262238] leading-relaxed">{error.message}</p>
+          <p className="text-[#292638] leading-relaxed">{error.message}</p>
         </div>
       </div>
       {onRetry && (
         <button
           type="button"
           onClick={onRetry}
-          className="h-9 px-3.5 text-[13px] font-semibold bg-white border border-[#C74455]/35 text-[#C74455] rounded-lg hover:bg-[#C74455]/5 transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+          className="h-9 px-3.5 text-[13px] font-semibold bg-white border border-[#C74455]/30 text-[#C74455] rounded-lg hover:bg-[#C74455]/5 transition-colors inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
         >
           <RotateCw className="w-3.5 h-3.5" />
           <span>ลองใหม่อีกครั้ง</span>

@@ -130,6 +130,9 @@ export function startAutomaticScannerScheduler(intervalMs = 30000): void {
     return;
   }
   schedulerTimer = setInterval(() => {
+    if (!loadConfig().scanner.syncEnabled) {
+      return;
+    }
     evaluateDueSyncSchedules().catch((err) => {
       console.error('[Scanner Scheduler] Background check error:', err instanceof Error ? err.message : String(err));
     });

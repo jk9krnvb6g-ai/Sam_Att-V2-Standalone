@@ -612,6 +612,18 @@ export async function ensureBaselineSystemCatalog(): Promise<void> {
     'ALTER TABLE attendance ADD COLUMN leave_start_time VARCHAR(5) NULL',
     'ALTER TABLE attendance ADD COLUMN leave_end_time VARCHAR(5) NULL',
     'ALTER TABLE attendance_notes ADD COLUMN needs_re_review TINYINT(1) NOT NULL DEFAULT 0',
+    // Migration 003 additive columns (Historical Import, Mapping Audit & Sync Stats)
+    'ALTER TABLE sync_runs ADD COLUMN matched_scans_count INT NOT NULL DEFAULT 0',
+    'ALTER TABLE sync_runs ADD COLUMN conflict_scans_count INT NOT NULL DEFAULT 0',
+    'ALTER TABLE sync_runs ADD COLUMN attendance_created_count INT NOT NULL DEFAULT 0',
+    'ALTER TABLE sync_runs ADD COLUMN attendance_updated_count INT NOT NULL DEFAULT 0',
+    'ALTER TABLE sync_runs ADD COLUMN machine_results_json TEXT NULL',
+    'ALTER TABLE sync_runs ADD COLUMN import_year_month VARCHAR(7) NULL',
+    'ALTER TABLE fingerprint_mappings ADD COLUMN original_effective_from DATE NULL',
+    'ALTER TABLE fingerprint_mappings ADD COLUMN retroactive_adjusted_by VARCHAR(64) NULL',
+    'ALTER TABLE fingerprint_mappings ADD COLUMN retroactive_adjusted_at DATETIME NULL',
+    'ALTER TABLE fingerprint_mappings ADD COLUMN retroactive_reason VARCHAR(500) NULL',
+    'ALTER TABLE fingerprint_mappings ADD COLUMN updated_at DATETIME NULL',
   ];
   for (const alterSql of additiveAlterStatements) {
     try {

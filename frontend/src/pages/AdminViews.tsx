@@ -14,17 +14,17 @@ import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import {
   Plus,
   Rocket,
-  CheckCircle2,
   Search,
   PanelRightOpen,
-  Clock,
   Terminal,
-  ShieldCheck,
 } from 'lucide-react';
 import { apiRequest, ApiClientError, type UserRole } from '../services/api.ts';
 import { ErrorBanner, RoleLabel } from '../components/StatusText.tsx';
 import {
   PageHeader,
+  MetricStrip,
+  FilterBar,
+  StatusBadge,
   SortableHeader,
   TablePaginationBar,
   NotificationBanner,
@@ -263,6 +263,13 @@ export function AdminViews({
     });
   }, [users, userSearch, userRoleFilter]);
 
+  const userStats = useMemo(() => {
+    const adminHr = users.filter((u) => u.role === 'ADMIN' || u.role === 'RESPONSIBLE_STAFF').length;
+    const general = users.filter((u) => u.role === 'GENERAL_USER').length;
+    const unlinked = users.filter((u) => !u.approved_person_id).length;
+    return { total: users.length, adminHr, general, unlinked };
+  }, [users]);
+
   const availableAuditActors = useMemo(() => {
     const set = new Set<string>();
     auditLogs.forEach((l) => {
@@ -305,6 +312,17 @@ export function AdminViews({
     return list;
   }, [auditLogs, logDateFilter, logActorFilter, logActionFilter, logResultFilter, sortKey, sortDir]);
 
+  const auditStats = useMemo(() => {
+    const ok = filteredAndSortedLogs.filter((l) => l.result === 'SUCCESS').length;
+    const fail = filteredAndSortedLogs.length - ok;
+    return {
+      total: filteredAndSortedLogs.length,
+      ok,
+      fail,
+      actors: availableAuditActors.length,
+    };
+  }, [filteredAndSortedLogs, availableAuditActors.length]);
+
   // =========================================================================
   // โหมด 'users': ผู้ใช้งานและสิทธิ์
   // =========================================================================
@@ -337,10 +355,42 @@ export function AdminViews({
         <ErrorBanner error={error} onRetry={loadData} />
         <NotificationBanner message={notice} onClose={() => setNotice(null)} />
 
+        <MetricStrip
+          items={[
+            {
+              label: 'บัญชีผู้ใช้ทั้งหมด',
+              value: `${userStats.total} บัญชี`,
+              subtext: 'รองรับสิทธิ์ RBAC 3 ระดับ',
+              tone: 'primary',
+            },
+            {
+              label: 'ผู้ดูแลระบบ / งานบุคคล',
+              value: `${userStats.adminHr} บัญชี`,
+              subtext: 'ADMIN และ RESPONSIBLE_STAFF',
+              tone: 'info',
+            },
+            {
+              label: 'บุคลากรทั่วไป (Own-Only)',
+              value: `${userStats.general} บัญชี`,
+              subtext: 'ดูเฉพาะเวลาปฏิบัติงานของตนเอง',
+              tone: 'success',
+            },
+            {
+              label: 'ยังไม่ผูกชื่อบุคลากร',
+              value: `${userStats.unlinked} บัญชี`,
+              subtext: userStats.unlinked > 0 ? 'ควรผูก approvedPersonId ให้ครบ' : 'เชื่อมโยงครบทุกบัญชี',
+              tone: userStats.unlinked > 0 ? 'warning' : 'success',
+            },
+          ]}
+        />
+
         {/* Filter Bar */}
-        <div className="ent-card p-3.5 sm:p-4 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-          <div className="relative w-full sm:w-72">
-            <Search className="w-4 h-4 text-[#746B83] absolute left-3.5 top-3" aria-hidden="true" />
+        <FilterBar>
+          <div className="relative flex-1 min-w-[240px]">
+            <Search
+              className="w-4 h-4 text-[#777287] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+              aria-hidden="true"
+            />
             <input
               type="text"
               aria-label="ค้นหาบัญชีผู้ใช้"
@@ -354,18 +404,18 @@ export function AdminViews({
             aria-label="กรองตามระดับสิทธิ์"
             value={userRoleFilter}
             onChange={(e) => setUserRoleFilter(e.target.value)}
-            className="ent-input w-full sm:w-auto"
+            className="ent-input w-full sm:w-64"
           >
             <option value="">ทุกระดับสิทธิ์ (3 ระดับ)</option>
             <option value="ADMIN">ผู้ดูแลระบบ (ADMIN)</option>
             <option value="RESPONSIBLE_STAFF">เจ้าหน้าที่งานบุคคล (HR)</option>
             <option value="GENERAL_USER">บุคลากรทั่วไป (User)</option>
           </select>
-        </div>
+        </FilterBar>
 
-        <div className="ent-table-wrapper">
-          <div className="px-4 sm:px-6 py-4 border-b border-[#E6DFF0] bg-[#F8F7FC]">
-            <h2 className="text-[17px] font-bold text-[#262238]">
+        <div className="his-surface overflow-hidden">
+          <div className="px-4 sm:px-5 py-3.5 border-b border-[#E8E4EF] bg-[#F8F7FC]">
+            <h2 className="text-[15.5px] font-bold text-[#292638]">
               รายชื่อบัญชีผู้ใช้งานทั้งหมด ({filteredUsers.length} บัญชี)
             </h2>
           </div>
@@ -374,28 +424,28 @@ export function AdminViews({
             <TableLoadingSkeleton rows={5} cols={6} />
           ) : (
             <>
-              <div className="md:hidden divide-y divide-[#E6DFF0]">
+              <div className="md:hidden divide-y divide-[#E8E4EF]">
                 {filteredUsers.length === 0 ? (
-                  <div className="p-8 text-center text-[14px] text-[#746B83]">
+                  <div className="p-8 text-center text-[14px] text-[#777287]">
                     ไม่พบบัญชีผู้ใช้งานตามเงื่อนไขที่ค้นหา
                   </div>
                 ) : (
                   filteredUsers.map((u) => (
-                    <div key={u.id} className="p-4 space-y-2 bg-white">
+                    <div key={u.id} className="p-4 space-y-2.5 bg-white">
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <div className="font-bold text-[15px] text-[#262238]">{u.display_name}</div>
-                          <div className="font-mono text-[13px] font-semibold text-[#746B83]">
+                          <div className="font-bold text-[15px] text-[#292638]">{u.display_name}</div>
+                          <div className="font-mono text-[13px] font-semibold text-[#777287]">
                             #{u.id} · {u.username}
                           </div>
                         </div>
                         <RoleLabel role={u.role} />
                       </div>
-                      <div className="p-3 rounded-lg bg-[#F8F7FC] border border-[#E6DFF0] text-[13px] space-y-1">
+                      <div className="p-3 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] text-[13px] space-y-1.5">
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-[#746B83]">บุคลากรที่เชื่อมโยง:</span>
+                          <span className="text-[#777287]">บุคลากรที่เชื่อมโยง</span>
                           {u.approved_person_id ? (
-                            <span className="font-semibold text-[#262238]">
+                            <span className="font-semibold text-[#292638]">
                               {u.full_name} ({u.approved_person_id})
                             </span>
                           ) : (
@@ -403,12 +453,10 @@ export function AdminViews({
                           )}
                         </div>
                         <div className="flex items-center justify-between gap-2">
-                          <span className="text-[#746B83]">สถานะบัญชี:</span>
-                          {Number(u.is_active) === 1 ? (
-                            <span className="text-[#198568] font-semibold">ใช้งานปกติ</span>
-                          ) : (
-                            <span className="text-[#C74455] font-semibold">ระงับการใช้งาน</span>
-                          )}
+                          <span className="text-[#777287]">สถานะบัญชี</span>
+                          <StatusBadge tone={Number(u.is_active) === 1 ? 'success' : 'danger'} dot>
+                            {Number(u.is_active) === 1 ? 'ใช้งานปกติ' : 'ระงับการใช้งาน'}
+                          </StatusBadge>
                         </div>
                       </div>
                     </div>
@@ -417,35 +465,35 @@ export function AdminViews({
               </div>
 
               <div className="hidden md:block overflow-x-auto">
-                <table className="w-full text-left border-collapse text-[14px]">
+                <table className="his-table">
                   <thead>
-                    <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
-                      <th className="py-3.5 px-5 font-semibold text-[13px]">ชื่อบัญชีผู้ใช้งาน</th>
-                      <th className="py-3.5 px-5 font-semibold text-[13px]">ชื่อ-นามสกุล</th>
-                      <th className="py-3.5 px-5 font-semibold text-[13px]">ระดับสิทธิ์</th>
-                      <th className="py-3.5 px-5 font-semibold text-[13px]">บุคลากรที่เชื่อมโยง</th>
-                      <th className="py-3.5 px-5 font-semibold text-[13px]">สถานะบัญชี</th>
-                      <th className="py-3.5 px-5 font-semibold text-[13px]">เข้าใช้งานล่าสุด</th>
+                    <tr>
+                      <th>ชื่อบัญชีผู้ใช้งาน</th>
+                      <th>ชื่อ-นามสกุล</th>
+                      <th>ระดับสิทธิ์</th>
+                      <th>บุคลากรที่เชื่อมโยง</th>
+                      <th>สถานะบัญชี</th>
+                      <th>เข้าใช้งานล่าสุด</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-[#E6DFF0]">
+                  <tbody>
                     {filteredUsers.length === 0 ? (
                       <TableEmptyState colSpan={6} title="ไม่พบบัญชีผู้ใช้งานตามเงื่อนไขที่ค้นหา" />
                     ) : (
                       filteredUsers.map((u) => (
-                        <tr key={u.id} className="hover:bg-[#F8F7FC]">
-                          <td className="py-3.5 px-5 font-mono font-bold text-[#262238]">
+                        <tr key={u.id}>
+                          <td className="font-mono font-bold text-[#292638]">
                             #{u.id} · {u.username}
                           </td>
-                          <td className="py-3.5 px-5 font-semibold text-[#262238]">{u.display_name}</td>
-                          <td className="py-3.5 px-5">
+                          <td className="font-semibold text-[#292638]">{u.display_name}</td>
+                          <td>
                             <RoleLabel role={u.role} />
                           </td>
-                          <td className="py-3.5 px-5">
+                          <td>
                             {u.approved_person_id ? (
                               <div>
-                                <span className="font-semibold text-[#262238]">{u.full_name}</span>{' '}
-                                <span className="font-mono text-[12.5px] text-[#543B7A]">
+                                <span className="font-semibold text-[#292638]">{u.full_name}</span>{' '}
+                                <span className="font-mono text-[12.5px] text-[#4E3978]">
                                   ({u.approved_person_id})
                                 </span>
                               </div>
@@ -453,14 +501,12 @@ export function AdminViews({
                               <span className="text-[#C74455] font-medium">ยังไม่ผูกชื่อบุคลากร</span>
                             )}
                           </td>
-                          <td className="py-3.5 px-5 font-semibold">
-                            {Number(u.is_active) === 1 ? (
-                              <span className="text-[#198568]">ใช้งานปกติ</span>
-                            ) : (
-                              <span className="text-[#C74455]">ระงับการใช้งาน</span>
-                            )}
+                          <td>
+                            <StatusBadge tone={Number(u.is_active) === 1 ? 'success' : 'danger'} dot>
+                              {Number(u.is_active) === 1 ? 'ใช้งานปกติ' : 'ระงับการใช้งาน'}
+                            </StatusBadge>
                           </td>
-                          <td className="py-3.5 px-5 font-mono tabular-nums text-[#746B83]">
+                          <td className="font-mono tabular-nums text-[#777287]">
                             {u.last_login_at ? formatThaiDateTime(u.last_login_at) : '—'}
                           </td>
                         </tr>
@@ -485,7 +531,7 @@ export function AdminViews({
           <form onSubmit={handleCreateUser} className="space-y-6">
             {/* Section 1: Account Information */}
             <div className="space-y-4">
-              <div className="text-[13.5px] font-bold text-[#543B7A] border-b border-[#E6DFF0] pb-1.5">
+              <div className="text-[13.5px] font-bold text-[#4E3978] border-b border-[#E8E4EF] pb-1.5">
                 1. ข้อมูลบัญชีผู้ใช้ (Account Information)
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -534,7 +580,7 @@ export function AdminViews({
 
             {/* Section 2: Authorization */}
             <div className="space-y-4">
-              <div className="text-[13.5px] font-bold text-[#543B7A] border-b border-[#E6DFF0] pb-1.5">
+              <div className="text-[13.5px] font-bold text-[#4E3978] border-b border-[#E8E4EF] pb-1.5">
                 2. สิทธิ์การเข้าถึงและการเชื่อมโยงบุคลากร (Authorization)
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -570,7 +616,7 @@ export function AdminViews({
               </div>
             </div>
 
-            <div className="flex flex-col sm:flex-row justify-end gap-2.5 pt-3 border-t border-[#E6DFF0]">
+            <div className="flex flex-col sm:flex-row justify-end gap-2.5 pt-3 border-t border-[#E8E4EF]">
               <button
                 type="button"
                 onClick={() => setCreateUserModalOpen(false)}
@@ -615,10 +661,41 @@ export function AdminViews({
           }
         />
 
+        <MetricStrip
+          items={[
+            {
+              label: 'รายการบันทึกที่แสดง',
+              value: `${auditStats.total.toLocaleString('th-TH')} รายการ`,
+              subtext: 'จัดเก็บแบบ Read-Only Audit Trail',
+              tone: 'primary',
+            },
+            {
+              label: 'ดำเนินการสำเร็จ',
+              value: `${auditStats.ok.toLocaleString('th-TH')} รายการ`,
+              subtext: 'ผลลัพธ์ SUCCESS',
+              tone: 'success',
+            },
+            {
+              label: 'ไม่สำเร็จ / ผิดพลาด',
+              value: `${auditStats.fail.toLocaleString('th-TH')} รายการ`,
+              subtext: auditStats.fail > 0 ? 'ควรตรวจสอบรายละเอียด JSON' : 'ไม่พบเหตุการณ์ผิดพลาด',
+              tone: auditStats.fail > 0 ? 'danger' : 'success',
+            },
+            {
+              label: 'บัญชีผู้ดำเนินการ',
+              value: `${auditStats.actors.toLocaleString('th-TH')} บัญชี`,
+              subtext: 'ที่ปรากฏในประวัติการใช้งาน',
+            },
+          ]}
+        />
+
         {/* Comprehensive Audit Filter Bar */}
-        <div className="ent-card p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+        <div className="his-surface p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
           <div className="relative">
-            <Search className="w-4 h-4 text-[#746B83] absolute left-3.5 top-3" aria-hidden="true" />
+            <Search
+              className="w-4 h-4 text-[#777287] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+              aria-hidden="true"
+            />
             <input
               type="text"
               aria-label="ค้นหาประวัติการใช้งาน"
@@ -694,14 +771,14 @@ export function AdminViews({
 
         <ErrorBanner error={error} onRetry={loadData} />
 
-        <div className="ent-table-wrapper">
+        <div className="his-surface overflow-hidden">
           {loading ? (
             <TableLoadingSkeleton rows={6} cols={6} />
           ) : (
             <>
-              <div className="md:hidden divide-y divide-[#E6DFF0]">
+              <div className="md:hidden divide-y divide-[#E8E4EF]">
                 {pagedLogs.length === 0 ? (
-                  <div className="py-10 px-4 text-center text-[14px] text-[#746B83]">
+                  <div className="py-10 px-4 text-center text-[14px] text-[#777287]">
                     ไม่พบประวัติการใช้งานตามตัวกรองที่เลือก
                   </div>
                 ) : (
@@ -709,34 +786,28 @@ export function AdminViews({
                     <div key={log.id} className="p-4 space-y-2.5 bg-white">
                       <div className="flex items-start justify-between gap-2">
                         <div>
-                          <div className="font-bold text-[14.5px] text-[#543B7A]">
+                          <div className="font-bold text-[14.5px] text-[#4E3978]">
                             {getAuditActionThaiLabel(log.action)}
                           </div>
-                          <div className="text-[12px] font-mono text-[#746B83]">{log.action}</div>
-                          <div className="text-[12.5px] font-mono text-[#746B83] mt-0.5 tabular-nums">
+                          <div className="text-[12px] font-mono text-[#777287]">{log.action}</div>
+                          <div className="text-[12.5px] font-mono text-[#777287] mt-0.5 tabular-nums">
                             {formatThaiDateTime(log.created_at)}
                           </div>
                         </div>
-                        <span
-                          className={`text-[12.5px] font-bold px-2.5 py-0.5 rounded-md border shrink-0 ${
-                            log.result === 'SUCCESS'
-                              ? 'text-[#198568] bg-[#EDF8F4] border-[#C2E6DA]'
-                              : 'text-[#C74455] bg-[#FDF2F3] border-[#F3CCD0]'
-                          }`}
-                        >
+                        <StatusBadge tone={log.result === 'SUCCESS' ? 'success' : 'danger'} dot>
                           {log.result === 'SUCCESS' ? 'สำเร็จ' : log.result}
-                        </span>
+                        </StatusBadge>
                       </div>
-                      <div className="p-3 rounded-lg bg-[#F8F7FC] border border-[#E6DFF0] text-[13px] space-y-1 font-mono">
+                      <div className="p-3 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] text-[13px] space-y-1 font-mono">
                         <div className="flex items-center justify-between">
-                          <span className="text-[#746B83] font-sans">ผู้ดำเนินการ:</span>
-                          <span className="font-bold text-[#262238]">
+                          <span className="text-[#777287] font-sans">ผู้ดำเนินการ</span>
+                          <span className="font-bold text-[#292638]">
                             {log.actor_username} ({log.actor_role})
                           </span>
                         </div>
                         <div className="flex items-center justify-between">
-                          <span className="text-[#746B83] font-sans">เป้าหมาย:</span>
-                          <span className="text-[#262238]">
+                          <span className="text-[#777287] font-sans">เป้าหมาย</span>
+                          <span className="text-[#292638]">
                             {log.target_type}:{log.target_id || '—'}
                           </span>
                         </div>
@@ -746,7 +817,7 @@ export function AdminViews({
                         onClick={() => setSelectedAuditLog(log)}
                         className="ent-btn-secondary w-full"
                       >
-                        <PanelRightOpen className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
+                        <PanelRightOpen className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
                         <span>ดูข้อมูลรายละเอียด JSON</span>
                       </button>
                     </div>
@@ -755,9 +826,9 @@ export function AdminViews({
               </div>
 
               <div className="hidden md:block overflow-x-auto">
-                <table className="w-full text-left border-collapse text-[14px]">
+                <table className="his-table">
                   <thead>
-                    <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
+                    <tr>
                       <SortableHeader
                         label="วันและเวลา · รหัสอ้างอิง"
                         sortKey="created_at"
@@ -779,7 +850,7 @@ export function AdminViews({
                         sortDir={sortDir}
                         onSort={handleSort}
                       />
-                      <th className="py-3.5 px-4 text-[13px] font-semibold">ข้อมูลเป้าหมาย</th>
+                      <th>ข้อมูลเป้าหมาย</th>
                       <SortableHeader
                         label="ผลลัพธ์"
                         sortKey="result"
@@ -787,52 +858,48 @@ export function AdminViews({
                         sortDir={sortDir}
                         onSort={handleSort}
                       />
-                      <th className="py-3.5 px-4 text-[13px] font-semibold text-right">รายละเอียด</th>
+                      <th className="text-right">รายละเอียด</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-[#E6DFF0]">
+                  <tbody>
                     {pagedLogs.length === 0 ? (
                       <TableEmptyState colSpan={6} title="ไม่พบประวัติการใช้งานตามตัวกรองที่เลือก" />
                     ) : (
                       pagedLogs.map((log) => (
-                        <tr key={log.id} className="hover:bg-[#F8F7FC] transition-colors">
-                          <td className="py-3.5 px-4 font-mono tabular-nums">
-                            <div className="font-semibold text-[#262238]">
+                        <tr key={log.id}>
+                          <td className="font-mono tabular-nums">
+                            <div className="font-semibold text-[#292638]">
                               {formatThaiDateTime(log.created_at)}
                             </div>
-                            <div className="text-[12px] text-[#746B83]">
+                            <div className="text-[12px] text-[#777287]">
                               ID: {String(log.request_id || '').slice(0, 12)}
                             </div>
                           </td>
-                          <td className="py-3.5 px-4">
-                            <div className="font-bold text-[#262238] font-mono">{log.actor_username}</div>
-                            <div className="text-[12px] text-[#746B83]">{log.actor_role}</div>
+                          <td>
+                            <div className="font-bold text-[#292638] font-mono">{log.actor_username}</div>
+                            <div className="text-[12px] text-[#777287]">{log.actor_role}</div>
                           </td>
-                          <td className="py-3.5 px-4">
-                            <div className="font-semibold text-[#543B7A]">
+                          <td>
+                            <div className="font-semibold text-[#4E3978]">
                               {getAuditActionThaiLabel(log.action)}
                             </div>
-                            <div className="font-mono text-[11.5px] text-[#746B83]">{log.action}</div>
+                            <div className="font-mono text-[11.5px] text-[#777287]">{log.action}</div>
                           </td>
-                          <td className="py-3.5 px-4 font-mono text-[#746B83] text-[13px]">
+                          <td className="font-mono text-[#777287] text-[13px]">
                             {log.target_type}:{log.target_id || '—'}
                           </td>
-                          <td className="py-3.5 px-4 font-semibold">
-                            <span
-                              className={
-                                log.result === 'SUCCESS' ? 'text-[#198568]' : 'text-[#C74455]'
-                              }
-                            >
+                          <td>
+                            <StatusBadge tone={log.result === 'SUCCESS' ? 'success' : 'danger'} dot>
                               {log.result === 'SUCCESS' ? 'สำเร็จ' : log.result}
-                            </span>
+                            </StatusBadge>
                           </td>
-                          <td className="py-3.5 px-4 text-right">
+                          <td className="text-right">
                             <button
                               type="button"
                               onClick={() => setSelectedAuditLog(log)}
-                              className="h-9 px-3 text-[13px] font-semibold text-[#262238] bg-white border border-[#E6DFF0] rounded-lg hover:bg-[#F2EDFA] hover:border-[#8E70C9]/50 hover:text-[#543B7A] inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                              className="ent-btn-secondary h-8 px-3 text-[12.5px] whitespace-nowrap"
                             >
-                              <PanelRightOpen className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
+                              <PanelRightOpen className="w-3.5 h-3.5 text-[#8066B5]" aria-hidden="true" />
                               <span>ดูข้อมูล</span>
                             </button>
                           </td>
@@ -865,7 +932,7 @@ export function AdminViews({
         >
           {selectedAuditLog && (
             <div className="space-y-4 text-[14px]">
-              <div className="p-4 bg-[#F8F7FC] border border-[#E6DFF0] rounded-xl space-y-2 font-mono text-[13px]">
+              <div className="p-4 bg-[#F8F7FC] border border-[#E8E4EF] rounded-xl space-y-2 font-mono text-[13px]">
                 <div>รหัสคำขอ (Request ID): {selectedAuditLog.request_id}</div>
                 <div>เวลาที่เกิดเหตุการณ์: {formatThaiDateTime(selectedAuditLog.created_at)}</div>
                 <div>
@@ -873,8 +940,8 @@ export function AdminViews({
                 </div>
               </div>
               <div>
-                <div className="font-bold text-[#262238] mb-2">ข้อมูลรายละเอียด (JSON):</div>
-                <pre className="p-4 bg-[#262238] text-[#F8F7FC] rounded-xl font-mono text-[12.5px] overflow-x-auto">
+                <div className="font-bold text-[#292638] mb-2">ข้อมูลรายละเอียด (JSON)</div>
+                <pre className="p-4 bg-[#292638] text-[#F8F7FC] rounded-xl font-mono text-[12.5px] overflow-x-auto">
                   {selectedAuditLog.detail_json || '{}'}
                 </pre>
               </div>
@@ -897,114 +964,92 @@ export function AdminViews({
         title="อัปเดตระบบ Sam_Att"
         subtitle="อัปเดตระบบ Sam_Att V2 Standalone อัตโนมัติด้วยปุ่มเดียว (สำรองฐานข้อมูล · Build · รีสตาร์ทเฉพาะเซอร์วิส Sam_Att บนพอร์ต 4101 โดยไม่กระทบระบบอื่น)"
         actions={
-          <PageHelpAction
-            guideKey="deployment"
-            userRole={userRole}
-            onNavigate={onNavigate}
-          />
+          <>
+            <PageHelpAction
+              guideKey="deployment"
+              userRole={userRole}
+              onNavigate={onNavigate}
+            />
+            <button
+              type="button"
+              disabled={deployRunning || Boolean(deployStatus?.inProgress)}
+              onClick={() => setConfirmDeployOpen(true)}
+              className="ent-btn-primary"
+            >
+              <Rocket className="w-4 h-4" aria-hidden="true" />
+              <span>{deployRunning ? 'กำลังอัปเดตระบบ...' : 'อัปเดตระบบ'}</span>
+            </button>
+          </>
         }
       />
 
       <ErrorBanner error={error} onRetry={loadData} />
       <NotificationBanner message={notice} onClose={() => setNotice(null)} />
 
-      {/* การ์ดหลัก: สถานะปัจจุบันและปุ่มอัปเดตระบบ */}
-      <div className="ent-card p-6 sm:p-7 space-y-6">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-6 border-b border-[#E6DFF0]">
-          <div className="space-y-2">
-            <div className="inline-flex items-center gap-2 text-[13px] font-semibold text-[#543B7A]">
-              <Rocket className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
-              <span>ระบบอัปเดตอัตโนมัติ (Deploy_Sam_Att.bat)</span>
-            </div>
-            <h2 className="text-[20px] sm:text-[22px] font-bold text-[#262238]">
-              พร้อมอัปเดตระบบ Sam_Att V2 Standalone
-            </h2>
-            <p className="text-[13.5px] text-[#746B83] max-w-2xl leading-relaxed">
-              เมื่อกดปุ่ม <strong className="text-[#262238]">“อัปเดตระบบ”</strong> ระบบจะเรียกใช้สคริปต์มาตรฐาน{' '}
-              <code className="font-mono text-[12.5px] bg-[#F8F7FC] text-[#543B7A] px-2 py-0.5 rounded border border-[#E6DFF0]">
-                C:\inetpub\wwwroot\Sam_Att\deployment\Deploy_Sam_Att.bat
-              </code>{' '}
-              เพื่อตรวจสอบความพร้อม สำรองข้อมูล อัปเดตโค้ด และตรวจสอบ Health Check อัตโนมัติ
-            </p>
-          </div>
+      {/* Unified 4-Column System Status Strip */}
+      <MetricStrip
+        items={[
+          {
+            label: 'เวอร์ชันปัจจุบัน',
+            value: deployStatus?.currentVersion || '2.0.0-standalone',
+            subtext: `พอร์ต HTTPS ${deployStatus?.httpsPort || 4101}`,
+            tone: 'primary',
+          },
+          {
+            label: 'สถานะการทำงานระบบ',
+            value: deployStatus?.inProgress ? 'กำลังอัปเดต...' : 'ทำงานปกติ',
+            subtext: 'แยกอิสระจากระบบ Procurement',
+            tone: deployStatus?.inProgress ? 'warning' : 'success',
+          },
+          {
+            label: 'ผลการอัปเดตล่าสุด',
+            value: latestDeploy
+              ? latestDeploy.status === 'SUCCESS'
+                ? 'สำเร็จ'
+                : latestDeploy.status
+              : 'พร้อมใช้งาน',
+            subtext: `โดย: ${latestDeploy?.executed_by || 'ระบบเริ่มต้น'}`,
+            tone: latestDeploy
+              ? latestDeploy.status === 'SUCCESS'
+                ? 'success'
+                : 'danger'
+              : 'success',
+          },
+          {
+            label: 'วันที่อัปเดตล่าสุด',
+            value: latestDeploy?.executed_at
+              ? formatThaiDateTime(latestDeploy.executed_at)
+              : 'ติดตั้งรุ่นเริ่มต้น',
+            subtext: 'สำรองฐานข้อมูลก่อนอัปเดตทุกครั้ง',
+          },
+        ]}
+      />
 
-          <div className="shrink-0">
-            <button
-              type="button"
-              disabled={deployRunning || Boolean(deployStatus?.inProgress)}
-              onClick={() => setConfirmDeployOpen(true)}
-              className="ent-btn-primary h-11 px-6 text-[14.5px] w-full sm:w-auto"
-            >
-              <Rocket className="w-4.5 h-4.5" aria-hidden="true" />
-              <span>{deployRunning ? 'กำลังอัปเดตระบบ...' : 'อัปเดตระบบ'}</span>
-            </button>
+      {/* ข้อมูลสคริปต์และ Console Output ล่าสุด */}
+      <div className="his-surface p-5 sm:p-6 space-y-5">
+        <div className="space-y-1.5">
+          <div className="text-[12.5px] font-semibold text-[#8066B5]">
+            ระบบอัปเดตอัตโนมัติ (Deploy_Sam_Att.bat)
           </div>
+          <h2 className="text-[17px] font-bold text-[#292638]">
+            พร้อมอัปเดตระบบ Sam_Att V2 Standalone แบบปลอดภัย
+          </h2>
+          <p className="text-[13.5px] text-[#777287] max-w-3xl leading-relaxed">
+            เมื่อกดปุ่ม <strong className="text-[#292638]">“อัปเดตระบบ”</strong> ระบบจะเรียกใช้สคริปต์มาตรฐาน{' '}
+            <code className="font-mono text-[12.5px] bg-[#F8F7FC] text-[#4E3978] px-2 py-0.5 rounded border border-[#E8E4EF]">
+              C:\inetpub\wwwroot\Sam_Att\deployment\Deploy_Sam_Att.bat
+            </code>{' '}
+            เพื่อตรวจสอบความพร้อม สำรองข้อมูล อัปเดตโค้ด และตรวจสอบ Health Check อัตโนมัติโดยไม่กระทบระบบอื่น
+          </p>
         </div>
 
-        {/* 4 Status Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0] space-y-1">
-            <div className="text-[12.5px] font-medium text-[#746B83]">เวอร์ชันปัจจุบัน</div>
-            <div className="text-[18px] font-bold font-mono text-[#262238]">
-              {deployStatus?.currentVersion || '2.0.0-standalone'}
-            </div>
-            <div className="text-[12px] text-[#746B83]">
-              พอร์ต HTTPS {deployStatus?.httpsPort || 4101}
-            </div>
-          </div>
-
-          <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0] space-y-1">
-            <div className="text-[12.5px] font-medium text-[#746B83]">สถานะระบบ</div>
-            <div className="flex items-center gap-1.5 pt-0.5 text-[15px] font-bold text-[#198568]">
-              <ShieldCheck className="w-4.5 h-4.5 shrink-0" aria-hidden="true" />
-              <span>{deployStatus?.inProgress ? 'กำลังอัปเดต...' : 'ทำงานปกติ'}</span>
-            </div>
-            <div className="text-[12px] text-[#746B83]">แยกอิสระจาก Procurement</div>
-          </div>
-
-          <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0] space-y-1">
-            <div className="text-[12.5px] font-medium text-[#746B83]">สถานะการอัปเดตล่าสุด</div>
-            <div className="pt-0.5">
-              {latestDeploy ? (
-                <span
-                  className={`inline-flex items-center gap-1.5 text-[14.5px] font-bold ${
-                    latestDeploy.status === 'SUCCESS' ? 'text-[#198568]' : 'text-[#C74455]'
-                  }`}
-                >
-                  <CheckCircle2 className="w-4 h-4 shrink-0" aria-hidden="true" />
-                  <span>{latestDeploy.status === 'SUCCESS' ? 'สำเร็จ (SUCCESS)' : latestDeploy.status}</span>
-                </span>
-              ) : (
-                <span className="text-[14.5px] font-semibold text-[#198568]">พร้อมใช้งาน</span>
-              )}
-            </div>
-            <div className="text-[12px] text-[#746B83]">
-              โดย: {latestDeploy?.executed_by || 'ระบบเริ่มต้น'}
-            </div>
-          </div>
-
-          <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0] space-y-1">
-            <div className="text-[12.5px] font-medium text-[#746B83]">วันที่อัปเดตล่าสุด</div>
-            <div className="text-[15px] font-bold font-mono text-[#262238] flex items-center gap-1.5 pt-0.5 tabular-nums">
-              <Clock className="w-4 h-4 text-[#8E70C9] shrink-0" aria-hidden="true" />
-              <span>
-                {latestDeploy?.executed_at
-                  ? formatThaiDateTime(latestDeploy.executed_at)
-                  : 'ติดตั้งรุ่นเริ่มต้น'}
-              </span>
-            </div>
-            <div className="text-[12px] text-[#746B83]">สำรองข้อมูลก่อนอัปเดตทุกครั้ง</div>
-          </div>
-        </div>
-
-        {/* ผลการอัปเดตล่าสุด (Console Output) */}
         {(lastDeployOutput || latestDeploy?.rollback_note) && (
-          <div className="space-y-2 pt-2">
-            <div className="flex items-center gap-2 text-[14px] font-bold text-[#262238]">
-              <Terminal className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
-              <span>ผลการอัปเดตล่าสุด</span>
+          <div className="space-y-2 pt-3 border-t border-[#E8E4EF]">
+            <div className="flex items-center gap-2 text-[14px] font-bold text-[#292638]">
+              <Terminal className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+              <span>ผลการอัปเดตล่าสุด (Console Output)</span>
             </div>
-            <pre className="p-4 rounded-xl bg-[#262238] text-[#F8F7FC] font-mono text-[12.5px] overflow-x-auto leading-relaxed max-h-72">
+            <pre className="p-4 rounded-xl bg-[#292638] text-[#F8F7FC] font-mono text-[12.5px] overflow-x-auto leading-relaxed max-h-72">
               {lastDeployOutput || latestDeploy?.rollback_note}
             </pre>
           </div>
@@ -1012,23 +1057,23 @@ export function AdminViews({
       </div>
 
       {/* ประวัติการอัปเดตย้อนหลัง */}
-      <div className="ent-table-wrapper">
-        <div className="px-5 py-4 border-b border-[#E6DFF0] bg-[#F8F7FC]">
-          <h3 className="text-[16.5px] font-bold text-[#262238]">
+      <div className="his-surface overflow-hidden">
+        <div className="px-5 py-4 border-b border-[#E8E4EF] bg-[#F8F7FC]">
+          <h3 className="text-[15.5px] font-bold text-[#292638]">
             ประวัติการอัปเดตระบบ ({deployStatus?.history?.length || 0} รายการล่าสุด)
           </h3>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse text-[14px]">
+          <table className="his-table">
             <thead>
-              <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
-                <th className="py-3 px-5 font-semibold text-[13px]">ครั้งที่ · เวอร์ชัน</th>
-                <th className="py-3 px-5 font-semibold text-[13px]">วันที่และเวลา</th>
-                <th className="py-3 px-5 font-semibold text-[13px]">ผู้สั่งอัปเดต</th>
-                <th className="py-3 px-5 font-semibold text-[13px]">สถานะ</th>
+              <tr>
+                <th>ครั้งที่ · เวอร์ชัน</th>
+                <th>วันที่และเวลา</th>
+                <th>ผู้สั่งอัปเดต</th>
+                <th>สถานะ</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-[#E6DFF0]">
+            <tbody>
               {!deployStatus?.history || deployStatus.history.length === 0 ? (
                 <TableEmptyState
                   colSpan={4}
@@ -1037,24 +1082,18 @@ export function AdminViews({
                 />
               ) : (
                 deployStatus.history.map((h: any) => (
-                  <tr key={h.id} className="hover:bg-[#F8F7FC]">
-                    <td className="py-3.5 px-5 font-mono font-bold text-[#262238]">
+                  <tr key={h.id}>
+                    <td className="font-mono font-bold text-[#292638]">
                       #{h.id} · {h.release_version}
                     </td>
-                    <td className="py-3.5 px-5 font-mono text-[#746B83] tabular-nums">
+                    <td className="font-mono text-[#777287] tabular-nums">
                       {h.executed_at ? formatThaiDateTime(h.executed_at) : '—'}
                     </td>
-                    <td className="py-3.5 px-5 font-mono text-[#262238]">{h.executed_by}</td>
-                    <td className="py-3.5 px-5">
-                      <span
-                        className={`font-semibold text-[12.5px] px-2.5 py-1 rounded-md border ${
-                          h.status === 'SUCCESS'
-                            ? 'text-[#198568] bg-[#EDF8F4] border-[#C2E6DA]'
-                            : 'text-[#C74455] bg-[#FDF2F3] border-[#F3CCD0]'
-                        }`}
-                      >
+                    <td className="font-mono text-[#292638]">{h.executed_by}</td>
+                    <td>
+                      <StatusBadge tone={h.status === 'SUCCESS' ? 'success' : 'danger'} dot>
                         {h.status === 'SUCCESS' ? 'สำเร็จ' : h.status}
-                      </span>
+                      </StatusBadge>
                     </td>
                   </tr>
                 ))
@@ -1074,9 +1113,9 @@ export function AdminViews({
         onConfirm={handleExecuteOneButtonUpdate}
         onCancel={() => setConfirmDeployOpen(false)}
       >
-        <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0] space-y-2 text-[13.5px] text-[#262238]">
-          <div className="font-bold text-[#543B7A]">ขั้นตอนที่ระบบจะดำเนินการโดยอัตโนมัติ:</div>
-          <ul className="list-disc pl-5 space-y-1 text-[#746B83]">
+        <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-2 text-[13.5px] text-[#292638]">
+          <div className="font-bold text-[#4E3978]">ขั้นตอนที่ระบบจะดำเนินการโดยอัตโนมัติ:</div>
+          <ul className="list-disc pl-5 space-y-1 text-[#777287]">
             <li>ตรวจสอบความพร้อมของระบบ (Preflight Check) และสำรองฐานข้อมูล</li>
             <li>อัปเดตซอร์สโค้ดและ Build ระบบ Frontend / Backend ใหม่</li>
             <li>รีสตาร์ทเฉพาะเซอร์วิส Sam_Att บนพอร์ต 4101 โดยไม่กระทบระบบ Procurement</li>
@@ -1096,7 +1135,7 @@ export function AdminViews({
         onClose={() => setDeployProgressOpen(false)}
         details={
           lastDeployOutput ? (
-            <pre className="p-3 rounded-lg bg-[#262238] text-[#F8F7FC] font-mono text-[11.5px] overflow-x-auto max-h-48">
+            <pre className="p-3 rounded-lg bg-[#292638] text-[#F8F7FC] font-mono text-[11.5px] overflow-x-auto max-h-48">
               {lastDeployOutput}
             </pre>
           ) : undefined

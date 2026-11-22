@@ -59,6 +59,10 @@ import {
 } from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
 import {
+  PageHeader,
+  MetricStrip,
+  TabBar,
+  StatusBadge,
   SortableHeader,
   TablePaginationBar,
   NotificationBanner,
@@ -109,14 +113,14 @@ function renderShiftIcon(kind: ShiftIconKind, className = 'w-3.5 h-3.5') {
     case 'NIGHT':
       return <Moon className={`${className} text-indigo-700 shrink-0`} aria-hidden="true" />;
     case 'MORNING_AFTERNOON':
-      return <Sunrise className={`${className} text-[#543B7A] shrink-0`} aria-hidden="true" />;
+      return <Sunrise className={`${className} text-[#4E3978] shrink-0`} aria-hidden="true" />;
     case 'AFTERNOON_NIGHT':
       return <CloudMoon className={`${className} text-indigo-600 shrink-0`} aria-hidden="true" />;
     case 'SPECIAL':
       return <MoonStar className={`${className} text-fuchsia-700 shrink-0`} aria-hidden="true" />;
     case 'FULL_DAY':
     default:
-      return <Clock className={`${className} text-[#543B7A] shrink-0`} aria-hidden="true" />;
+      return <Clock className={`${className} text-[#4E3978] shrink-0`} aria-hidden="true" />;
   }
 }
 
@@ -1947,23 +1951,24 @@ export function ShiftsView({
   return (
     <div className="space-y-5">
       {/* =====================================================================
-          ส่วนหัวหลักของโมดูล (Professional Lavender Hospital Header)
+          ส่วนหัวหลักของโมดูล (Modern HIS PageHeader — ไม่บีบหัวข้อเมื่อมีหลายปุ่ม)
          ===================================================================== */}
-      <div className="ent-card p-5 sm:p-6 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-          <div className="space-y-1 min-w-0 flex-1">
-            <div className="text-[12.5px] font-semibold text-[#8E70C9]">
-              ระบบบริหารตารางเวรและเวลาปฏิบัติงานบุคลากร · โรงพยาบาลสามชุก
-            </div>
-            <h1 className="text-[22px] sm:text-[24px] font-bold text-[#262238] tracking-tight leading-snug">
-              ตารางเวรและแม่แบบกะทำงาน
-            </h1>
-            <p className="text-[13.5px] text-[#746B83] leading-relaxed">
-              จัดตารางเวรรายเดือนและรายสัปดาห์ เพิ่มเวรรายบุคคลหรือหลายคนพร้อมตรวจสอบความซ้ำซ้อนก่อนบันทึกจริง
-            </p>
+      <PageHeader
+        category="บริหารเวลาปฏิบัติงาน"
+        title="ตารางเวรและแม่แบบกะทำงาน"
+        subtitle="จัดตารางเวรรายเดือนและรายสัปดาห์ เพิ่มเวรรายบุคคลหรือหลายคนพร้อมตรวจสอบความซ้ำซ้อนก่อนบันทึกจริง"
+        meta={
+          <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-[#777287]">
+            <span>รอบเดือนปัจจุบัน:</span>
+            <span className="font-semibold text-[#4E3978]">{formatThaiMonthTitle(selectedMonth)}</span>
+            <span className="text-[#D8D1E6]" aria-hidden="true">·</span>
+            <span className="tabular-nums">
+              บุคลากรที่แสดง <strong className="text-[#292638]">{filteredPersonnelForRoster.length}</strong> คน
+            </span>
           </div>
-
-          <div className="shrink-0">
+        }
+        actions={
+          <>
             <PageHelpAction
               guideKey="shifts"
               activeTabKey={activeTab}
@@ -1971,145 +1976,118 @@ export function ShiftsView({
               onNavigate={onNavigate}
               compact
             />
-          </div>
-        </div>
-
-        <div className="pt-3.5 border-t border-[#E6DFF0] flex flex-wrap items-center gap-2.5">
-          {activeTab === 'ASSIGN_WORKSPACE' ? (
-            <button
-              type="button"
-              onClick={() => setActiveTab('ROSTER')}
-              className="ent-btn-secondary whitespace-nowrap"
-            >
-              <ArrowLeft className="w-4 h-4 text-[#746B83]" />
-              <span>กลับไปหน้าตารางเวร</span>
-            </button>
-          ) : (
-            <>
+            {activeTab === 'ASSIGN_WORKSPACE' ? (
               <button
                 type="button"
-                onClick={handleDownloadExcelTemplate}
-                className="ent-btn-secondary text-[13px] whitespace-nowrap"
+                onClick={() => setActiveTab('ROSTER')}
+                className="ent-btn-secondary whitespace-nowrap"
               >
-                <Download className="w-4 h-4 text-[#8E70C9]" />
-                <span>ดาวน์โหลด Template Excel</span>
+                <ArrowLeft className="w-4 h-4 text-[#777287]" />
+                <span>กลับไปหน้าตารางเวร</span>
               </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={handleDownloadExcelTemplate}
+                  className="ent-btn-secondary text-[13px] whitespace-nowrap"
+                >
+                  <Download className="w-4 h-4 text-[#8066B5]" />
+                  <span>ดาวน์โหลด Template Excel</span>
+                </button>
 
-              <button
-                type="button"
-                onClick={() => {
-                  setExcelPreview(null);
-                  setExcelError(null);
-                  setShowExcelImportModal(true);
-                }}
-                className="h-10 px-3.5 rounded-lg border border-[#D5CBE8] bg-[#F2EDFA] hover:bg-[#EDE5F8] text-[#543B7A] text-[13px] font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
-              >
-                <Upload className="w-4 h-4 text-[#8E70C9]" />
-                <span>นำเข้าตารางเวรจาก Excel</span>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExcelPreview(null);
+                    setExcelError(null);
+                    setShowExcelImportModal(true);
+                  }}
+                  className="ent-btn-soft text-[13px] whitespace-nowrap"
+                >
+                  <Upload className="w-4 h-4 text-[#8066B5]" />
+                  <span>นำเข้าตารางเวรจาก Excel</span>
+                </button>
 
-              <button
-                type="button"
-                onClick={() =>
-                  openAssignWorkspace({
-                    method: 'SINGLE_PERSON',
-                  })
-                }
-                className="h-10 px-3.5 rounded-lg border border-[#D5CBE8] bg-[#F2EDFA] hover:bg-[#EDE5F8] text-[#543B7A] text-[13px] font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
-              >
-                <User className="w-4 h-4 text-[#8E70C9]" />
-                <span>เพิ่มเวรรายบุคคล (1 คน)</span>
-              </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    openAssignWorkspace({
+                      method: 'SINGLE_PERSON',
+                    })
+                  }
+                  className="ent-btn-soft text-[13px] whitespace-nowrap"
+                >
+                  <User className="w-4 h-4 text-[#8066B5]" />
+                  <span>เพิ่มเวรรายบุคคล (1 คน)</span>
+                </button>
 
-              <button
-                type="button"
-                onClick={() =>
-                  openAssignWorkspace({
-                    method: 'MULTI_PERSON',
-                  })
-                }
-                className="ent-btn-primary whitespace-nowrap"
-              >
-                <Users className="w-4 h-4" />
-                <span>เพิ่มเวรหลายคนพร้อมกัน</span>
-              </button>
-            </>
-          )}
-        </div>
-      </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    openAssignWorkspace({
+                      method: 'MULTI_PERSON',
+                    })
+                  }
+                  className="ent-btn-primary whitespace-nowrap"
+                >
+                  <Users className="w-4 h-4" />
+                  <span>เพิ่มเวรหลายคนพร้อมกัน</span>
+                </button>
+              </>
+            )}
+          </>
+        }
+      />
 
       <ErrorBanner error={error} onRetry={loadData} />
       <NotificationBanner message={notice} onClose={() => setNotice(null)} />
 
       {/* =====================================================================
-          แถบนำทางหลัก 3 หน้าจอ (Full-Page Navigation Tabs)
+          แถบนำทางหลัก 3 หน้าจอ (Modern HIS Underline TabBar + View Switcher)
          ===================================================================== */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-[#E6DFF0] pb-3">
-        <div
-          role="tablist"
-          aria-label="แถบเมนูหลักตารางเวรและแม่แบบกะ"
-          className="ent-tab-bar w-full md:w-auto"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'ROSTER'}
-            onClick={() => setActiveTab('ROSTER')}
-            className={`flex-1 md:flex-initial ent-tab-btn ${
-              activeTab === 'ROSTER' ? 'ent-tab-btn-active' : ''
-            }`}
-          >
-            <Calendar className="w-4 h-4 shrink-0" />
-            <span>1. ตารางเวรปฏิบัติงาน</span>
-            <span className="font-mono text-[12px] opacity-80 tabular-nums">
-              ({activeCountInMonth})
-            </span>
-          </button>
-
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'ASSIGN_WORKSPACE'}
-            onClick={() => {
+      <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-3 border-b border-[#E8E4EF]">
+        <TabBar
+          variant="underline"
+          activeKey={activeTab}
+          onChange={(key) => {
+            if (key === 'ASSIGN_WORKSPACE') {
               if (activeTab !== 'ASSIGN_WORKSPACE') {
                 openAssignWorkspace({ method: assignMethod });
               }
-            }}
-            className={`flex-1 md:flex-initial ent-tab-btn ${
-              activeTab === 'ASSIGN_WORKSPACE' ? 'ent-tab-btn-active' : ''
-            }`}
-          >
-            <Plus className="w-4 h-4 shrink-0" />
-            <span>2. จัดเวร / เพิ่มเวรใหม่</span>
-          </button>
-
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === 'TEMPLATES'}
-            onClick={() => setActiveTab('TEMPLATES')}
-            className={`flex-1 md:flex-initial ent-tab-btn ${
-              activeTab === 'TEMPLATES' ? 'ent-tab-btn-active' : ''
-            }`}
-          >
-            <Clock className="w-4 h-4 shrink-0" />
-            <span>3. แม่แบบกะทำงาน</span>
-            <span className="font-mono text-[12px] opacity-80 tabular-nums">
-              ({shifts.length})
-            </span>
-          </button>
-        </div>
+            } else {
+              setActiveTab(key as WorkspaceTabKey);
+            }
+          }}
+          items={[
+            {
+              key: 'ROSTER',
+              label: '1. ตารางเวรปฏิบัติงาน',
+              count: activeCountInMonth,
+              icon: <Calendar className="w-4 h-4" />,
+            },
+            {
+              key: 'ASSIGN_WORKSPACE',
+              label: '2. จัดเวร / เพิ่มเวรใหม่',
+              icon: <Plus className="w-4 h-4" />,
+            },
+            {
+              key: 'TEMPLATES',
+              label: '3. แม่แบบกะทำงาน',
+              count: shifts.length,
+              icon: <Clock className="w-4 h-4" />,
+            },
+          ]}
+        />
 
         {/* สลับมุมมองภายในหน้าตารางเวร: รายเดือน | รายสัปดาห์ | รายการ */}
         {activeTab === 'ROSTER' && (
-          <div className="inline-flex flex-wrap items-center p-1 bg-[#F2EDFA] border border-[#E6DFF0] rounded-lg self-start md:self-auto">
+          <div className="ent-tab-bar self-start lg:self-auto mb-2">
             <button
               type="button"
               onClick={() => setRosterViewMode('MONTHLY_GRID')}
-              className={`px-3.5 py-1.5 rounded-md text-[13px] font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-                rosterViewMode === 'MONTHLY_GRID'
-                  ? 'bg-[#8E70C9] text-white'
-                  : 'text-[#746B83] hover:text-[#262238]'
+              className={`ent-tab-btn text-[13px] ${
+                rosterViewMode === 'MONTHLY_GRID' ? 'ent-tab-btn-active' : ''
               }`}
             >
               <Calendar className="w-3.5 h-3.5" />
@@ -2119,10 +2097,8 @@ export function ShiftsView({
             <button
               type="button"
               onClick={() => setRosterViewMode('WEEKLY_GRID')}
-              className={`px-3.5 py-1.5 rounded-md text-[13px] font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-                rosterViewMode === 'WEEKLY_GRID'
-                  ? 'bg-[#8E70C9] text-white'
-                  : 'text-[#746B83] hover:text-[#262238]'
+              className={`ent-tab-btn text-[13px] ${
+                rosterViewMode === 'WEEKLY_GRID' ? 'ent-tab-btn-active' : ''
               }`}
             >
               <CalendarDays className="w-3.5 h-3.5" />
@@ -2132,10 +2108,8 @@ export function ShiftsView({
             <button
               type="button"
               onClick={() => setRosterViewMode('DETAIL_LIST')}
-              className={`px-3.5 py-1.5 rounded-md text-[13px] font-semibold inline-flex items-center gap-1.5 transition-colors whitespace-nowrap ${
-                rosterViewMode === 'DETAIL_LIST'
-                  ? 'bg-[#8E70C9] text-white'
-                  : 'text-[#746B83] hover:text-[#262238]'
+              className={`ent-tab-btn text-[13px] ${
+                rosterViewMode === 'DETAIL_LIST' ? 'ent-tab-btn-active' : ''
               }`}
             >
               <List className="w-3.5 h-3.5" />
@@ -2145,24 +2119,54 @@ export function ShiftsView({
         )}
       </div>
 
+      {/* แถบสรุปภาพรวมตารางเวรรายเดือน (Unified MetricStrip) */}
+      {activeTab === 'ROSTER' && (
+        <MetricStrip
+          items={[
+            {
+              label: 'เวรที่จัดในเดือนนี้',
+              value: `${activeCountInMonth.toLocaleString('th-TH')} เวร`,
+              subtext: `รอบเดือน ${formatThaiMonthTitle(selectedMonth)}`,
+              tone: 'primary',
+            },
+            {
+              label: 'บุคลากรที่แสดงในตาราง',
+              value: `${filteredPersonnelForRoster.length.toLocaleString('th-TH')} คน`,
+              subtext: departmentFilter === 'ALL' ? 'ทุกกลุ่มงาน / หน่วยงาน' : departmentFilter,
+            },
+            {
+              label: 'เวรข้ามเที่ยงคืน (+1 วัน)',
+              value: `${crossMidnightCountInMonth.toLocaleString('th-TH')} เวร`,
+              subtext: 'กะดึก / กะพิเศษข้ามวัน',
+              tone: crossMidnightCountInMonth > 0 ? 'info' : 'neutral',
+            },
+            {
+              label: 'แม่แบบกะที่พร้อมใช้',
+              value: `${shifts.length.toLocaleString('th-TH')} แม่แบบ`,
+              subtext: 'คลิกแท็บแม่แบบกะเพื่อปรับแต่ง',
+            },
+          ]}
+        />
+      )}
+
       {/* =====================================================================
           หน้าจอที่ 1: ตารางเวรปฏิบัติงาน (FULL-PAGE SCHEDULE MANAGEMENT)
          ===================================================================== */}
       {activeTab === 'ROSTER' && (
         <div className="space-y-4">
           {/* แถบเลือกเดือน/ปี พ.ศ. และตัวกรองตารางเวร */}
-          <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-3.5">
+          <div className="bg-white border border-[#E8E4EF] rounded-xl p-4 space-y-3.5">
             <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
               {/* เลือกเดือนและปี พ.ศ. ได้ง่ายโดยตรง */}
               <div className="flex flex-wrap items-center gap-2">
-                <div className="inline-flex items-center bg-[#F2EDFA] border border-[#E6DFF0] rounded-lg p-1 gap-1">
+                <div className="inline-flex items-center bg-[#F1ECFA] border border-[#E8E4EF] rounded-lg p-1 gap-1">
                   <button
                     type="button"
                     onClick={() => {
                       setSelectedMonth((m) => shiftMonthString(m, -1));
                       setRosterPersonPage(1);
                     }}
-                    className="h-8 px-2.5 rounded-md text-[#543B7A] hover:bg-white transition-colors inline-flex items-center gap-1 text-[12.5px] font-semibold"
+                    className="h-8 px-2.5 rounded-md text-[#4E3978] hover:bg-white transition-colors inline-flex items-center gap-1 text-[12.5px] font-semibold"
                     title="เดือนก่อนหน้า"
                   >
                     <ChevronLeft className="w-4 h-4" />
@@ -2175,7 +2179,7 @@ export function ShiftsView({
                     onChange={(e) =>
                       handleChangeYearOrMonth(monthBounds.year, Number(e.target.value))
                     }
-                    className="h-8 px-2.5 rounded-md bg-white border border-[#E6DFF0] text-[13.5px] font-bold text-violet-950 focus:outline-none focus:border-[#8E70C9]"
+                    className="h-8 px-2.5 rounded-md bg-white border border-[#E8E4EF] text-[13.5px] font-bold text-violet-950 focus:outline-none focus:border-[#8066B5]"
                   >
                     {THAI_FULL_MONTHS.map((mName, idx) => (
                       <option key={mName} value={idx + 1}>
@@ -2190,7 +2194,7 @@ export function ShiftsView({
                     onChange={(e) =>
                       handleChangeYearOrMonth(Number(e.target.value), monthBounds.month)
                     }
-                    className="h-8 px-2.5 rounded-md bg-white border border-[#E6DFF0] text-[13.5px] font-bold text-violet-950 font-mono tabular-nums focus:outline-none focus:border-[#8E70C9]"
+                    className="h-8 px-2.5 rounded-md bg-white border border-[#E8E4EF] text-[13.5px] font-bold text-violet-950 font-mono tabular-nums focus:outline-none focus:border-[#8066B5]"
                   >
                     {selectableYears.map((y) => (
                       <option key={y} value={y}>
@@ -2205,7 +2209,7 @@ export function ShiftsView({
                       setSelectedMonth((m) => shiftMonthString(m, 1));
                       setRosterPersonPage(1);
                     }}
-                    className="h-8 px-2.5 rounded-md text-[#543B7A] hover:bg-white transition-colors inline-flex items-center gap-1 text-[12.5px] font-semibold"
+                    className="h-8 px-2.5 rounded-md text-[#4E3978] hover:bg-white transition-colors inline-flex items-center gap-1 text-[12.5px] font-semibold"
                     title="เดือนถัดไป"
                   >
                     <span className="hidden sm:inline">เดือนถัดไป</span>
@@ -2220,13 +2224,13 @@ export function ShiftsView({
                       setSelectedMonth(initialBkk.currentYearMonth);
                       setRosterPersonPage(1);
                     }}
-                    className="h-9 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-[12.5px] font-semibold text-slate-700 whitespace-nowrap"
+                    className="h-9 px-3 rounded-lg border border-[#D8D1E6] bg-white hover:bg-[#F8F7FC] text-[12.5px] font-semibold text-[#292638] whitespace-nowrap"
                   >
                     กลับมาเดือนปัจจุบัน
                   </button>
                 )}
 
-                <div className="text-[13px] text-slate-600 flex items-center gap-1.5 flex-wrap pl-1">
+                <div className="text-[13px] text-[#777287] flex items-center gap-1.5 flex-wrap pl-1">
                   <span>บุคลากรที่แสดง {filteredPersonnelForRoster.length} คน</span>
                   <span aria-hidden="true">·</span>
                   <span>เวรทั้งหมดในเดือน {activeCountInMonth} เวร</span>
@@ -2237,14 +2241,14 @@ export function ShiftsView({
 
               {/* ตัวเลือกช่วงวันที่สำหรับตารางรายเดือน หรือเลือกสัปดาห์สำหรับตารางรายสัปดาห์ */}
               {rosterViewMode === 'MONTHLY_GRID' && (
-                <div className="inline-flex items-center p-1 bg-slate-100 border border-slate-200 rounded-lg self-start xl:self-auto">
+                <div className="inline-flex items-center p-1 bg-[#F1ECFA] border border-[#E8E4EF] rounded-lg self-start xl:self-auto">
                   <button
                     type="button"
                     onClick={() => setDayRangeMode('ALL')}
                     className={`px-3 py-1 rounded-md text-[12.5px] font-medium transition-colors whitespace-nowrap ${
                       dayRangeMode === 'ALL'
-                        ? 'bg-white text-violet-800 font-semibold shadow-2xs'
-                        : 'text-slate-600 hover:text-slate-900'
+                        ? 'bg-white text-[#4E3978] font-semibold shadow-2xs'
+                        : 'text-[#777287] hover:text-[#292638]'
                     }`}
                   >
                     ทั้งเดือน (1–{monthBounds.daysInMonth})
@@ -2254,8 +2258,8 @@ export function ShiftsView({
                     onClick={() => setDayRangeMode('FIRST_HALF')}
                     className={`px-3 py-1 rounded-md text-[12.5px] font-medium transition-colors whitespace-nowrap ${
                       dayRangeMode === 'FIRST_HALF'
-                        ? 'bg-white text-violet-800 font-semibold shadow-2xs'
-                        : 'text-slate-600 hover:text-slate-900'
+                        ? 'bg-white text-[#4E3978] font-semibold shadow-2xs'
+                        : 'text-[#777287] hover:text-[#292638]'
                     }`}
                   >
                     ครึ่งเดือนแรก (1–15)
@@ -2265,8 +2269,8 @@ export function ShiftsView({
                     onClick={() => setDayRangeMode('SECOND_HALF')}
                     className={`px-3 py-1 rounded-md text-[12.5px] font-medium transition-colors whitespace-nowrap ${
                       dayRangeMode === 'SECOND_HALF'
-                        ? 'bg-white text-violet-800 font-semibold shadow-2xs'
-                        : 'text-slate-600 hover:text-slate-900'
+                        ? 'bg-white text-[#4E3978] font-semibold shadow-2xs'
+                        : 'text-[#777287] hover:text-[#292638]'
                     }`}
                   >
                     ครึ่งเดือนหลัง (16–{monthBounds.daysInMonth})
@@ -2275,12 +2279,12 @@ export function ShiftsView({
               )}
 
               {rosterViewMode === 'WEEKLY_GRID' && (
-                <div className="inline-flex items-center gap-1.5 bg-[#F2EDFA] border border-[#E6DFF0] rounded-lg p-1 self-start xl:self-auto">
+                <div className="inline-flex items-center gap-1.5 bg-[#F1ECFA] border border-[#E8E4EF] rounded-lg p-1 self-start xl:self-auto">
                   <button
                     type="button"
                     disabled={selectedWeekIndex <= 0}
                     onClick={() => setSelectedWeekIndex((w) => Math.max(0, w - 1))}
-                    className="h-8 px-2.5 rounded-md text-[#543B7A] hover:bg-white disabled:opacity-40 text-[12.5px] font-semibold inline-flex items-center gap-1"
+                    className="h-8 px-2.5 rounded-md text-[#4E3978] hover:bg-white disabled:opacity-40 text-[12.5px] font-semibold inline-flex items-center gap-1"
                   >
                     <ChevronLeft className="w-4 h-4" />
                     <span>สัปดาห์ก่อน</span>
@@ -2289,7 +2293,7 @@ export function ShiftsView({
                     aria-label="เลือกสัปดาห์ในเดือน"
                     value={selectedWeekIndex}
                     onChange={(e) => setSelectedWeekIndex(Number(e.target.value))}
-                    className="h-8 px-2.5 rounded-md bg-white border border-[#E6DFF0] text-[13px] font-semibold text-violet-950 focus:outline-none"
+                    className="h-8 px-2.5 rounded-md bg-white border border-[#E8E4EF] text-[13px] font-semibold text-violet-950 focus:outline-none"
                   >
                     {monthBounds.weeks.map((w) => (
                       <option key={w.weekIndex} value={w.weekIndex}>
@@ -2303,7 +2307,7 @@ export function ShiftsView({
                     onClick={() =>
                       setSelectedWeekIndex((w) => Math.min(monthBounds.weeks.length - 1, w + 1))
                     }
-                    className="h-8 px-2.5 rounded-md text-[#543B7A] hover:bg-white disabled:opacity-40 text-[12.5px] font-semibold inline-flex items-center gap-1"
+                    className="h-8 px-2.5 rounded-md text-[#4E3978] hover:bg-white disabled:opacity-40 text-[12.5px] font-semibold inline-flex items-center gap-1"
                   >
                     <span>สัปดาห์ถัดไป</span>
                     <ChevronRight className="w-4 h-4" />
@@ -2315,7 +2319,7 @@ export function ShiftsView({
             {/* แถวตัวกรอง: ค้นหาบุคลากร, กรองตามกลุ่มงาน/แผนก, กรองตามแม่แบบกะ, สถานะ */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-12 gap-2.5 items-center">
               <div className="relative lg:col-span-4">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <Search className="w-4 h-4 text-[#9A94AA] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="text"
                   value={searchText}
@@ -2325,7 +2329,7 @@ export function ShiftsView({
                     setRosterPersonPage(1);
                   }}
                   placeholder="ค้นหาชื่อ-สกุล, รหัสบุคลากร, รหัสสแกนนิ้ว..."
-                  className="w-full h-10 pl-9 pr-3 rounded-lg border border-slate-300 bg-white text-[13.5px] text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-[#8E70C9]"
+                  className="w-full h-10 pl-9 pr-3 rounded-lg border border-[#D8D1E6] bg-white text-[13.5px] text-[#292638] placeholder:text-[#9A94AA] focus:outline-none focus:border-[#8066B5]"
                 />
               </div>
 
@@ -2338,7 +2342,7 @@ export function ShiftsView({
                     setPage(1);
                     setRosterPersonPage(1);
                   }}
-                  className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-[13.5px] text-slate-800 focus:outline-none focus:border-[#8E70C9]"
+                  className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] bg-white text-[13.5px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                 >
                   <option value="ALL">ทุกกลุ่มงาน / แผนก ({personnel.length} คน)</option>
                   {departments.map((dept) => (
@@ -2358,7 +2362,7 @@ export function ShiftsView({
                     setPage(1);
                     setRosterPersonPage(1);
                   }}
-                  className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-[13.5px] text-slate-800 focus:outline-none focus:border-[#8E70C9]"
+                  className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] bg-white text-[13.5px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                 >
                   <option value="ALL">ทุกแม่แบบกะทำงาน ({shifts.length} แม่แบบ)</option>
                   {shifts.map((s) => (
@@ -2377,7 +2381,7 @@ export function ShiftsView({
                     setStatusFilter(e.target.value as 'ACTIVE' | 'CANCELLED' | 'ALL');
                     setPage(1);
                   }}
-                  className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-[13.5px] text-slate-800 focus:outline-none focus:border-[#8E70C9]"
+                  className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] bg-white text-[13.5px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                 >
                   <option value="ACTIVE">เวรที่ใช้งานปกติ</option>
                   <option value="ALL">ทุกสถานะ</option>
@@ -2388,7 +2392,7 @@ export function ShiftsView({
                   <button
                     type="button"
                     onClick={resetAllFilters}
-                    className="h-10 px-3 rounded-lg border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 text-[13px] font-medium inline-flex items-center gap-1 shrink-0"
+                    className="h-10 px-3 rounded-lg border border-[#D8D1E6] bg-[#F8F7FC] hover:bg-[#F1ECFA] text-[#292638] text-[13px] font-medium inline-flex items-center gap-1 shrink-0"
                     title="ล้างตัวกรองทั้งหมด"
                   >
                     <RotateCcw className="w-3.5 h-3.5" />
@@ -2403,21 +2407,21 @@ export function ShiftsView({
               มุมมองที่ 1.1: ตารางเวรรายเดือน (MONTHLY ROSTER GRID)
              ================================================================= */}
           {rosterViewMode === 'MONTHLY_GRID' && (
-            <div className="bg-white border border-[#E6DFF0] rounded-xl overflow-hidden">
-              <div className="px-4 sm:px-5 py-3.5 bg-[#F8F7FC] border-b border-[#E6DFF0] flex flex-col gap-2.5">
+            <div className="bg-white border border-[#E8E4EF] rounded-xl overflow-hidden">
+              <div className="px-4 sm:px-5 py-3.5 bg-[#F8F7FC] border-b border-[#E8E4EF] flex flex-col gap-2.5">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
-                    <h2 className="text-[16px] font-bold text-[#262238]">
+                    <h2 className="text-[16px] font-bold text-[#292638]">
                       ตารางเวรรายเดือน · {formatThaiMonthTitle(selectedMonth)}
                     </h2>
-                    <p className="text-[12.5px] text-slate-600">
+                    <p className="text-[12.5px] text-[#777287]">
                       วางเมาส์บนไอคอนเพื่อดูชื่อกะและเวลาจริง หรือคลิกช่องวันที่เพื่อเปิดรายละเอียดและแก้ไขกะได้ทันที
                     </p>
                   </div>
                 </div>
 
                 {/* คำอธิบายสัญลักษณ์ Icon กะทัดรัด (แยกกะเริ่มต้น vs กะที่เจ้าหน้าที่กำหนดเองชัดเจน) */}
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[12px] text-slate-700 pt-1 border-t border-[#E6DFF0]/70">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[12px] text-[#292638] pt-1 border-t border-[#E8E4EF]/70">
                   <span className="inline-flex items-center gap-1">
                     <Sun className="w-3.5 h-3.5 text-amber-600" />
                     <span>กะเช้า</span>
@@ -2431,7 +2435,7 @@ export function ShiftsView({
                     <span>กะดึก</span>
                   </span>
                   <span className="inline-flex items-center gap-1">
-                    <Sunrise className="w-3.5 h-3.5 text-[#543B7A]" />
+                    <Sunrise className="w-3.5 h-3.5 text-[#4E3978]" />
                     <span>เช้า–บ่าย</span>
                   </span>
                   <span className="inline-flex items-center gap-1">
@@ -2439,14 +2443,14 @@ export function ShiftsView({
                     <span>บ่าย–ดึก</span>
                   </span>
                   <span className="inline-flex items-center gap-1">
-                    <Clock className="w-3.5 h-3.5 text-[#543B7A]" />
+                    <Clock className="w-3.5 h-3.5 text-[#4E3978]" />
                     <span>กะอื่น/ทั้งวัน</span>
                   </span>
                   <span className="inline-flex items-center gap-1">
                     <MoonStar className="w-3.5 h-3.5 text-fuchsia-700" />
                     <span>กะพิเศษข้ามวัน</span>
                   </span>
-                  <span className="text-slate-300" aria-hidden="true">|</span>
+                  <span className="text-[#D8D1E6]" aria-hidden="true">|</span>
                   <span className="inline-flex items-center gap-1.5">
                     <span className="w-5 h-5 rounded-md border border-dashed border-emerald-400 bg-emerald-50/70 inline-flex items-center justify-center">
                       <Sun className="w-3 h-3 text-amber-600" />
@@ -2454,14 +2458,14 @@ export function ShiftsView({
                     <span>กรอบเส้นประ: กะเริ่มต้นอัตโนมัติ</span>
                   </span>
                   <span className="inline-flex items-center gap-1.5">
-                    <span className="relative w-5 h-5 rounded-md border border-[#8E70C9] bg-[#F2EDFA] inline-flex items-center justify-center">
+                    <span className="relative w-5 h-5 rounded-md border border-[#8066B5] bg-[#F1ECFA] inline-flex items-center justify-center">
                       <Sun className="w-3 h-3 text-amber-600" />
-                      <span className="w-1.5 h-1.5 rounded-full bg-[#543B7A] absolute -top-0.5 -right-0.5" />
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#4E3978] absolute -top-0.5 -right-0.5" />
                     </span>
                     <span>กรอบทึบ+จุดมุมขวา: กะที่เจ้าหน้าที่กำหนดเอง</span>
                   </span>
                   <span className="inline-flex items-center gap-1.5">
-                    <span className="font-mono font-bold text-slate-400 px-1">—</span>
+                    <span className="font-mono font-bold text-[#9A94AA] px-1">—</span>
                     <span>ไม่มีเวร</span>
                   </span>
                 </div>
@@ -2470,11 +2474,11 @@ export function ShiftsView({
               <div className="overflow-x-auto max-h-[680px]">
                 <table className="w-full border-collapse text-left text-[13px]">
                   <thead className="sticky top-0 z-20">
-                    <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#262238]">
-                      <th className="sticky left-0 z-30 bg-[#F8F7FC] py-2.5 px-3.5 font-semibold min-w-[215px] max-w-[245px] border-r border-[#E6DFF0]">
+                    <tr className="border-b border-[#E8E4EF] bg-[#F8F7FC] text-[#292638]">
+                      <th className="sticky left-0 z-30 bg-[#F8F7FC] py-2.5 px-3.5 font-semibold min-w-[215px] max-w-[245px] border-r border-[#E8E4EF]">
                         บุคลากร / กลุ่มงาน ({filteredPersonnelForRoster.length} คน)
                       </th>
-                      <th className="py-2.5 px-2 font-semibold text-center min-w-[54px] w-[54px] border-r border-[#E6DFF0] bg-[#F8F7FC] text-[12px]">
+                      <th className="py-2.5 px-2 font-semibold text-center min-w-[54px] w-[54px] border-r border-[#E8E4EF] bg-[#F8F7FC] text-[12px]">
                         รวม
                       </th>
                       {visibleMonthDates.map((d) => {
@@ -2482,15 +2486,15 @@ export function ShiftsView({
                         return (
                           <th
                             key={d.dateStr}
-                            className={`py-2 px-0.5 text-center min-w-[42px] w-[42px] sm:min-w-[46px] sm:w-[46px] border-r border-[#E6DFF0]/80 font-mono tabular-nums ${
+                            className={`py-2 px-0.5 text-center min-w-[42px] w-[42px] sm:min-w-[46px] sm:w-[46px] border-r border-[#E8E4EF]/80 font-mono tabular-nums ${
                               isToday
-                                ? 'bg-[#EDE5F8] text-[#543B7A]'
+                                ? 'bg-[#E9DFF5] text-[#4E3978]'
                                 : d.isWeekend
-                                  ? 'bg-slate-100/90 text-slate-700'
-                                  : 'bg-[#F8F7FC] text-[#262238]'
+                                  ? 'bg-[#F1ECFA]/90 text-[#292638]'
+                                  : 'bg-[#F8F7FC] text-[#292638]'
                             }`}
                           >
-                            <div className="text-[10.5px] font-sans font-medium text-slate-500 leading-tight">
+                            <div className="text-[10.5px] font-sans font-medium text-[#777287] leading-tight">
                               {d.weekdayShort}
                             </div>
                             <div className="text-[12.5px] font-bold leading-tight mt-0.5">
@@ -2501,12 +2505,12 @@ export function ShiftsView({
                       })}
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-[#E6DFF0]/80">
+                  <tbody className="divide-y divide-[#E8E4EF]/80">
                     {loading ? (
                       <tr>
                         <td
                           colSpan={visibleMonthDates.length + 2}
-                          className="py-12 text-center text-[14px] text-slate-500"
+                          className="py-12 text-center text-[14px] text-[#777287]"
                         >
                           กำลังโหลดตารางเวรรายเดือน...
                         </td>
@@ -2536,24 +2540,24 @@ export function ShiftsView({
                             className="hover:bg-[#F8F7FC] transition-colors group"
                           >
                             {/* คอลัมน์รายชื่อบุคลากรทางซ้าย (Sticky Left) */}
-                            <td className="sticky left-0 z-10 bg-white group-hover:bg-[#F8F7FC] py-2 px-3.5 border-r border-[#E6DFF0] align-middle">
-                              <div className="font-bold text-[13px] text-[#262238] leading-snug truncate max-w-[225px]">
+                            <td className="sticky left-0 z-10 bg-white group-hover:bg-[#F8F7FC] py-2 px-3.5 border-r border-[#E8E4EF] align-middle">
+                              <div className="font-bold text-[13px] text-[#292638] leading-snug truncate max-w-[225px]">
                                 {person.full_name}
                               </div>
-                              <div className="text-[11.5px] text-slate-500 mt-0.5 flex items-center gap-1 truncate max-w-[225px]">
+                              <div className="text-[11.5px] text-[#777287] mt-0.5 flex items-center gap-1 truncate max-w-[225px]">
                                 <span className="font-mono">{pid}</span>
                                 <span aria-hidden="true">·</span>
                                 <span className="truncate">{person.department_name}</span>
                               </div>
                               {person.personnel_type_name && (
-                                <div className="text-[10.5px] text-[#543B7A] font-medium truncate max-w-[225px]">
+                                <div className="text-[10.5px] text-[#4E3978] font-medium truncate max-w-[225px]">
                                   {person.personnel_type_name}
                                 </div>
                               )}
                             </td>
 
                             {/* จำนวนเวรรวมในเดือนนี้ */}
-                            <td className="py-2 px-1 text-center font-mono tabular-nums font-bold text-[#543B7A] border-r border-[#E6DFF0] align-middle bg-[#F8F7FC]/60 text-[12.5px]">
+                            <td className="py-2 px-1 text-center font-mono tabular-nums font-bold text-[#4E3978] border-r border-[#E8E4EF] align-middle bg-[#F8F7FC]/60 text-[12.5px]">
                               {personTotalShifts}
                             </td>
 
@@ -2570,11 +2574,11 @@ export function ShiftsView({
                               return (
                                 <td
                                   key={d.dateStr}
-                                  className={`p-1 border-r border-[#E6DFF0]/60 align-middle text-center ${
+                                  className={`p-1 border-r border-[#E8E4EF]/60 align-middle text-center ${
                                     isToday
-                                      ? 'bg-[#F2EDFA]/35'
+                                      ? 'bg-[#F1ECFA]/35'
                                       : d.isWeekend
-                                        ? 'bg-slate-50/80'
+                                        ? 'bg-[#F8F7FC]/80'
                                         : ''
                                   }`}
                                 >
@@ -2587,7 +2591,7 @@ export function ShiftsView({
                                       className={`w-full h-9 rounded-lg flex items-center justify-center transition-colors ${
                                         vm.isClearedByStaff
                                           ? 'border border-dashed border-amber-300 bg-amber-50/70 text-amber-700 hover:bg-amber-100/80'
-                                          : 'border border-transparent text-slate-400 hover:border-[#8E70C9]/60 hover:bg-[#F2EDFA]/60 hover:text-[#543B7A]'
+                                          : 'border border-transparent text-[#9A94AA] hover:border-[#8066B5]/60 hover:bg-[#F1ECFA]/60 hover:text-[#4E3978]'
                                       }`}
                                     >
                                       <span className="font-mono text-[14px] font-semibold leading-none">
@@ -2610,10 +2614,10 @@ export function ShiftsView({
                                       onClick={() => openQuickCellModal(person, d.dateStr)}
                                       title={vm.tooltipText}
                                       aria-label={vm.ariaLabel}
-                                      className="relative w-full h-9 rounded-lg border border-[#8E70C9] bg-[#F2EDFA] hover:bg-[#EDE5F8] flex items-center justify-center gap-0.5 px-0.5 transition-colors"
+                                      className="relative w-full h-9 rounded-lg border border-[#8066B5] bg-[#F1ECFA] hover:bg-[#E9DFF5] flex items-center justify-center gap-0.5 px-0.5 transition-colors"
                                     >
                                       <span
-                                        className="w-1.5 h-1.5 rounded-full bg-[#543B7A] absolute top-1 right-1"
+                                        className="w-1.5 h-1.5 rounded-full bg-[#4E3978] absolute top-1 right-1"
                                         aria-hidden="true"
                                       />
                                       <div className="flex items-center justify-center gap-0.5">
@@ -2629,7 +2633,7 @@ export function ShiftsView({
                                         ))}
                                       </div>
                                       {vm.overflowCount > 0 && (
-                                        <span className="text-[9.5px] font-mono font-bold text-[#543B7A] leading-none">
+                                        <span className="text-[9.5px] font-mono font-bold text-[#4E3978] leading-none">
                                           +{vm.overflowCount}
                                         </span>
                                       )}
@@ -2647,37 +2651,37 @@ export function ShiftsView({
               </div>
 
               {/* แถบแบ่งหน้าบุคลากรในตารางเวรรายเดือน */}
-              <div className="px-4 py-3 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-[13px] text-slate-600">
+              <div className="px-4 py-3 bg-[#F8F7FC] border-t border-[#E8E4EF] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-[13px] text-[#777287]">
                 <div>
                   แสดงบุคลากร{' '}
-                  <span className="font-semibold text-slate-800">
+                  <span className="font-semibold text-[#292638]">
                     {filteredPersonnelForRoster.length === 0
                       ? 0
                       : (rosterPersonPage - 1) * rosterPersonPageSize + 1}
                   </span>{' '}
                   ถึง{' '}
-                  <span className="font-semibold text-slate-800">
+                  <span className="font-semibold text-[#292638]">
                     {Math.min(
                       rosterPersonPage * rosterPersonPageSize,
                       filteredPersonnelForRoster.length
                     )}
                   </span>{' '}
                   จากทั้งหมด{' '}
-                  <span className="font-semibold text-slate-800">
+                  <span className="font-semibold text-[#292638]">
                     {filteredPersonnelForRoster.length}
                   </span>{' '}
                   คน
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
-                  <label className="text-[12.5px] text-slate-600">จำนวนคนต่อหน้า:</label>
+                  <label className="text-[12.5px] text-[#777287]">จำนวนคนต่อหน้า:</label>
                   <select
                     value={rosterPersonPageSize}
                     onChange={(e) => {
                       setRosterPersonPageSize(Number(e.target.value));
                       setRosterPersonPage(1);
                     }}
-                    className="h-8 px-2 rounded border border-slate-300 bg-white text-[12.5px] font-mono"
+                    className="h-8 px-2 rounded border border-[#D8D1E6] bg-white text-[12.5px] font-mono"
                   >
                     <option value={15}>15 คน</option>
                     <option value={25}>25 คน</option>
@@ -2690,7 +2694,7 @@ export function ShiftsView({
                       type="button"
                       disabled={rosterPersonPage <= 1}
                       onClick={() => setRosterPersonPage((p) => Math.max(1, p - 1))}
-                      className="h-8 px-2.5 rounded border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-40 text-[12.5px] font-medium"
+                      className="h-8 px-2.5 rounded border border-[#D8D1E6] bg-white hover:bg-[#F8F7FC] disabled:opacity-40 text-[12.5px] font-medium"
                     >
                       ก่อนหน้า
                     </button>
@@ -2703,7 +2707,7 @@ export function ShiftsView({
                       onClick={() =>
                         setRosterPersonPage((p) => Math.min(rosterTotalPages, p + 1))
                       }
-                      className="h-8 px-2.5 rounded border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-40 text-[12.5px] font-medium"
+                      className="h-8 px-2.5 rounded border border-[#D8D1E6] bg-white hover:bg-[#F8F7FC] disabled:opacity-40 text-[12.5px] font-medium"
                     >
                       ถัดไป
                     </button>
@@ -2717,14 +2721,14 @@ export function ShiftsView({
               มุมมองที่ 1.2: ตารางเวรรายสัปดาห์ (WEEKLY ROSTER GRID)
              ================================================================= */}
           {rosterViewMode === 'WEEKLY_GRID' && (
-            <div className="bg-white border border-[#E6DFF0] rounded-xl overflow-hidden">
-              <div className="px-4 sm:px-5 py-3.5 bg-[#F8F7FC] border-b border-[#E6DFF0] flex flex-col gap-2.5">
+            <div className="bg-white border border-[#E8E4EF] rounded-xl overflow-hidden">
+              <div className="px-4 sm:px-5 py-3.5 bg-[#F8F7FC] border-b border-[#E8E4EF] flex flex-col gap-2.5">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
-                    <h2 className="text-[16px] font-bold text-[#262238]">
+                    <h2 className="text-[16px] font-bold text-[#292638]">
                       ตารางเวรรายสัปดาห์ · {activeWeekObj.label}
                     </h2>
-                    <p className="text-[12.5px] text-slate-600">
+                    <p className="text-[12.5px] text-[#777287]">
                       แสดงเวรแบบ Icon กะทัดรัด (แสดงหลาย Icon ในวันที่มีหลายกะ) วางเมาส์เพื่อดูเวลาจริง หรือคลิกช่องเพื่อเปิดดูรายละเอียดและแก้ไข
                     </p>
                   </div>
@@ -2734,7 +2738,7 @@ export function ShiftsView({
                       type="button"
                       disabled={selectedWeekIndex <= 0}
                       onClick={() => setSelectedWeekIndex((w) => Math.max(0, w - 1))}
-                      className="h-8 px-3 rounded-lg border border-[#E6DFF0] bg-white hover:bg-[#F2EDFA] disabled:opacity-40 text-[#543B7A] text-[12.5px] font-semibold inline-flex items-center gap-1"
+                      className="h-8 px-3 rounded-lg border border-[#E8E4EF] bg-white hover:bg-[#F1ECFA] disabled:opacity-40 text-[#4E3978] text-[12.5px] font-semibold inline-flex items-center gap-1"
                     >
                       <ChevronLeft className="w-4 h-4" />
                       <span>สัปดาห์ก่อน</span>
@@ -2745,7 +2749,7 @@ export function ShiftsView({
                       onClick={() =>
                         setSelectedWeekIndex((w) => Math.min(monthBounds.weeks.length - 1, w + 1))
                       }
-                      className="h-8 px-3 rounded-lg border border-[#E6DFF0] bg-white hover:bg-[#F2EDFA] disabled:opacity-40 text-[#543B7A] text-[12.5px] font-semibold inline-flex items-center gap-1"
+                      className="h-8 px-3 rounded-lg border border-[#E8E4EF] bg-white hover:bg-[#F1ECFA] disabled:opacity-40 text-[#4E3978] text-[12.5px] font-semibold inline-flex items-center gap-1"
                     >
                       <span>สัปดาห์ถัดไป</span>
                       <ChevronRight className="w-4 h-4" />
@@ -2754,7 +2758,7 @@ export function ShiftsView({
                 </div>
 
                 {/* แถบคำอธิบาย Icon เดียวกับตารางรายเดือน */}
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[12px] text-slate-700 pt-1 border-t border-[#E6DFF0]/70">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[12px] text-[#292638] pt-1 border-t border-[#E8E4EF]/70">
                   <span className="inline-flex items-center gap-1">
                     <Sun className="w-3.5 h-3.5 text-amber-600" />
                     <span>กะเช้า</span>
@@ -2768,7 +2772,7 @@ export function ShiftsView({
                     <span>กะดึก</span>
                   </span>
                   <span className="inline-flex items-center gap-1">
-                    <Sunrise className="w-3.5 h-3.5 text-[#543B7A]" />
+                    <Sunrise className="w-3.5 h-3.5 text-[#4E3978]" />
                     <span>เช้า–บ่าย</span>
                   </span>
                   <span className="inline-flex items-center gap-1">
@@ -2776,14 +2780,14 @@ export function ShiftsView({
                     <span>บ่าย–ดึก</span>
                   </span>
                   <span className="inline-flex items-center gap-1">
-                    <Clock className="w-3.5 h-3.5 text-[#543B7A]" />
+                    <Clock className="w-3.5 h-3.5 text-[#4E3978]" />
                     <span>กะอื่น/ทั้งวัน</span>
                   </span>
                   <span className="inline-flex items-center gap-1">
                     <MoonStar className="w-3.5 h-3.5 text-fuchsia-700" />
                     <span>กะพิเศษข้ามวัน</span>
                   </span>
-                  <span className="text-slate-300" aria-hidden="true">|</span>
+                  <span className="text-[#D8D1E6]" aria-hidden="true">|</span>
                   <span className="inline-flex items-center gap-1.5">
                     <span className="w-5 h-5 rounded-md border border-dashed border-emerald-400 bg-emerald-50/70 inline-flex items-center justify-center">
                       <Sun className="w-3 h-3 text-amber-600" />
@@ -2791,14 +2795,14 @@ export function ShiftsView({
                     <span>กรอบเส้นประ: กะเริ่มต้นอัตโนมัติ</span>
                   </span>
                   <span className="inline-flex items-center gap-1.5">
-                    <span className="relative w-5 h-5 rounded-md border border-[#8E70C9] bg-[#F2EDFA] inline-flex items-center justify-center">
+                    <span className="relative w-5 h-5 rounded-md border border-[#8066B5] bg-[#F1ECFA] inline-flex items-center justify-center">
                       <Sun className="w-3 h-3 text-amber-600" />
-                      <span className="w-1.5 h-1.5 rounded-full bg-[#543B7A] absolute -top-0.5 -right-0.5" />
+                      <span className="w-1.5 h-1.5 rounded-full bg-[#4E3978] absolute -top-0.5 -right-0.5" />
                     </span>
                     <span>กรอบทึบ+จุดมุมขวา: กะที่เจ้าหน้าที่กำหนดเอง</span>
                   </span>
                   <span className="inline-flex items-center gap-1.5">
-                    <span className="font-mono font-bold text-slate-400 px-1">—</span>
+                    <span className="font-mono font-bold text-[#9A94AA] px-1">—</span>
                     <span>ไม่มีเวร</span>
                   </span>
                 </div>
@@ -2807,8 +2811,8 @@ export function ShiftsView({
               <div className="overflow-x-auto max-h-[680px]">
                 <table className="w-full border-collapse text-left text-[13px]">
                   <thead className="sticky top-0 z-20">
-                    <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#262238]">
-                      <th className="sticky left-0 z-30 bg-[#F8F7FC] py-2.5 px-4 font-semibold min-w-[220px] max-w-[255px] border-r border-[#E6DFF0]">
+                    <tr className="border-b border-[#E8E4EF] bg-[#F8F7FC] text-[#292638]">
+                      <th className="sticky left-0 z-30 bg-[#F8F7FC] py-2.5 px-4 font-semibold min-w-[220px] max-w-[255px] border-r border-[#E8E4EF]">
                         บุคลากร / กลุ่มงาน ({filteredPersonnelForRoster.length} คน)
                       </th>
                       {activeWeekObj.dates.map((d) => {
@@ -2816,16 +2820,16 @@ export function ShiftsView({
                         return (
                           <th
                             key={d.dateStr}
-                            className={`py-2.5 px-2 text-center min-w-[92px] border-r border-[#E6DFF0]/80 ${
+                            className={`py-2.5 px-2 text-center min-w-[92px] border-r border-[#E8E4EF]/80 ${
                               isToday
-                                ? 'bg-[#EDE5F8] text-[#543B7A]'
+                                ? 'bg-[#E9DFF5] text-[#4E3978]'
                                 : d.isWeekend
-                                  ? 'bg-slate-100/90 text-slate-700'
-                                  : 'bg-[#F8F7FC] text-[#262238]'
+                                  ? 'bg-[#F1ECFA]/90 text-[#292638]'
+                                  : 'bg-[#F8F7FC] text-[#292638]'
                             }`}
                           >
                             <div className="text-[11.5px] font-semibold">{d.weekdayFull}</div>
-                            <div className="text-[12px] font-mono tabular-nums text-slate-600">
+                            <div className="text-[12px] font-mono tabular-nums text-[#777287]">
                               {formatThaiDate(d.dateStr)}
                             </div>
                           </th>
@@ -2833,12 +2837,12 @@ export function ShiftsView({
                       })}
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-[#E6DFF0]/80">
+                  <tbody className="divide-y divide-[#E8E4EF]/80">
                     {loading ? (
                       <tr>
                         <td
                           colSpan={activeWeekObj.dates.length + 1}
-                          className="py-12 text-center text-[14px] text-slate-500"
+                          className="py-12 text-center text-[14px] text-[#777287]"
                         >
                           กำลังโหลดตารางเวรรายสัปดาห์...
                         </td>
@@ -2854,15 +2858,15 @@ export function ShiftsView({
                         const pid = String(person.person_id).trim();
                         return (
                           <tr key={pid} className="hover:bg-[#F8F7FC] transition-colors group">
-                            <td className="sticky left-0 z-10 bg-white group-hover:bg-[#F8F7FC] py-2.5 px-4 border-r border-[#E6DFF0] align-middle">
-                              <div className="font-bold text-[13.5px] text-[#262238] truncate max-w-[235px]">
+                            <td className="sticky left-0 z-10 bg-white group-hover:bg-[#F8F7FC] py-2.5 px-4 border-r border-[#E8E4EF] align-middle">
+                              <div className="font-bold text-[13.5px] text-[#292638] truncate max-w-[235px]">
                                 {person.full_name}
                               </div>
-                              <div className="text-[12px] text-slate-500 mt-0.5 truncate max-w-[235px]">
+                              <div className="text-[12px] text-[#777287] mt-0.5 truncate max-w-[235px]">
                                 <span className="font-mono">{pid}</span> · {person.department_name}
                               </div>
                               {person.personnel_type_name && (
-                                <div className="text-[10.5px] text-[#543B7A] font-medium truncate max-w-[235px]">
+                                <div className="text-[10.5px] text-[#4E3978] font-medium truncate max-w-[235px]">
                                   {person.personnel_type_name}
                                 </div>
                               )}
@@ -2879,11 +2883,11 @@ export function ShiftsView({
                               return (
                                 <td
                                   key={d.dateStr}
-                                  className={`p-1.5 border-r border-[#E6DFF0]/70 align-middle text-center ${
+                                  className={`p-1.5 border-r border-[#E8E4EF]/70 align-middle text-center ${
                                     isToday
-                                      ? 'bg-[#F2EDFA]/35'
+                                      ? 'bg-[#F1ECFA]/35'
                                       : d.isWeekend
-                                        ? 'bg-slate-50/80'
+                                        ? 'bg-[#F8F7FC]/80'
                                         : ''
                                   }`}
                                 >
@@ -2896,7 +2900,7 @@ export function ShiftsView({
                                       className={`w-full h-11 rounded-lg flex items-center justify-center transition-colors ${
                                         vm.isClearedByStaff
                                           ? 'border border-dashed border-amber-300 bg-amber-50/70 text-amber-700 hover:bg-amber-100/80'
-                                          : 'border border-transparent text-slate-400 hover:border-[#8E70C9]/60 hover:bg-[#F2EDFA]/60 hover:text-[#543B7A]'
+                                          : 'border border-transparent text-[#9A94AA] hover:border-[#8066B5]/60 hover:bg-[#F1ECFA]/60 hover:text-[#4E3978]'
                                       }`}
                                     >
                                       <span className="font-mono text-[15px] font-semibold leading-none">
@@ -2919,10 +2923,10 @@ export function ShiftsView({
                                       onClick={() => openQuickCellModal(person, d.dateStr)}
                                       title={vm.tooltipText}
                                       aria-label={vm.ariaLabel}
-                                      className="relative w-full h-11 rounded-lg border border-[#8E70C9] bg-[#F2EDFA] hover:bg-[#EDE5F8] flex items-center justify-center gap-1 px-1.5 transition-colors"
+                                      className="relative w-full h-11 rounded-lg border border-[#8066B5] bg-[#F1ECFA] hover:bg-[#E9DFF5] flex items-center justify-center gap-1 px-1.5 transition-colors"
                                     >
                                       <span
-                                        className="w-1.5 h-1.5 rounded-full bg-[#543B7A] absolute top-1.5 right-1.5"
+                                        className="w-1.5 h-1.5 rounded-full bg-[#4E3978] absolute top-1.5 right-1.5"
                                         aria-hidden="true"
                                       />
                                       <div className="flex items-center justify-center gap-1">
@@ -2936,7 +2940,7 @@ export function ShiftsView({
                                         ))}
                                       </div>
                                       {vm.overflowCount > 0 && (
-                                        <span className="text-[11px] font-mono font-bold text-[#543B7A] leading-none">
+                                        <span className="text-[11px] font-mono font-bold text-[#4E3978] leading-none">
                                           +{vm.overflowCount}
                                         </span>
                                       )}
@@ -2960,26 +2964,26 @@ export function ShiftsView({
              ================================================================= */}
           {rosterViewMode === 'DETAIL_LIST' && (
             <div className="space-y-5">
-              <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                <div className="px-4 sm:px-6 py-4 border-b border-slate-200 bg-[#F2EDFA]/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="bg-white border border-[#E8E4EF] rounded-xl overflow-hidden">
+                <div className="px-4 sm:px-6 py-4 border-b border-[#E8E4EF] bg-[#F1ECFA]/50 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
-                    <h2 className="text-[16.5px] font-bold text-slate-900">
+                    <h2 className="text-[16.5px] font-bold text-[#292638]">
                       รายการเวรที่มอบหมาย ({filteredAssignments.length} รายการ)
                     </h2>
-                    <p className="text-[13px] text-slate-600">
+                    <p className="text-[13px] text-[#777287]">
                       แสดงค่าเวลาตาม Snapshot ณ วันที่มอบหมายเวร (เวลาเริ่ม–เลิกงาน เวลาผ่อนผันสาย และเวลาตัดรอบสแกน)
                     </p>
                   </div>
                 </div>
 
                 {/* มุมมองการ์ดสำหรับหน้าจอขนาดเล็ก (< 768px) */}
-                <div className="md:hidden divide-y divide-slate-200">
+                <div className="md:hidden divide-y divide-[#E8E4EF]">
                   {loading ? (
-                    <div className="py-10 text-center text-[14px] text-slate-500">
+                    <div className="py-10 text-center text-[14px] text-[#777287]">
                       กำลังโหลดรายการตารางเวร...
                     </div>
                   ) : pagedAssignments.length === 0 ? (
-                    <div className="py-10 px-4 text-center text-[14px] text-slate-500">
+                    <div className="py-10 px-4 text-center text-[14px] text-[#777287]">
                       ไม่พบรายการตารางเวรตามเงื่อนไขที่เลือก
                     </div>
                   ) : (
@@ -2989,10 +2993,10 @@ export function ShiftsView({
                         <div key={a.id} className="p-4 space-y-3 bg-white">
                           <div className="flex items-start justify-between gap-2">
                             <div>
-                              <div className="font-bold text-[15px] text-slate-900">
+                              <div className="font-bold text-[15px] text-[#292638]">
                                 {a.full_name}
                               </div>
-                              <div className="text-[12.5px] text-slate-500">
+                              <div className="text-[12.5px] text-[#777287]">
                                 {a.person_id} · {a.department_name}
                               </div>
                             </div>
@@ -3005,29 +3009,29 @@ export function ShiftsView({
                             </span>
                           </div>
 
-                          <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-[13px] space-y-1.5">
+                          <div className="p-3 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] text-[13px] space-y-1.5">
                             <div className="flex items-center justify-between">
-                              <span className="text-slate-500">วันที่ปฏิบัติงาน:</span>
-                              <span className="font-mono font-bold text-slate-800">
+                              <span className="text-[#777287]">วันที่ปฏิบัติงาน:</span>
+                              <span className="font-mono font-bold text-[#292638]">
                                 {formatThaiDate(a.work_date)}
                               </span>
                             </div>
                             <div className="flex items-center justify-between">
-                              <span className="text-slate-500">กะทำงาน:</span>
-                              <span className="font-semibold text-[#543B7A]">
+                              <span className="text-[#777287]">กะทำงาน:</span>
+                              <span className="font-semibold text-[#4E3978]">
                                 {formatCleanShiftName(a.snapshot_shift_name)}
                               </span>
                             </div>
                             <div className="flex items-center justify-between">
-                              <span className="text-slate-500">เวลาเริ่ม–เลิกงาน:</span>
-                              <span className="font-mono text-slate-800">
+                              <span className="text-[#777287]">เวลาเริ่ม–เลิกงาน:</span>
+                              <span className="font-mono text-[#292638]">
                                 {a.snapshot_start_time}–{a.snapshot_end_time} น.{' '}
                                 {isCross ? '(ข้ามวัน +1)' : ''}
                               </span>
                             </div>
                             <div className="flex items-center justify-between">
-                              <span className="text-slate-500">รหัสกะ / ผ่อนผัน / ตัดรอบ:</span>
-                              <span className="font-mono text-slate-700">
+                              <span className="text-[#777287]">รหัสกะ / ผ่อนผัน / ตัดรอบ:</span>
+                              <span className="font-mono text-[#292638]">
                                 {a.snapshot_shift_code} · ผ่อนผัน {a.snapshot_grace_minutes} น. · ตัดรอบ{' '}
                                 {a.snapshot_cutoff_time} น.
                               </span>
@@ -3054,7 +3058,7 @@ export function ShiftsView({
                 <div className="hidden md:block overflow-x-auto">
                   <table className="w-full text-left border-collapse text-[13.5px]">
                     <thead>
-                      <tr className="border-b border-slate-200 bg-slate-50 text-slate-700">
+                      <tr className="border-b border-[#E8E4EF] bg-[#F8F7FC] text-[#292638]">
                         <SortableHeader
                           label="วันที่ปฏิบัติงาน"
                           sortKey="work_date"
@@ -3088,10 +3092,10 @@ export function ShiftsView({
                         <th className="py-3.5 px-4 font-semibold text-right">การจัดการ</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-200">
+                    <tbody className="divide-y divide-[#E8E4EF]">
                       {loading ? (
                         <tr>
-                          <td colSpan={7} className="py-12 text-center text-[14px] text-slate-500">
+                          <td colSpan={7} className="py-12 text-center text-[14px] text-[#777287]">
                             กำลังโหลดตารางเวร...
                           </td>
                         </tr>
@@ -3105,30 +3109,30 @@ export function ShiftsView({
                         pagedAssignments.map((a) => {
                           const isCross = Number(a.snapshot_is_cross_midnight) === 1;
                           return (
-                            <tr key={a.id} className="hover:bg-slate-50/80 transition-colors">
-                              <td className="py-3.5 px-4 font-mono tabular-nums font-semibold text-slate-800 whitespace-nowrap">
+                            <tr key={a.id} className="hover:bg-[#F8F7FC]/80 transition-colors">
+                              <td className="py-3.5 px-4 font-mono tabular-nums font-semibold text-[#292638] whitespace-nowrap">
                                 {formatThaiDate(a.work_date)}
                               </td>
                               <td className="py-3.5 px-4">
-                                <div className="font-bold text-slate-900">{a.full_name}</div>
-                                <div className="text-[12px] text-slate-500 mt-0.5">
+                                <div className="font-bold text-[#292638]">{a.full_name}</div>
+                                <div className="text-[12px] text-[#777287] mt-0.5">
                                   <span className="font-mono">{a.person_id}</span> ·{' '}
                                   {a.department_name}
                                 </div>
                               </td>
                               <td className="py-3.5 px-4">
-                                <div className="font-semibold text-slate-900">
+                                <div className="font-semibold text-[#292638]">
                                   {formatCleanShiftName(a.snapshot_shift_name)}
                                 </div>
-                                <div className="text-[12px] font-mono text-[#543B7A] mt-0.5">
+                                <div className="text-[12px] font-mono text-[#4E3978] mt-0.5">
                                   รหัสกะ: {a.snapshot_shift_code}
                                   {isCross ? ' · เวรข้ามวัน (+1 วัน)' : ''}
                                 </div>
                               </td>
-                              <td className="py-3.5 px-4 font-mono tabular-nums text-slate-800 whitespace-nowrap">
+                              <td className="py-3.5 px-4 font-mono tabular-nums text-[#292638] whitespace-nowrap">
                                 {a.snapshot_start_time}–{a.snapshot_end_time} น.
                               </td>
-                              <td className="py-3.5 px-4 font-mono tabular-nums text-[12.5px] text-slate-600 whitespace-nowrap">
+                              <td className="py-3.5 px-4 font-mono tabular-nums text-[12.5px] text-[#777287] whitespace-nowrap">
                                 ผ่อนผัน {a.snapshot_grace_minutes} นาที · ตัดรอบ{' '}
                                 {a.snapshot_cutoff_time} น.
                               </td>
@@ -3146,7 +3150,7 @@ export function ShiftsView({
                                   <button
                                     type="button"
                                     onClick={() => setInspectTarget(a)}
-                                    className="h-9 px-3 text-[12.5px] text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 inline-flex items-center gap-1 font-medium transition-colors"
+                                    className="h-9 px-3 text-[12.5px] text-[#292638] bg-white border border-[#D8D1E6] rounded-lg hover:bg-[#F8F7FC] inline-flex items-center gap-1 font-medium transition-colors"
                                   >
                                     <Eye className="w-3.5 h-3.5" />
                                     <span>ดูข้อมูล</span>
@@ -3182,19 +3186,19 @@ export function ShiftsView({
 
               {/* ตารางประวัติการยกเลิกตารางเวรย้อนหลัง (Audit History) */}
               {cancellationLogs.length > 0 && (
-                <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-                  <div className="px-4 sm:px-6 py-3.5 border-b border-slate-200 bg-slate-50">
-                    <h2 className="text-[16px] font-bold text-slate-800">
+                <div className="bg-white border border-[#E8E4EF] rounded-xl overflow-hidden">
+                  <div className="px-4 sm:px-6 py-3.5 border-b border-[#E8E4EF] bg-[#F8F7FC]">
+                    <h2 className="text-[16px] font-bold text-[#292638]">
                       ประวัติการยกเลิกตารางเวรย้อนหลัง ({cancellationLogs.length} รายการล่าสุด)
                     </h2>
-                    <p className="text-[12.5px] text-slate-600">
+                    <p className="text-[12.5px] text-[#777287]">
                       ระบบรักษาประวัติการยกเลิกเวรทุกครั้ง (Soft Cancel Audit Trail) เพื่อความโปร่งใสในการตรวจสอบ
                     </p>
                   </div>
                   <div className="overflow-x-auto">
                     <table className="w-full text-left border-collapse text-[13.5px]">
                       <thead>
-                        <tr className="border-b border-slate-200 bg-slate-50 text-slate-700">
+                        <tr className="border-b border-[#E8E4EF] bg-[#F8F7FC] text-[#292638]">
                           <th className="py-3 px-4 font-semibold">วันและเวลาที่ยกเลิก</th>
                           <th className="py-3 px-4 font-semibold">บุคลากร</th>
                           <th className="py-3 px-4 font-semibold">วันที่เวร / รหัสกะ</th>
@@ -3202,20 +3206,20 @@ export function ShiftsView({
                           <th className="py-3 px-4 font-semibold">ผู้ดำเนินการ</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-200">
+                      <tbody className="divide-y divide-[#E8E4EF]">
                         {cancellationLogs.map((c) => (
-                          <tr key={c.id} className="hover:bg-slate-50/70">
-                            <td className="py-3 px-4 font-mono tabular-nums text-slate-700 whitespace-nowrap">
+                          <tr key={c.id} className="hover:bg-[#F8F7FC]/70">
+                            <td className="py-3 px-4 font-mono tabular-nums text-[#292638] whitespace-nowrap">
                               {formatThaiDateTime(c.cancelled_at)}
                             </td>
-                            <td className="py-3 px-4 font-semibold text-slate-800">
+                            <td className="py-3 px-4 font-semibold text-[#292638]">
                               {c.full_name} ({c.person_id})
                             </td>
-                            <td className="py-3 px-4 font-mono tabular-nums text-slate-700 whitespace-nowrap">
+                            <td className="py-3 px-4 font-mono tabular-nums text-[#292638] whitespace-nowrap">
                               {formatThaiDate(c.work_date)} · {c.shift_code}
                             </td>
-                            <td className="py-3 px-4 text-slate-700">{c.cancel_reason}</td>
-                            <td className="py-3 px-4 font-mono text-slate-600">{c.cancelled_by}</td>
+                            <td className="py-3 px-4 text-[#292638]">{c.cancel_reason}</td>
+                            <td className="py-3 px-4 font-mono text-[#777287]">{c.cancelled_by}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -3236,19 +3240,19 @@ export function ShiftsView({
         <div className="space-y-6">
           {/* =================================================================
               ส่วนเลือกประเภทการดำเนินการ (พื้นหลังขาว #FFFFFF)
-              Card ที่เลือกใช้พื้นหลังม่วงอ่อน (#F2EDFA) และขอบม่วง (#8E70C9)
+              Card ที่เลือกใช้พื้นหลังม่วงอ่อน (#F1ECFA) และขอบม่วง (#8066B5)
              ================================================================= */}
-          <section className="bg-white border border-[#E6DFF0] rounded-2xl shadow-xs p-5 space-y-4">
+          <section className="bg-white border border-[#E8E4EF] rounded-2xl shadow-xs p-5 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
               <div className="min-w-0">
-                <h2 className="text-[17px] font-bold text-[#262238]">
+                <h2 className="text-[17px] font-bold text-[#292638]">
                   จัดตารางเวรหลายคน / หลายวัน และเลือกได้หลายกะพร้อมกัน
                 </h2>
-                <p className="text-[13px] text-[#746B83] mt-0.5">
+                <p className="text-[13px] text-[#777287] mt-0.5">
                   เลือกประเภทการดำเนินการ → ① เลือกบุคลากรและแม่แบบกะ → ② เลือกวันที่ปฏิบัติงาน → ③ ตรวจสอบและยืนยัน
                 </p>
               </div>
-              <span className="text-[13px] font-semibold text-[#8E70C9] bg-[#F2EDFA] border border-[#E6DFF0] px-3 py-1.5 rounded-lg self-start sm:self-auto whitespace-nowrap">
+              <span className="text-[13px] font-semibold text-[#8066B5] bg-[#F1ECFA] border border-[#E8E4EF] px-3 py-1.5 rounded-lg self-start sm:self-auto whitespace-nowrap">
                 เดือนที่กำลังจัดเวร: {formatThaiMonthTitle(selectedMonth)}
               </span>
             </div>
@@ -3260,24 +3264,24 @@ export function ShiftsView({
                 onClick={() => handleSwitchAssignMethod('SINGLE_PERSON')}
                 className={`p-3.5 rounded-xl border text-left transition-colors flex items-start gap-3 ${
                   assignMethod === 'SINGLE_PERSON'
-                    ? 'bg-[#F2EDFA] border-[#8E70C9] text-[#262238] shadow-2xs'
-                    : 'bg-white border-[#E6DFF0] text-[#262238] hover:border-[#8E70C9]/60'
+                    ? 'bg-[#F1ECFA] border-[#8066B5] text-[#292638] shadow-2xs'
+                    : 'bg-white border-[#E8E4EF] text-[#292638] hover:border-[#8066B5]/60'
                 }`}
               >
                 <div
                   className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
                     assignMethod === 'SINGLE_PERSON'
-                      ? 'bg-[#8E70C9] text-white'
-                      : 'bg-[#F8F7FC] text-[#746B83] border border-[#E6DFF0]'
+                      ? 'bg-[#8066B5] text-white'
+                      : 'bg-[#F8F7FC] text-[#777287] border border-[#E8E4EF]'
                   }`}
                 >
                   <User className="w-4.5 h-4.5" />
                 </div>
                 <div className="min-w-0">
-                  <div className="font-bold text-[14.5px] text-[#262238]">
+                  <div className="font-bold text-[14.5px] text-[#292638]">
                     จัดเวรรายบุคคล (1 คน)
                   </div>
-                  <p className="text-[12.5px] text-[#746B83]">
+                  <p className="text-[12.5px] text-[#777287]">
                     เลือก 1 คน พร้อมเลือกได้หลายกะและหลายวัน
                   </p>
                 </div>
@@ -3288,24 +3292,24 @@ export function ShiftsView({
                 onClick={() => handleSwitchAssignMethod('MULTI_PERSON')}
                 className={`p-3.5 rounded-xl border text-left transition-colors flex items-start gap-3 ${
                   assignMethod === 'MULTI_PERSON'
-                    ? 'bg-[#F2EDFA] border-[#8E70C9] text-[#262238] shadow-2xs'
-                    : 'bg-white border-[#E6DFF0] text-[#262238] hover:border-[#8E70C9]/60'
+                    ? 'bg-[#F1ECFA] border-[#8066B5] text-[#292638] shadow-2xs'
+                    : 'bg-white border-[#E8E4EF] text-[#292638] hover:border-[#8066B5]/60'
                 }`}
               >
                 <div
                   className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${
                     assignMethod === 'MULTI_PERSON'
-                      ? 'bg-[#8E70C9] text-white'
-                      : 'bg-[#F8F7FC] text-[#746B83] border border-[#E6DFF0]'
+                      ? 'bg-[#8066B5] text-white'
+                      : 'bg-[#F8F7FC] text-[#777287] border border-[#E8E4EF]'
                   }`}
                 >
                   <Users className="w-4.5 h-4.5" />
                 </div>
                 <div className="min-w-0">
-                  <div className="font-bold text-[14.5px] text-[#262238]">
+                  <div className="font-bold text-[14.5px] text-[#292638]">
                     จัดเวรหลายคนพร้อมกัน (รายกลุ่มงาน/แผนก)
                   </div>
-                  <p className="text-[12.5px] text-[#746B83]">
+                  <p className="text-[12.5px] text-[#777287]">
                     เลือกบุคลากรหลายคน เลือกหลายกะ และกำหนดหลายวันพร้อมกัน
                   </p>
                 </div>
@@ -3313,10 +3317,10 @@ export function ShiftsView({
             </div>
 
             {/* 2. แยกประเภทการดำเนินการชัดเจน: เพิ่มกะ / แทนที่กะเดิม / ลบกะที่เลือก / ลบกะทั้งหมด */}
-            <div className="pt-3.5 border-t border-[#E6DFF0] space-y-2.5">
-              <div className="text-[13px] font-bold text-[#262238]">
+            <div className="pt-3.5 border-t border-[#E8E4EF] space-y-2.5">
+              <div className="text-[13px] font-bold text-[#292638]">
                 ประเภทการดำเนินการกับตารางเวร{' '}
-                <span className="font-normal text-[#746B83]">
+                <span className="font-normal text-[#777287]">
                   (ระบบจะไม่แก้หรือลบกะเดิมหากไม่เลือกและยืนยันชัดเจน)
                 </span>
               </div>
@@ -3326,15 +3330,15 @@ export function ShiftsView({
                   onClick={() => setBulkOperationMode('ADD_SHIFTS')}
                   className={`p-3.5 rounded-xl border text-left transition-colors ${
                     bulkOperationMode === 'ADD_SHIFTS'
-                      ? 'bg-[#F2EDFA] border-[#8E70C9] text-[#262238] shadow-2xs'
-                      : 'bg-white border-[#E6DFF0] text-[#262238] hover:border-[#8E70C9]/60'
+                      ? 'bg-[#F1ECFA] border-[#8066B5] text-[#292638] shadow-2xs'
+                      : 'bg-white border-[#E8E4EF] text-[#292638] hover:border-[#8066B5]/60'
                   }`}
                 >
-                  <div className="flex items-center gap-2 font-bold text-[13.5px] text-[#262238]">
-                    <Plus className="w-4 h-4 text-[#8E70C9] shrink-0" />
+                  <div className="flex items-center gap-2 font-bold text-[13.5px] text-[#292638]">
+                    <Plus className="w-4 h-4 text-[#8066B5] shrink-0" />
                     <span>เพิ่มกะใหม่</span>
                   </div>
-                  <p className="text-[12px] text-[#746B83] mt-1 leading-snug">
+                  <p className="text-[12px] text-[#777287] mt-1 leading-snug">
                     เพิ่มเฉพาะกะที่เลือก ไม่ลบหรือทับกะเดิมที่มีอยู่แล้ว
                   </p>
                 </button>
@@ -3344,15 +3348,15 @@ export function ShiftsView({
                   onClick={() => setBulkOperationMode('REPLACE_SHIFTS')}
                   className={`p-3.5 rounded-xl border text-left transition-colors ${
                     bulkOperationMode === 'REPLACE_SHIFTS'
-                      ? 'bg-[#F2EDFA] border-[#8E70C9] text-[#262238] shadow-2xs'
-                      : 'bg-white border-[#E6DFF0] text-[#262238] hover:border-[#8E70C9]/60'
+                      ? 'bg-[#F1ECFA] border-[#8066B5] text-[#292638] shadow-2xs'
+                      : 'bg-white border-[#E8E4EF] text-[#292638] hover:border-[#8066B5]/60'
                   }`}
                 >
-                  <div className="flex items-center gap-2 font-bold text-[13.5px] text-[#262238]">
+                  <div className="flex items-center gap-2 font-bold text-[13.5px] text-[#292638]">
                     <RefreshCw className="w-4 h-4 text-amber-600 shrink-0" />
                     <span>แทนที่กะเดิมทั้งหมดในวันนั้น</span>
                   </div>
-                  <p className="text-[12px] text-[#746B83] mt-1 leading-snug">
+                  <p className="text-[12px] text-[#777287] mt-1 leading-snug">
                     ยกเลิกกะเดิมของวันที่เลือกแล้วบันทึกกะใหม่แทน (ต้องยืนยัน)
                   </p>
                 </button>
@@ -3362,15 +3366,15 @@ export function ShiftsView({
                   onClick={() => setBulkOperationMode('REMOVE_SELECTED_SHIFTS')}
                   className={`p-3.5 rounded-xl border text-left transition-colors ${
                     bulkOperationMode === 'REMOVE_SELECTED_SHIFTS'
-                      ? 'bg-[#F2EDFA] border-[#8E70C9] text-[#262238] shadow-2xs'
-                      : 'bg-white border-[#E6DFF0] text-[#262238] hover:border-[#8E70C9]/60'
+                      ? 'bg-[#F1ECFA] border-[#8066B5] text-[#292638] shadow-2xs'
+                      : 'bg-white border-[#E8E4EF] text-[#292638] hover:border-[#8066B5]/60'
                   }`}
                 >
-                  <div className="flex items-center gap-2 font-bold text-[13.5px] text-[#262238]">
+                  <div className="flex items-center gap-2 font-bold text-[13.5px] text-[#292638]">
                     <Trash2 className="w-4 h-4 text-red-600 shrink-0" />
                     <span>ลบเฉพาะกะที่เลือก</span>
                   </div>
-                  <p className="text-[12px] text-[#746B83] mt-1 leading-snug">
+                  <p className="text-[12px] text-[#777287] mt-1 leading-snug">
                     ลบเฉพาะกะที่ติ๊กเลือก คงกะอื่นในวันเดียวกันไว้ (ต้องยืนยัน)
                   </p>
                 </button>
@@ -3380,15 +3384,15 @@ export function ShiftsView({
                   onClick={() => setBulkOperationMode('CLEAR_ALL_SHIFTS')}
                   className={`p-3.5 rounded-xl border text-left transition-colors ${
                     bulkOperationMode === 'CLEAR_ALL_SHIFTS'
-                      ? 'bg-[#F2EDFA] border-[#8E70C9] text-[#262238] shadow-2xs'
-                      : 'bg-white border-[#E6DFF0] text-[#262238] hover:border-[#8E70C9]/60'
+                      ? 'bg-[#F1ECFA] border-[#8066B5] text-[#292638] shadow-2xs'
+                      : 'bg-white border-[#E8E4EF] text-[#292638] hover:border-[#8066B5]/60'
                   }`}
                 >
-                  <div className="flex items-center gap-2 font-bold text-[13.5px] text-[#262238]">
+                  <div className="flex items-center gap-2 font-bold text-[13.5px] text-[#292638]">
                     <X className="w-4 h-4 text-red-600 shrink-0" />
                     <span>ลบกะทั้งหมด (ตั้งเป็นไม่มีเวร)</span>
                   </div>
-                  <p className="text-[12px] text-[#746B83] mt-1 leading-snug">
+                  <p className="text-[12px] text-[#777287] mt-1 leading-snug">
                     ยกเลิกทุกกะในวันที่เลือก และคงสถานะ “ไม่มีเวร” ไว้ถาวร
                   </p>
                 </button>
@@ -3398,32 +3402,32 @@ export function ShiftsView({
 
           {/* =================================================================
               ขั้นตอนที่ ①: เลือกบุคลากรและแม่แบบกะทำงาน
-              พื้นหลังม่วงอ่อนมาก (#F8F7FC) | Header แถบม่วงอ่อน (#F2EDFA)
+              พื้นหลังม่วงอ่อนมาก (#F8F7FC) | Header แถบม่วงอ่อน (#F1ECFA)
               ภายในส่วนรายชื่อบุคลากรและ Card กะใช้พื้นหลังขาว (#FFFFFF)
              ================================================================= */}
-          <section className="bg-[#F8F7FC] border border-[#E6DFF0] rounded-2xl shadow-xs overflow-hidden">
-            <div className="bg-[#F2EDFA] border-b border-[#E6DFF0] px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+          <section className="bg-[#F8F7FC] border border-[#E8E4EF] rounded-2xl shadow-xs overflow-hidden">
+            <div className="bg-[#F1ECFA] border-b border-[#E8E4EF] px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
               <div className="flex items-start gap-3 min-w-0">
                 <span
                   aria-hidden="true"
-                  className="w-7 h-7 rounded-full bg-[#8E70C9] text-white font-bold text-[13.5px] flex items-center justify-center shrink-0 mt-0.5 shadow-2xs"
+                  className="w-7 h-7 rounded-full bg-[#8066B5] text-white font-bold text-[13.5px] flex items-center justify-center shrink-0 mt-0.5 shadow-2xs"
                 >
                   1
                 </span>
                 <div className="min-w-0">
-                  <h3 className="text-[15.5px] font-bold text-[#262238] leading-snug">
+                  <h3 className="text-[15.5px] font-bold text-[#292638] leading-snug">
                     เลือกบุคลากรและแม่แบบกะทำงาน <RequiredMark />
                   </h3>
-                  <p className="text-[12.5px] text-[#746B83] mt-0.5">
+                  <p className="text-[12.5px] text-[#777287] mt-0.5">
                     เลือกบุคลากรทางซ้าย (รักษาการเลือกข้ามแผนก/คำค้นหา) และเลือกแม่แบบกะทางขวาได้หลายกะพร้อมกัน
                   </p>
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2 shrink-0 pl-10 sm:pl-0">
-                <span className="font-mono text-[12.5px] font-bold text-[#8E70C9] bg-white border border-[#E6DFF0] px-2.5 py-1 rounded-lg tabular-nums">
+                <span className="font-mono text-[12.5px] font-bold text-[#8066B5] bg-white border border-[#E8E4EF] px-2.5 py-1 rounded-lg tabular-nums">
                   เลือกแล้ว {filteredPersonSelectionMeta.uniqueSelectedTotalCount} คน
                 </span>
-                <span className="font-mono text-[12.5px] font-bold text-[#8E70C9] bg-white border border-[#E6DFF0] px-2.5 py-1 rounded-lg tabular-nums">
+                <span className="font-mono text-[12.5px] font-bold text-[#8066B5] bg-white border border-[#E8E4EF] px-2.5 py-1 rounded-lg tabular-nums">
                   {bulkOperationMode === 'CLEAR_ALL_SHIFTS'
                     ? 'ล้างทุกกะ (ไม่ต้องเลือกกะ)'
                     : `เลือกแล้ว ${selectedShiftIds.length} กะ`}
@@ -3433,17 +3437,17 @@ export function ShiftsView({
 
             <div className="p-4 sm:p-5 grid grid-cols-1 lg:grid-cols-12 gap-5">
               {/* ซ้าย: เลือกบุคลากร (พื้นหลังขาว #FFFFFF) */}
-              <div className="lg:col-span-6 min-w-0 bg-white border border-[#E6DFF0] rounded-xl p-4 flex flex-col justify-between gap-3.5 shadow-2xs">
+              <div className="lg:col-span-6 min-w-0 bg-white border border-[#E8E4EF] rounded-xl p-4 flex flex-col justify-between gap-3.5 shadow-2xs">
                 <div className="space-y-3 min-w-0">
                   {/* หัวแผงเลือกบุคลากร + Badge จำนวน + ปุ่มล้างรายชื่อ */}
-                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#E6DFF0]/80">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-[#E8E4EF]/80">
                     <div className="flex flex-wrap items-center gap-2 min-w-0">
-                      <span className="text-[14px] font-bold text-[#262238]">
+                      <span className="text-[14px] font-bold text-[#292638]">
                         เลือกบุคลากร
                       </span>
                       <span
                         data-testid="selected-personnel-count-badge"
-                        className="inline-flex items-center px-2.5 py-0.5 rounded-md bg-[#F2EDFA] border border-[#E6DFF0] text-[#8E70C9] text-[12px] font-bold font-mono tabular-nums"
+                        className="inline-flex items-center px-2.5 py-0.5 rounded-md bg-[#F1ECFA] border border-[#E8E4EF] text-[#8066B5] text-[12px] font-bold font-mono tabular-nums"
                       >
                         เลือกแล้ว {filteredPersonSelectionMeta.uniqueSelectedTotalCount} คน
                       </span>
@@ -3453,7 +3457,7 @@ export function ShiftsView({
                       type="button"
                       disabled={filteredPersonSelectionMeta.uniqueSelectedTotalCount === 0}
                       onClick={handleRequestClearSelectedPersons}
-                      className="h-8 px-3 rounded-lg border border-[#E6DFF0] bg-white hover:bg-[#F8F7FC] hover:border-[#8E70C9] disabled:opacity-40 disabled:pointer-events-none text-[#262238] text-[12px] font-semibold transition-colors whitespace-nowrap"
+                      className="h-8 px-3 rounded-lg border border-[#E8E4EF] bg-white hover:bg-[#F8F7FC] hover:border-[#8066B5] disabled:opacity-40 disabled:pointer-events-none text-[#292638] text-[12px] font-semibold transition-colors whitespace-nowrap"
                     >
                       ล้างรายชื่อ
                     </button>
@@ -3462,7 +3466,7 @@ export function ShiftsView({
                   {/* ตัวกรองกลุ่มงาน + ค้นหาชื่อ/รหัส (ไม่ล้างรายการที่เลือกเมื่อเปลี่ยนตัวกรอง) */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                     <div className="min-w-0">
-                      <label className="block text-[12px] font-semibold text-[#262238] mb-1">
+                      <label className="block text-[12px] font-semibold text-[#292638] mb-1">
                         กลุ่มงาน / แผนก
                       </label>
                       <select
@@ -3472,7 +3476,7 @@ export function ShiftsView({
                           setAssignPersonDeptFilter(e.target.value);
                           setAssignPersonnelRenderLimit(80);
                         }}
-                        className="w-full h-9.5 px-3 rounded-lg border border-[#E6DFF0] bg-white text-[13px] text-[#262238] focus:outline-none focus:border-[#8E70C9]"
+                        className="w-full h-9.5 px-3 rounded-lg border border-[#E8E4EF] bg-white text-[13px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                       >
                         <option value="ALL">ทุกกลุ่มงาน/แผนก ({personnel.length} คน)</option>
                         {departments.map((dept) => (
@@ -3484,11 +3488,11 @@ export function ShiftsView({
                     </div>
 
                     <div className="min-w-0">
-                      <label className="block text-[12px] font-semibold text-[#262238] mb-1">
+                      <label className="block text-[12px] font-semibold text-[#292638] mb-1">
                         ค้นหาชื่อ รหัส หรือกลุ่มงาน
                       </label>
                       <div className="relative">
-                        <Search className="w-3.5 h-3.5 text-[#746B83] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <Search className="w-3.5 h-3.5 text-[#777287] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                         <input
                           type="text"
                           value={assignPersonSearch}
@@ -3497,7 +3501,7 @@ export function ShiftsView({
                             setAssignPersonnelRenderLimit(80);
                           }}
                           placeholder="พิมพ์ชื่อ, รหัสบุคลากร, กลุ่มงาน..."
-                          className="w-full h-9.5 pl-8 pr-8 rounded-lg border border-[#E6DFF0] bg-white text-[13px] text-[#262238] placeholder:text-[#746B83]/70 focus:outline-none focus:border-[#8E70C9]"
+                          className="w-full h-9.5 pl-8 pr-8 rounded-lg border border-[#E8E4EF] bg-white text-[13px] text-[#292638] placeholder:text-[#777287]/70 focus:outline-none focus:border-[#8066B5]"
                         />
                         {assignPersonSearch && (
                           <button
@@ -3507,7 +3511,7 @@ export function ShiftsView({
                               setAssignPersonnelRenderLimit(80);
                             }}
                             aria-label="ล้างคำค้นหาบุคลากร"
-                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#746B83] hover:text-[#262238]"
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#777287] hover:text-[#292638]"
                           >
                             <X className="w-3.5 h-3.5" />
                           </button>
@@ -3517,14 +3521,14 @@ export function ShiftsView({
                   </div>
 
                   {/* กล่องรายชื่อบุคลากร พร้อมหัวรายการ Checkbox เลือกทั้งหมดแบบ 3 สถานะ (Tri-state) */}
-                  <div className="border border-[#E6DFF0] rounded-xl overflow-hidden bg-white">
+                  <div className="border border-[#E8E4EF] rounded-xl overflow-hidden bg-white">
                     {assignMethod === 'MULTI_PERSON' ? (
-                      <div className="px-3.5 py-2.5 bg-[#F8F7FC] border-b border-[#E6DFF0] flex flex-wrap items-center justify-between gap-2">
+                      <div className="px-3.5 py-2.5 bg-[#F8F7FC] border-b border-[#E8E4EF] flex flex-wrap items-center justify-between gap-2">
                         <label
                           className={`inline-flex items-center gap-2.5 text-[13px] font-bold select-none min-w-0 ${
                             filteredPersonSelectionMeta.disabled
-                              ? 'text-[#746B83]/60 cursor-not-allowed'
-                              : 'text-[#262238] cursor-pointer'
+                              ? 'text-[#777287]/60 cursor-not-allowed'
+                              : 'text-[#292638] cursor-pointer'
                           }`}
                         >
                           <input
@@ -3534,11 +3538,11 @@ export function ShiftsView({
                             disabled={filteredPersonSelectionMeta.disabled}
                             onChange={handleToggleSelectAllFilteredPersons}
                             aria-label={`เลือกทั้งหมดในรายการที่แสดง (${filteredPersonSelectionMeta.totalFilteredCount} คน)`}
-                            className="w-4 h-4 rounded border-[#8E70C9]/60 accent-[#8E70C9] text-[#8E70C9] focus:ring-[#8E70C9] shrink-0"
+                            className="w-4 h-4 rounded border-[#8066B5]/60 accent-[#8066B5] text-[#8066B5] focus:ring-[#8066B5] shrink-0"
                           />
                           <span className="truncate">
                             เลือกทั้งหมดในรายการที่แสดง (
-                            <span className="font-mono tabular-nums text-[#8E70C9]">
+                            <span className="font-mono tabular-nums text-[#8066B5]">
                               {filteredPersonSelectionMeta.totalFilteredCount}
                             </span>{' '}
                             คน)
@@ -3546,7 +3550,7 @@ export function ShiftsView({
                         </label>
 
                         {filteredPersonSelectionMeta.totalFilteredCount > 0 && (
-                          <span className="text-[11.5px] font-medium text-[#746B83] font-mono tabular-nums shrink-0">
+                          <span className="text-[11.5px] font-medium text-[#777287] font-mono tabular-nums shrink-0">
                             {filteredPersonSelectionMeta.state === 'indeterminate'
                               ? `เลือกบางส่วน ${filteredPersonSelectionMeta.selectedInFilteredCount}/${filteredPersonSelectionMeta.totalFilteredCount}`
                               : filteredPersonSelectionMeta.state === 'checked'
@@ -3556,10 +3560,10 @@ export function ShiftsView({
                         )}
                       </div>
                     ) : (
-                      <div className="px-3.5 py-2 bg-[#F8F7FC] border-b border-[#E6DFF0] flex items-center justify-between gap-2 text-[12.5px] text-[#746B83]">
+                      <div className="px-3.5 py-2 bg-[#F8F7FC] border-b border-[#E8E4EF] flex items-center justify-between gap-2 text-[12.5px] text-[#777287]">
                         <span>
                           พบผลลัพธ์{' '}
-                          <strong className="font-mono tabular-nums text-[#262238]">
+                          <strong className="font-mono tabular-nums text-[#292638]">
                             {assignFilteredPersonnel.length}
                           </strong>{' '}
                           คน
@@ -3568,9 +3572,9 @@ export function ShiftsView({
                       </div>
                     )}
 
-                    <div className="divide-y divide-[#E6DFF0]/60 max-h-72 overflow-y-auto bg-white">
+                    <div className="divide-y divide-[#E8E4EF]/60 max-h-72 overflow-y-auto bg-white">
                       {visibleAssignPersonnel.length === 0 ? (
-                        <div className="py-10 px-4 text-center text-[13px] text-[#746B83]">
+                        <div className="py-10 px-4 text-center text-[13px] text-[#777287]">
                           ไม่พบบุคลากรตามคำค้นหาหรือกลุ่มงานที่เลือก
                         </div>
                       ) : (
@@ -3581,7 +3585,7 @@ export function ShiftsView({
                             <label
                               key={pid}
                               className={`flex items-start gap-3 px-3.5 py-2.5 cursor-pointer text-[13px] transition-colors ${
-                                checked ? 'bg-[#F2EDFA]/85' : 'bg-white hover:bg-[#F8F7FC]'
+                                checked ? 'bg-[#F1ECFA]/85' : 'bg-white hover:bg-[#F8F7FC]'
                               }`}
                             >
                               <input
@@ -3589,13 +3593,13 @@ export function ShiftsView({
                                 name="assign-person-selector"
                                 checked={checked}
                                 onChange={() => handleSelectPerson(pid)}
-                                className="mt-1 w-4 h-4 rounded border-slate-300 accent-[#8E70C9] text-[#8E70C9] focus:ring-[#8E70C9] shrink-0"
+                                className="mt-1 w-4 h-4 rounded border-[#D8D1E6] accent-[#8066B5] text-[#8066B5] focus:ring-[#8066B5] shrink-0"
                               />
                               <div className="min-w-0 flex-1">
-                                <div className="font-bold text-[#262238] truncate">
+                                <div className="font-bold text-[#292638] truncate">
                                   {p.full_name}
                                 </div>
-                                <div className="text-[12px] text-[#746B83] truncate">
+                                <div className="text-[12px] text-[#777287] truncate">
                                   รหัส <span className="font-mono">{pid}</span> ·{' '}
                                   {p.department_name}
                                   {p.position_name && p.position_name !== '-'
@@ -3613,7 +3617,7 @@ export function ShiftsView({
                           <button
                             type="button"
                             onClick={() => setAssignPersonnelRenderLimit((lim) => lim + 100)}
-                            className="text-[12.5px] font-semibold text-[#8E70C9] hover:underline"
+                            className="text-[12.5px] font-semibold text-[#8066B5] hover:underline"
                           >
                             แสดงรายชื่อเพิ่มเติมอีก (เหลืออีก{' '}
                             {assignFilteredPersonnel.length - visibleAssignPersonnel.length} คน)
@@ -3625,8 +3629,8 @@ export function ShiftsView({
                 </div>
 
                 {/* พื้นที่สรุปรายชื่อบุคลากรที่เลือกไว้ (เอาออกทีละคนได้) */}
-                <div className="pt-2.5 border-t border-[#E6DFF0]/80 space-y-1.5 min-w-0">
-                  <div className="flex items-center justify-between gap-2 text-[12px] font-semibold text-[#262238]">
+                <div className="pt-2.5 border-t border-[#E8E4EF]/80 space-y-1.5 min-w-0">
+                  <div className="flex items-center justify-between gap-2 text-[12px] font-semibold text-[#292638]">
                     <span>
                       รายชื่อบุคลากรที่เลือก ({selectedPersonnelObjects.length} คน):
                     </span>
@@ -3634,7 +3638,7 @@ export function ShiftsView({
                       <button
                         type="button"
                         onClick={() => setShowAllSelectedPersonChips((v) => !v)}
-                        className="text-[11.5px] font-semibold text-[#8E70C9] hover:underline"
+                        className="text-[11.5px] font-semibold text-[#8066B5] hover:underline"
                       >
                         {showAllSelectedPersonChips
                           ? 'ย่อรายการ'
@@ -3643,11 +3647,11 @@ export function ShiftsView({
                     )}
                   </div>
                   {selectedPersonnelObjects.length === 0 ? (
-                    <div className="p-2.5 rounded-lg bg-[#F8F7FC] border border-dashed border-[#E6DFF0] text-[12px] text-[#746B83] text-center">
+                    <div className="p-2.5 rounded-lg bg-[#F8F7FC] border border-dashed border-[#E8E4EF] text-[12px] text-[#777287] text-center">
                       ยังไม่ได้เลือกบุคลากร กรุณาติ๊กเลือกจากรายการด้านบน
                     </div>
                   ) : (
-                    <div className="max-h-28 overflow-y-auto p-2 rounded-lg bg-[#F8F7FC] border border-[#E6DFF0] flex flex-wrap gap-1.5">
+                    <div className="max-h-28 overflow-y-auto p-2 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] flex flex-wrap gap-1.5">
                       {(showAllSelectedPersonChips
                         ? selectedPersonnelObjects
                         : selectedPersonnelObjects.slice(0, 24)
@@ -3656,7 +3660,7 @@ export function ShiftsView({
                         return (
                           <span
                             key={pid}
-                            className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-white border border-[#E6DFF0] text-[12px] text-[#262238] max-w-full"
+                            className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-white border border-[#E8E4EF] text-[12px] text-[#292638] max-w-full"
                           >
                             <span className="font-semibold truncate max-w-[150px]">
                               {p.full_name}
@@ -3666,7 +3670,7 @@ export function ShiftsView({
                               onClick={() =>
                                 setSelectedPersonIds((prev) => prev.filter((id) => id !== pid))
                               }
-                              className="text-[#746B83] hover:text-red-600 shrink-0"
+                              className="text-[#777287] hover:text-red-600 shrink-0"
                               title={`นำ ${p.full_name} ออก`}
                               aria-label={`นำ ${p.full_name} ออกจากรายการที่เลือก`}
                             >
@@ -3679,7 +3683,7 @@ export function ShiftsView({
                         <button
                           type="button"
                           onClick={() => setShowAllSelectedPersonChips(true)}
-                          className="text-[12px] font-semibold text-[#8E70C9] hover:underline px-2 py-0.5"
+                          className="text-[12px] font-semibold text-[#8066B5] hover:underline px-2 py-0.5"
                         >
                           และอีก {selectedPersonnelObjects.length - 24} คน
                         </button>
@@ -3690,18 +3694,18 @@ export function ShiftsView({
               </div>
 
               {/* ขวา: เลือกแม่แบบกะทำงานแบบ Multi-select Checkbox (พื้นหลังขาว #FFFFFF) */}
-              <div className="lg:col-span-6 min-w-0 bg-white border border-[#E6DFF0] rounded-xl p-4 flex flex-col justify-between gap-3.5 shadow-2xs">
+              <div className="lg:col-span-6 min-w-0 bg-white border border-[#E8E4EF] rounded-xl p-4 flex flex-col justify-between gap-3.5 shadow-2xs">
                 <div className="space-y-3 min-w-0">
                   {/* หัวแผงเลือกแม่แบบกะ + Badge จำนวน + ปุ่มเลือกทุกกะ (N) + ปุ่มล้างการเลือก */}
-                  <div className="space-y-2 pb-2.5 border-b border-[#E6DFF0]/80">
+                  <div className="space-y-2 pb-2.5 border-b border-[#E8E4EF]/80">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap items-center gap-2 min-w-0">
-                        <span className="text-[14px] font-bold text-[#262238]">
+                        <span className="text-[14px] font-bold text-[#292638]">
                           เลือกแม่แบบกะทำงาน (เลือกได้มากกว่า 1 กะ)
                         </span>
                         <span
                           data-testid="selected-shifts-count-badge"
-                          className="inline-flex items-center px-2.5 py-0.5 rounded-md bg-[#F2EDFA] border border-[#E6DFF0] text-[#8E70C9] text-[12px] font-bold font-mono tabular-nums"
+                          className="inline-flex items-center px-2.5 py-0.5 rounded-md bg-[#F1ECFA] border border-[#E8E4EF] text-[#8066B5] text-[12px] font-bold font-mono tabular-nums"
                         >
                           {bulkOperationMode === 'CLEAR_ALL_SHIFTS'
                             ? 'ไม่ต้องเลือกกะ'
@@ -3718,7 +3722,7 @@ export function ShiftsView({
                               selectedShiftIds.length === selectableShiftTemplates.length
                             }
                             onClick={selectAllAssignShifts}
-                            className="h-8 px-2.5 rounded-lg border border-[#E6DFF0] bg-[#F2EDFA] hover:bg-[#EDE5F8] hover:border-[#8E70C9] disabled:opacity-40 disabled:pointer-events-none text-[#8E70C9] text-[12px] font-bold transition-colors whitespace-nowrap"
+                            className="h-8 px-2.5 rounded-lg border border-[#E8E4EF] bg-[#F1ECFA] hover:bg-[#E9DFF5] hover:border-[#8066B5] disabled:opacity-40 disabled:pointer-events-none text-[#8066B5] text-[12px] font-bold transition-colors whitespace-nowrap"
                           >
                             เลือกทุกกะ ({selectableShiftTemplates.length})
                           </button>
@@ -3726,7 +3730,7 @@ export function ShiftsView({
                             type="button"
                             disabled={selectedShiftIds.length === 0}
                             onClick={clearSelectedShifts}
-                            className="h-8 px-2.5 rounded-lg border border-[#E6DFF0] bg-white hover:bg-[#F8F7FC] hover:border-[#8E70C9] disabled:opacity-40 disabled:pointer-events-none text-[#262238] text-[12px] font-semibold transition-colors whitespace-nowrap"
+                            className="h-8 px-2.5 rounded-lg border border-[#E8E4EF] bg-white hover:bg-[#F8F7FC] hover:border-[#8066B5] disabled:opacity-40 disabled:pointer-events-none text-[#292638] text-[12px] font-semibold transition-colors whitespace-nowrap"
                           >
                             ล้างการเลือก
                           </button>
@@ -3735,7 +3739,7 @@ export function ShiftsView({
                     </div>
 
                     {bulkOperationMode !== 'CLEAR_ALL_SHIFTS' && (
-                      <p className="text-[12px] text-[#746B83] leading-snug">
+                      <p className="text-[12px] text-[#777287] leading-snug">
                         Checkbox ด้านล่างคือกะที่เลือกเพื่อใช้กับการดำเนินการแบบกลุ่ม ไม่ใช่สถานะกะเดิมของบุคลากรแต่ละคน
                       </p>
                     )}
@@ -3803,26 +3807,26 @@ export function ShiftsView({
                               className={`p-3 rounded-xl border cursor-pointer transition-colors flex flex-col justify-between gap-2 select-none min-w-0 ${
                                 isSelected
                                   ? isConflicting
-                                    ? 'bg-[#F2EDFA] border-red-400 ring-1 ring-red-200'
-                                    : 'bg-[#F2EDFA] border-[#8E70C9] ring-1 ring-[#8E70C9]/15'
-                                  : 'bg-white border-slate-200 hover:border-[#8E70C9]/60'
+                                    ? 'bg-[#F1ECFA] border-red-400 ring-1 ring-red-200'
+                                    : 'bg-[#F1ECFA] border-[#8066B5] ring-1 ring-[#8066B5]/15'
+                                  : 'bg-white border-[#E8E4EF] hover:border-[#8066B5]/60'
                               }`}
                             >
                               <div className="flex items-start justify-between gap-2 min-w-0">
                                 <div className="flex items-start gap-2 min-w-0">
-                                  <div className="w-7 h-7 rounded-lg bg-white border border-[#E6DFF0] flex items-center justify-center shrink-0 mt-0.5">
+                                  <div className="w-7 h-7 rounded-lg bg-white border border-[#E8E4EF] flex items-center justify-center shrink-0 mt-0.5">
                                     {renderShiftIcon(iconKind, 'w-4 h-4')}
                                   </div>
                                   <div className="min-w-0">
-                                    <div className="font-bold text-[13.5px] text-[#262238] leading-snug truncate">
+                                    <div className="font-bold text-[13.5px] text-[#292638] leading-snug truncate">
                                       {cleanName}
                                     </div>
-                                    <div className="font-mono font-bold text-[13px] text-[#8E70C9] tabular-nums mt-0.5 flex flex-wrap items-center gap-1">
+                                    <div className="font-mono font-bold text-[13px] text-[#8066B5] tabular-nums mt-0.5 flex flex-wrap items-center gap-1">
                                       <span>
                                         {s.start_time}–{s.end_time} น.
                                       </span>
                                       {isCross && (
-                                        <span className="text-[10.5px] font-semibold px-1.5 py-0.2 rounded bg-white border border-[#E6DFF0] text-[#8E70C9]">
+                                        <span className="text-[10.5px] font-semibold px-1.5 py-0.2 rounded bg-white border border-[#E8E4EF] text-[#8066B5]">
                                           +1 วัน
                                         </span>
                                       )}
@@ -3833,17 +3837,17 @@ export function ShiftsView({
                                   type="checkbox"
                                   checked={isSelected}
                                   onChange={() => toggleAssignShiftId(sid)}
-                                  className="mt-1 w-4 h-4 rounded border-slate-300 accent-[#8E70C9] text-[#8E70C9] focus:ring-[#8E70C9] shrink-0"
+                                  className="mt-1 w-4 h-4 rounded border-[#D8D1E6] accent-[#8066B5] text-[#8066B5] focus:ring-[#8066B5] shrink-0"
                                 />
                               </div>
 
-                              <div className="pt-1.5 border-t border-[#E6DFF0]/70 text-[11.5px] text-[#746B83] flex items-center justify-between gap-1.5">
+                              <div className="pt-1.5 border-t border-[#E8E4EF]/70 text-[11.5px] text-[#777287] flex items-center justify-between gap-1.5">
                                 <span className="truncate">
                                   {s.grace_minutes !== undefined && s.grace_minutes !== null
                                     ? `ผ่อนผัน ${s.grace_minutes} นาที`
                                     : 'ตามเวลามาตรฐาน'}
                                 </span>
-                                <span className="font-mono text-[11px] text-[#746B83] shrink-0">
+                                <span className="font-mono text-[11px] text-[#777287] shrink-0">
                                   {s.shift_code}
                                   {isCross ? ' (+1 วัน)' : ''}
                                 </span>
@@ -3858,16 +3862,16 @@ export function ShiftsView({
 
                 {/* สรุปกะที่เลือกไว้ในรูปแบบ Chip พร้อมปุ่ม X เอาออกทีละกะ */}
                 {bulkOperationMode !== 'CLEAR_ALL_SHIFTS' && (
-                  <div className="pt-2.5 border-t border-[#E6DFF0]/80 space-y-1.5 min-w-0">
-                    <div className="text-[12px] font-semibold text-[#262238]">
+                  <div className="pt-2.5 border-t border-[#E8E4EF]/80 space-y-1.5 min-w-0">
+                    <div className="text-[12px] font-semibold text-[#292638]">
                       แม่แบบกะที่เลือก ({selectedShiftTemplates.length} กะ):
                     </div>
                     {selectedShiftTemplates.length === 0 ? (
-                      <div className="p-2.5 rounded-lg bg-[#F8F7FC] border border-dashed border-[#E6DFF0] text-[12px] text-[#746B83] text-center">
+                      <div className="p-2.5 rounded-lg bg-[#F8F7FC] border border-dashed border-[#E8E4EF] text-[12px] text-[#777287] text-center">
                         ยังไม่ได้เลือกแม่แบบกะ กรุณาติ๊กเลือกอย่างน้อย 1 กะ
                       </div>
                     ) : (
-                      <div className="max-h-28 overflow-y-auto p-2 rounded-lg bg-[#F8F7FC] border border-[#E6DFF0] flex flex-wrap gap-1.5">
+                      <div className="max-h-28 overflow-y-auto p-2 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] flex flex-wrap gap-1.5">
                         {selectedShiftTemplates.map((s) => {
                           const sid = Number(s.id);
                           const isCross = Number(s.is_cross_midnight) === 1;
@@ -3883,22 +3887,22 @@ export function ShiftsView({
                           return (
                             <span
                               key={sid}
-                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white border text-[12px] text-[#262238] max-w-full ${
-                                isConflicting ? 'border-red-300' : 'border-[#E6DFF0]'
+                              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white border text-[12px] text-[#292638] max-w-full ${
+                                isConflicting ? 'border-red-300' : 'border-[#E8E4EF]'
                               }`}
                             >
                               {renderShiftIcon(iconKind, 'w-3.5 h-3.5')}
                               <span className="font-semibold truncate">
                                 {formatCleanShiftName(s.shift_name)}
                               </span>
-                              <span className="font-mono text-[11.5px] text-[#8E70C9] shrink-0">
+                              <span className="font-mono text-[11.5px] text-[#8066B5] shrink-0">
                                 {s.start_time}–{s.end_time}
                                 {isCross ? ' (+1 วัน)' : ''}
                               </span>
                               <button
                                 type="button"
                                 onClick={() => toggleAssignShiftId(sid)}
-                                className="text-[#746B83] hover:text-red-600 shrink-0"
+                                className="text-[#777287] hover:text-red-600 shrink-0"
                                 title={`นำกะ ${formatCleanShiftName(s.shift_name)} ออก`}
                                 aria-label={`นำกะ ${formatCleanShiftName(s.shift_name)} ออก`}
                               >
@@ -3917,40 +3921,40 @@ export function ShiftsView({
 
           {/* =================================================================
               ขั้นตอนที่ ②: เลือกวันที่ปฏิบัติงาน
-              พื้นหลังขาว (#FFFFFF) | Header แถบม่วงอ่อน (#F2EDFA)
+              พื้นหลังขาว (#FFFFFF) | Header แถบม่วงอ่อน (#F1ECFA)
              ================================================================= */}
-          <section className="bg-white border border-[#E6DFF0] rounded-2xl shadow-xs overflow-hidden">
-            <div className="bg-[#F2EDFA] border-b border-[#E6DFF0] px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+          <section className="bg-white border border-[#E8E4EF] rounded-2xl shadow-xs overflow-hidden">
+            <div className="bg-[#F1ECFA] border-b border-[#E8E4EF] px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
               <div className="flex items-start gap-3 min-w-0">
                 <span
                   aria-hidden="true"
-                  className="w-7 h-7 rounded-full bg-[#8E70C9] text-white font-bold text-[13.5px] flex items-center justify-center shrink-0 mt-0.5 shadow-2xs"
+                  className="w-7 h-7 rounded-full bg-[#8066B5] text-white font-bold text-[13.5px] flex items-center justify-center shrink-0 mt-0.5 shadow-2xs"
                 >
                   2
                 </span>
                 <div className="min-w-0">
-                  <h3 className="text-[15.5px] font-bold text-[#262238] leading-snug">
+                  <h3 className="text-[15.5px] font-bold text-[#292638] leading-snug">
                     เลือกวันที่ปฏิบัติงาน <RequiredMark />
                   </h3>
-                  <p className="text-[12.5px] text-[#746B83] mt-0.5">
+                  <p className="text-[12.5px] text-[#777287] mt-0.5">
                     เลือกวันเดียว เลือกหลายวันจากปฏิทิน หรือเลือกช่วงวันที่พร้อมกรองเฉพาะวันจันทร์–ศุกร์ได้
                   </p>
                 </div>
               </div>
-              <span className="font-mono text-[13px] font-bold text-[#8E70C9] bg-white border border-[#E6DFF0] px-3 py-1 rounded-lg shrink-0 tabular-nums self-start sm:self-auto ml-10 sm:ml-0">
+              <span className="font-mono text-[13px] font-bold text-[#8066B5] bg-white border border-[#E8E4EF] px-3 py-1 rounded-lg shrink-0 tabular-nums self-start sm:self-auto ml-10 sm:ml-0">
                 เลือกแล้ว {effectiveSelectedDates.length} วัน
               </span>
             </div>
 
             <div className="p-5 bg-white space-y-4">
-              <div className="inline-flex flex-wrap items-center p-1 bg-[#F8F7FC] border border-[#E6DFF0] rounded-lg gap-1">
+              <div className="inline-flex flex-wrap items-center p-1 bg-[#F8F7FC] border border-[#E8E4EF] rounded-lg gap-1">
                 <button
                   type="button"
                   onClick={() => setDatePickStrategy('SINGLE_DAY')}
                   className={`px-3.5 py-1.5 rounded-md text-[13px] font-semibold transition-colors ${
                     datePickStrategy === 'SINGLE_DAY'
-                      ? 'bg-white text-[#8E70C9] shadow-2xs border border-[#E6DFF0]'
-                      : 'text-[#746B83] hover:text-[#262238]'
+                      ? 'bg-white text-[#8066B5] shadow-2xs border border-[#E8E4EF]'
+                      : 'text-[#777287] hover:text-[#292638]'
                   }`}
                 >
                   เลือกวันเดียว
@@ -3960,8 +3964,8 @@ export function ShiftsView({
                   onClick={() => setDatePickStrategy('MULTI_PICK')}
                   className={`px-3.5 py-1.5 rounded-md text-[13px] font-semibold transition-colors ${
                     datePickStrategy === 'MULTI_PICK'
-                      ? 'bg-white text-[#8E70C9] shadow-2xs border border-[#E6DFF0]'
-                      : 'text-[#746B83] hover:text-[#262238]'
+                      ? 'bg-white text-[#8066B5] shadow-2xs border border-[#E8E4EF]'
+                      : 'text-[#777287] hover:text-[#292638]'
                   }`}
                 >
                   เลือกหลายวันจากปฏิทิน
@@ -3971,8 +3975,8 @@ export function ShiftsView({
                   onClick={() => setDatePickStrategy('DATE_RANGE')}
                   className={`px-3.5 py-1.5 rounded-md text-[13px] font-semibold transition-colors ${
                     datePickStrategy === 'DATE_RANGE'
-                      ? 'bg-white text-[#8E70C9] shadow-2xs border border-[#E6DFF0]'
-                      : 'text-[#746B83] hover:text-[#262238]'
+                      ? 'bg-white text-[#8066B5] shadow-2xs border border-[#E8E4EF]'
+                      : 'text-[#777287] hover:text-[#292638]'
                   }`}
                 >
                   เลือกช่วงวันที่ (จันทร์–ศุกร์ / ทุกวัน)
@@ -3982,17 +3986,17 @@ export function ShiftsView({
               {datePickStrategy === 'SINGLE_DAY' && (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 items-end">
                   <div>
-                    <label className="block text-[13px] font-semibold text-[#262238] mb-1.5">
+                    <label className="block text-[13px] font-semibold text-[#292638] mb-1.5">
                       ระบุวันที่ต้องการจัดเวร
                     </label>
                     <input
                       type="date"
                       value={singleWorkDate}
                       onChange={(e) => setSingleWorkDate(e.target.value)}
-                      className="w-full h-10 px-3 rounded-lg border border-[#E6DFF0] bg-white font-mono text-[13.5px] text-[#262238] focus:outline-none focus:border-[#8E70C9]"
+                      className="w-full h-10 px-3 rounded-lg border border-[#E8E4EF] bg-white font-mono text-[13.5px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                     />
                   </div>
-                  <div className="p-2.5 rounded-lg bg-[#F8F7FC] border border-[#E6DFF0] text-[13px] text-[#262238]">
+                  <div className="p-2.5 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] text-[13px] text-[#292638]">
                     วันที่เลือก:{' '}
                     <strong className="font-semibold">
                       {singleWorkDate ? formatThaiDate(singleWorkDate) : '-'}
@@ -4004,49 +4008,49 @@ export function ShiftsView({
               {datePickStrategy === 'MULTI_PICK' && (
                 <div className="space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="text-[13px] font-semibold text-[#262238]">
+                    <span className="text-[13px] font-semibold text-[#292638]">
                       ปฏิทินเดือน {formatThaiMonthTitle(selectedMonth)}
                     </span>
                     <div className="flex flex-wrap items-center gap-1.5">
                       <button
                         type="button"
                         onClick={() => quickPickMonthDates('WEEKDAYS_MONTH')}
-                        className="h-7 px-2.5 rounded-md border border-[#E6DFF0] bg-[#F2EDFA] hover:bg-[#EDE5F8] text-[#8E70C9] text-[12px] font-semibold"
+                        className="h-7 px-2.5 rounded-md border border-[#E8E4EF] bg-[#F1ECFA] hover:bg-[#E9DFF5] text-[#8066B5] text-[12px] font-semibold"
                       >
                         เฉพาะจันทร์–ศุกร์ทั้งเดือน
                       </button>
                       <button
                         type="button"
                         onClick={() => quickPickMonthDates('ALL_MONTH')}
-                        className="h-7 px-2.5 rounded-md border border-[#E6DFF0] bg-white hover:bg-[#F8F7FC] text-[#262238] text-[12px] font-medium"
+                        className="h-7 px-2.5 rounded-md border border-[#E8E4EF] bg-white hover:bg-[#F8F7FC] text-[#292638] text-[12px] font-medium"
                       >
                         ทุกวันทั้งเดือน
                       </button>
                       <button
                         type="button"
                         onClick={() => quickPickMonthDates('FIRST_HALF')}
-                        className="h-7 px-2.5 rounded-md border border-[#E6DFF0] bg-white hover:bg-[#F8F7FC] text-[#262238] text-[12px] font-medium"
+                        className="h-7 px-2.5 rounded-md border border-[#E8E4EF] bg-white hover:bg-[#F8F7FC] text-[#292638] text-[12px] font-medium"
                       >
                         วันที่ 1–15
                       </button>
                       <button
                         type="button"
                         onClick={() => quickPickMonthDates('SECOND_HALF')}
-                        className="h-7 px-2.5 rounded-md border border-[#E6DFF0] bg-white hover:bg-[#F8F7FC] text-[#262238] text-[12px] font-medium"
+                        className="h-7 px-2.5 rounded-md border border-[#E8E4EF] bg-white hover:bg-[#F8F7FC] text-[#292638] text-[12px] font-medium"
                       >
                         วันที่ 16–{monthBounds.daysInMonth}
                       </button>
                       <button
                         type="button"
                         onClick={() => quickPickMonthDates('CLEAR')}
-                        className="h-7 px-2.5 rounded-md border border-[#E6DFF0] bg-white hover:bg-red-50 text-red-700 text-[12px] font-medium"
+                        className="h-7 px-2.5 rounded-md border border-[#E8E4EF] bg-white hover:bg-red-50 text-red-700 text-[12px] font-medium"
                       >
                         ล้างวันที่
                       </button>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-7 gap-1.5 p-3 bg-[#F8F7FC] border border-[#E6DFF0] rounded-xl">
+                  <div className="grid grid-cols-7 gap-1.5 p-3 bg-[#F8F7FC] border border-[#E8E4EF] rounded-xl">
                     {monthBounds.allDates.map((d) => {
                       const active = multiPickedDates.includes(d.dateStr);
                       return (
@@ -4056,10 +4060,10 @@ export function ShiftsView({
                           onClick={() => toggleMultiPickedDate(d.dateStr)}
                           className={`h-11 rounded-lg font-mono text-[12.5px] flex flex-col items-center justify-center border transition-colors ${
                             active
-                              ? 'bg-[#8E70C9] border-[#8E70C9] text-white font-bold'
+                              ? 'bg-[#8066B5] border-[#8066B5] text-white font-bold'
                               : d.isWeekend
-                                ? 'bg-amber-50/70 border-amber-200 text-amber-950 hover:border-[#8E70C9]'
-                                : 'bg-white border-slate-200 text-[#262238] hover:border-[#8E70C9]'
+                                ? 'bg-amber-50/70 border-amber-200 text-amber-950 hover:border-[#8066B5]'
+                                : 'bg-white border-[#E8E4EF] text-[#292638] hover:border-[#8066B5]'
                           }`}
                         >
                           <span
@@ -4068,7 +4072,7 @@ export function ShiftsView({
                                 ? 'text-violet-100'
                                 : d.isWeekend
                                   ? 'text-amber-700 font-semibold'
-                                  : 'text-[#746B83]'
+                                  : 'text-[#777287]'
                             }`}
                           >
                             {d.weekdayShort}
@@ -4085,37 +4089,37 @@ export function ShiftsView({
                 <div className="space-y-3.5">
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                     <div>
-                      <label className="block text-[12.5px] font-semibold text-[#262238] mb-1">
+                      <label className="block text-[12.5px] font-semibold text-[#292638] mb-1">
                         ตั้งแต่วันที่
                       </label>
                       <input
                         type="date"
                         value={rangeStartDate}
                         onChange={(e) => setRangeStartDate(e.target.value)}
-                        className="w-full h-10 px-3 rounded-lg border border-[#E6DFF0] bg-white font-mono text-[13px] text-[#262238] focus:outline-none focus:border-[#8E70C9]"
+                        className="w-full h-10 px-3 rounded-lg border border-[#E8E4EF] bg-white font-mono text-[13px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[12.5px] font-semibold text-[#262238] mb-1">
+                      <label className="block text-[12.5px] font-semibold text-[#292638] mb-1">
                         ถึงวันที่
                       </label>
                       <input
                         type="date"
                         value={rangeEndDate}
                         onChange={(e) => setRangeEndDate(e.target.value)}
-                        className="w-full h-10 px-3 rounded-lg border border-[#E6DFF0] bg-white font-mono text-[13px] text-[#262238] focus:outline-none focus:border-[#8E70C9]"
+                        className="w-full h-10 px-3 rounded-lg border border-[#E8E4EF] bg-white font-mono text-[13px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[12.5px] font-semibold text-[#262238] mb-1">
+                      <label className="block text-[12.5px] font-semibold text-[#292638] mb-1">
                         เงื่อนไขวันในสัปดาห์
                       </label>
                       <select
                         value={weekdayFilter}
                         onChange={(e) => setWeekdayFilter(e.target.value as WeekdayFilterMode)}
-                        className="w-full h-10 px-3 rounded-lg border border-[#E6DFF0] bg-white text-[13px] text-[#262238] focus:outline-none focus:border-[#8E70C9]"
+                        className="w-full h-10 px-3 rounded-lg border border-[#E8E4EF] bg-white text-[13px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                       >
                         <option value="ALL_DAYS">เลือกทุกวันในช่วง</option>
                         <option value="WEEKDAYS_ONLY">เฉพาะวันจันทร์ – ศุกร์</option>
@@ -4125,7 +4129,7 @@ export function ShiftsView({
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[12px] text-[#746B83]">ตั้งช่วงวันที่ด่วน:</span>
+                    <span className="text-[12px] text-[#777287]">ตั้งช่วงวันที่ด่วน:</span>
                     <button
                       type="button"
                       onClick={() => {
@@ -4133,7 +4137,7 @@ export function ShiftsView({
                         setRangeEndDate(monthBounds.dateTo);
                         setWeekdayFilter('WEEKDAYS_ONLY');
                       }}
-                      className="h-7 px-2.5 rounded-md border border-[#E6DFF0] bg-[#F2EDFA] hover:bg-[#EDE5F8] text-[#8E70C9] text-[12px] font-semibold"
+                      className="h-7 px-2.5 rounded-md border border-[#E8E4EF] bg-[#F1ECFA] hover:bg-[#E9DFF5] text-[#8066B5] text-[12px] font-semibold"
                     >
                       จันทร์–ศุกร์ ตลอดเดือน{THAI_FULL_MONTHS[monthBounds.month - 1]}
                     </button>
@@ -4144,7 +4148,7 @@ export function ShiftsView({
                         setRangeEndDate(monthBounds.dateTo);
                         setWeekdayFilter('ALL_DAYS');
                       }}
-                      className="h-7 px-2.5 rounded-md border border-[#E6DFF0] bg-white hover:bg-[#F8F7FC] text-[#262238] text-[12px] font-medium"
+                      className="h-7 px-2.5 rounded-md border border-[#E8E4EF] bg-white hover:bg-[#F8F7FC] text-[#292638] text-[12px] font-medium"
                     >
                       ทุกวัน ตลอดเดือน{THAI_FULL_MONTHS[monthBounds.month - 1]}
                     </button>
@@ -4177,23 +4181,23 @@ export function ShiftsView({
 
           {/* =================================================================
               ขั้นตอนที่ ③: ตรวจสอบและยืนยัน
-              พื้นหลังม่วงอ่อนมาก (#F8F7FC) | Header แถบม่วงอ่อน (#F2EDFA)
+              พื้นหลังม่วงอ่อนมาก (#F8F7FC) | Header แถบม่วงอ่อน (#F1ECFA)
               Summary Cards และตารางผล Preview ใช้พื้นหลังขาว (#FFFFFF)
              ================================================================= */}
-          <section className="bg-[#F8F7FC] border border-[#E6DFF0] rounded-2xl shadow-xs overflow-hidden">
-            <div className="bg-[#F2EDFA] border-b border-[#E6DFF0] px-5 py-3.5 flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <section className="bg-[#F8F7FC] border border-[#E8E4EF] rounded-2xl shadow-xs overflow-hidden">
+            <div className="bg-[#F1ECFA] border-b border-[#E8E4EF] px-5 py-3.5 flex flex-col md:flex-row md:items-center justify-between gap-3">
               <div className="flex items-start gap-3 min-w-0">
                 <span
                   aria-hidden="true"
-                  className="w-7 h-7 rounded-full bg-[#8E70C9] text-white font-bold text-[13.5px] flex items-center justify-center shrink-0 mt-0.5 shadow-2xs"
+                  className="w-7 h-7 rounded-full bg-[#8066B5] text-white font-bold text-[13.5px] flex items-center justify-center shrink-0 mt-0.5 shadow-2xs"
                 >
                   3
                 </span>
                 <div className="min-w-0">
-                  <h3 className="text-[15.5px] font-bold text-[#262238] leading-snug">
+                  <h3 className="text-[15.5px] font-bold text-[#292638] leading-snug">
                     ตรวจสอบและยืนยัน
                   </h3>
-                  <p className="text-[12.5px] text-[#746B83] mt-0.5">
+                  <p className="text-[12.5px] text-[#777287] mt-0.5">
                     ตรวจสอบกะทับซ้อน กะข้ามวัน และรายการที่จะได้รับผลกระทบก่อนบันทึกลงระบบจริง
                   </p>
                 </div>
@@ -4204,9 +4208,9 @@ export function ShiftsView({
                   type="button"
                   onClick={handleRunConflictPreview}
                   disabled={previewLoading || submittingBulk}
-                  className="h-10 px-4 rounded-lg border border-[#E6DFF0] bg-white hover:bg-[#F8F7FC] hover:border-[#8E70C9] disabled:opacity-50 text-[#8E70C9] text-[13.5px] font-semibold inline-flex items-center justify-center gap-2 transition-colors whitespace-nowrap shadow-2xs"
+                  className="h-10 px-4 rounded-lg border border-[#E8E4EF] bg-white hover:bg-[#F8F7FC] hover:border-[#8066B5] disabled:opacity-50 text-[#8066B5] text-[13.5px] font-semibold inline-flex items-center justify-center gap-2 transition-colors whitespace-nowrap shadow-2xs"
                 >
-                  <FileCheck2 className="w-4 h-4 text-[#8E70C9]" />
+                  <FileCheck2 className="w-4 h-4 text-[#8066B5]" />
                   <span>
                     {previewLoading ? 'กำลังตรวจสอบ Preview...' : '1. ตรวจสอบ Preview ก่อนบันทึก'}
                   </span>
@@ -4233,7 +4237,7 @@ export function ShiftsView({
                       ? 'bg-red-700 hover:bg-red-800'
                       : bulkOperationMode === 'REPLACE_SHIFTS'
                         ? 'bg-amber-700 hover:bg-amber-800'
-                        : 'bg-[#8E70C9] hover:bg-[#795BB8]'
+                        : 'bg-[#8066B5] hover:bg-[#6E54A3]'
                   }`}
                 >
                   <CheckCircle2 className="w-4 h-4" />
@@ -4256,16 +4260,16 @@ export function ShiftsView({
 
             <div className="p-4 sm:p-5 space-y-4">
               {/* นโยบายจัดการความขัดแย้ง และหมายเหตุเหตุผล (การ์ดพื้นหลังขาว) */}
-              <div className="bg-white border border-[#E6DFF0] rounded-xl p-4 grid grid-cols-1 md:grid-cols-2 gap-3.5">
+              <div className="bg-white border border-[#E8E4EF] rounded-xl p-4 grid grid-cols-1 md:grid-cols-2 gap-3.5">
                 {(bulkOperationMode === 'ADD_SHIFTS' || bulkOperationMode === 'REPLACE_SHIFTS') && (
                   <div>
-                    <label className="block text-[12.5px] font-semibold text-[#262238] mb-1">
+                    <label className="block text-[12.5px] font-semibold text-[#292638] mb-1">
                       นโยบายเมื่อพบรายการซ้ำหรือเวลาทับซ้อน:
                     </label>
                     <select
                       value={conflictStrategy}
                       onChange={(e) => setConflictStrategy(e.target.value as ConflictStrategyMode)}
-                      className="w-full h-9.5 px-3 rounded-lg border border-[#E6DFF0] bg-white text-[13px] text-[#262238] focus:outline-none focus:border-[#8E70C9]"
+                      className="w-full h-9.5 px-3 rounded-lg border border-[#E8E4EF] bg-white text-[13px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                     >
                       <option value="SKIP_CONFLICTS">
                         ข้ามเฉพาะรายการที่ซ้ำ/เวลาทับซ้อน และบันทึกเฉพาะรายการที่พร้อม (แนะนำ)
@@ -4279,7 +4283,7 @@ export function ShiftsView({
 
                 {bulkOperationMode !== 'ADD_SHIFTS' && (
                   <div>
-                    <label className="block text-[12.5px] font-semibold text-[#262238] mb-1">
+                    <label className="block text-[12.5px] font-semibold text-[#292638] mb-1">
                       หมายเหตุ / เหตุผลการแก้ไขหรือลบกะ (บันทึกประวัติตรวจสอบ):
                     </label>
                     <input
@@ -4287,7 +4291,7 @@ export function ShiftsView({
                       value={bulkActionReason}
                       onChange={(e) => setBulkActionReason(e.target.value)}
                       placeholder="เช่น ปรับตารางเวรประจำเดือนตามคำสั่งหัวหน้ากลุ่มงาน"
-                      className="w-full h-9.5 px-3 rounded-lg border border-[#E6DFF0] bg-white text-[13px] text-[#262238] focus:outline-none focus:border-[#8E70C9]"
+                      className="w-full h-9.5 px-3 rounded-lg border border-[#E8E4EF] bg-white text-[13px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                     />
                   </div>
                 )}
@@ -4341,11 +4345,11 @@ export function ShiftsView({
               {previewData ? (
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-                    <div className="p-3.5 rounded-xl bg-white border border-[#E6DFF0] shadow-2xs">
-                      <div className="text-[12px] text-[#746B83] font-medium">
+                    <div className="p-3.5 rounded-xl bg-white border border-[#E8E4EF] shadow-2xs">
+                      <div className="text-[12px] text-[#777287] font-medium">
                         รายการที่ตรวจสอบทั้งหมด
                       </div>
-                      <div className="text-[20px] font-bold font-mono tabular-nums text-[#262238] mt-0.5">
+                      <div className="text-[20px] font-bold font-mono tabular-nums text-[#292638] mt-0.5">
                         {previewData.summary.totalRequested} รายการ
                       </div>
                     </div>
@@ -4377,8 +4381,8 @@ export function ShiftsView({
                       </div>
                     </div>
 
-                    <div className="p-3.5 rounded-xl bg-white border border-[#E6DFF0] shadow-2xs">
-                      <div className="text-[12px] text-[#8E70C9] font-semibold">
+                    <div className="p-3.5 rounded-xl bg-white border border-[#E8E4EF] shadow-2xs">
+                      <div className="text-[12px] text-[#8066B5] font-semibold">
                         {bulkOperationMode === 'REPLACE_SHIFTS'
                           ? 'ช่องที่จะถูกแทนที่กะเดิม'
                           : bulkOperationMode === 'CLEAR_ALL_SHIFTS'
@@ -4387,7 +4391,7 @@ export function ShiftsView({
                               ? 'ไม่พบกะเดิมให้ลบ'
                               : 'ขัดแย้ง / ถูกข้าม'}
                       </div>
-                      <div className="text-[20px] font-bold font-mono tabular-nums text-[#8E70C9] mt-0.5">
+                      <div className="text-[20px] font-bold font-mono tabular-nums text-[#8066B5] mt-0.5">
                         {bulkOperationMode === 'REPLACE_SHIFTS'
                           ? `${previewData.summary.replaceAffectedCells || 0} วัน-คน`
                           : bulkOperationMode === 'CLEAR_ALL_SHIFTS'
@@ -4400,14 +4404,14 @@ export function ShiftsView({
                   </div>
 
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                    <div className="inline-flex flex-wrap items-center p-1 bg-white border border-[#E6DFF0] rounded-lg self-start gap-1">
+                    <div className="inline-flex flex-wrap items-center p-1 bg-white border border-[#E8E4EF] rounded-lg self-start gap-1">
                       <button
                         type="button"
                         onClick={() => setPreviewFilterTab('ALL')}
                         className={`px-3 py-1 rounded-md text-[12.5px] font-semibold ${
                           previewFilterTab === 'ALL'
-                            ? 'bg-[#F2EDFA] text-[#8E70C9]'
-                            : 'text-[#746B83] hover:text-[#262238]'
+                            ? 'bg-[#F1ECFA] text-[#8066B5]'
+                            : 'text-[#777287] hover:text-[#292638]'
                         }`}
                       >
                         ทั้งหมด ({previewData.items.length})
@@ -4418,7 +4422,7 @@ export function ShiftsView({
                         className={`px-3 py-1 rounded-md text-[12.5px] font-semibold ${
                           previewFilterTab === 'READY'
                             ? 'bg-emerald-50 text-emerald-800'
-                            : 'text-[#746B83] hover:text-[#262238]'
+                            : 'text-[#777287] hover:text-[#292638]'
                         }`}
                       >
                         พร้อมดำเนินการ ({previewData.summary.readyCount})
@@ -4429,7 +4433,7 @@ export function ShiftsView({
                         className={`px-3 py-1 rounded-md text-[12.5px] font-semibold ${
                           previewFilterTab === 'CONFLICT'
                             ? 'bg-amber-50 text-amber-900'
-                            : 'text-[#746B83] hover:text-[#262238]'
+                            : 'text-[#777287] hover:text-[#292638]'
                         }`}
                       >
                         ขัดแย้ง / ข้าม (
@@ -4437,13 +4441,13 @@ export function ShiftsView({
                       </button>
                     </div>
 
-                    <div className="text-[12.5px] text-[#746B83]">
+                    <div className="text-[12.5px] text-[#777287]">
                       {bulkOperationMode === 'CLEAR_ALL_SHIFTS' ? (
                         <strong className="text-red-700">โหมด: ลบกะทั้งหมด (ตั้งเป็นไม่มีเวร)</strong>
                       ) : (
                         <>
                           กะที่เลือก ({(previewData.shiftSnapshots || []).length || 1} กะ):{' '}
-                          <strong className="text-[#8E70C9]">
+                          <strong className="text-[#8066B5]">
                             {(previewData.shiftSnapshots && previewData.shiftSnapshots.length > 0
                               ? previewData.shiftSnapshots
                               : previewData.shiftSnapshot
@@ -4461,10 +4465,10 @@ export function ShiftsView({
                     </div>
                   </div>
 
-                  <div className="bg-white border border-[#E6DFF0] rounded-xl overflow-hidden shadow-2xs">
+                  <div className="bg-white border border-[#E8E4EF] rounded-xl overflow-hidden shadow-2xs">
                     <div className="max-h-72 overflow-y-auto overflow-x-auto">
                       <table className="w-full min-w-[640px] text-left border-collapse text-[13px]">
-                        <thead className="sticky top-0 bg-[#F2EDFA] border-b border-[#E6DFF0] text-[#262238]">
+                        <thead className="sticky top-0 bg-[#F1ECFA] border-b border-[#E8E4EF] text-[#292638]">
                           <tr>
                             <th className="py-2.5 px-3.5 font-semibold">วันที่ปฏิบัติงาน</th>
                             <th className="py-2.5 px-3.5 font-semibold">บุคลากร · กลุ่มงาน</th>
@@ -4472,7 +4476,7 @@ export function ShiftsView({
                             <th className="py-2.5 px-3.5 font-semibold">สถานะและเหตุผล</th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-[#E6DFF0]/70">
+                        <tbody className="divide-y divide-[#E8E4EF]/70">
                           {filteredPreviewItems.map((item, idx) => {
                             const displayShiftName =
                               item.shiftName || previewData.shiftSnapshot?.shiftName;
@@ -4494,16 +4498,16 @@ export function ShiftsView({
                                 key={`${item.personId}-${item.workDate}-${item.shiftId ?? 'clear'}-${idx}`}
                                 className={item.status === 'READY' ? 'bg-white' : 'bg-amber-50/40'}
                               >
-                                <td className="py-2.5 px-3.5 font-mono tabular-nums font-semibold text-[#262238] whitespace-nowrap">
+                                <td className="py-2.5 px-3.5 font-mono tabular-nums font-semibold text-[#292638] whitespace-nowrap">
                                   {formatThaiDate(item.workDate)}
                                 </td>
                                 <td className="py-2.5 px-3.5">
-                                  <span className="font-bold text-[#262238]">{item.fullName}</span>{' '}
-                                  <span className="text-[12px] font-mono text-[#746B83]">
+                                  <span className="font-bold text-[#292638]">{item.fullName}</span>{' '}
+                                  <span className="text-[12px] font-mono text-[#777287]">
                                     ({item.personId}) · {item.departmentName}
                                   </span>
                                 </td>
-                                <td className="py-2.5 px-3.5 text-[#262238] whitespace-nowrap">
+                                <td className="py-2.5 px-3.5 text-[#292638] whitespace-nowrap">
                                   {bulkOperationMode === 'CLEAR_ALL_SHIFTS' ? (
                                     <span className="font-semibold text-red-700">
                                       ลบทุกกะ (ตั้งเป็นไม่มีเวร)
@@ -4514,7 +4518,7 @@ export function ShiftsView({
                                       <span className="font-semibold">
                                         {formatCleanShiftName(displayShiftName)}
                                       </span>
-                                      <span className="font-mono text-[12px] text-[#746B83]">
+                                      <span className="font-mono text-[12px] text-[#777287]">
                                         ({displayStart}–{displayEnd} น.)
                                       </span>
                                     </span>
@@ -4557,13 +4561,13 @@ export function ShiftsView({
                   </div>
                 </div>
               ) : (
-                <div className="p-4 rounded-xl bg-white border border-dashed border-[#E6DFF0] text-center text-[13.5px] text-[#746B83]">
+                <div className="p-4 rounded-xl bg-white border border-dashed border-[#E8E4EF] text-center text-[13.5px] text-[#777287]">
                   เลือกบุคลากร ({filteredPersonSelectionMeta.uniqueSelectedTotalCount} คน) ·{' '}
                   {bulkOperationMode === 'CLEAR_ALL_SHIFTS'
                     ? 'ล้างทุกกะ'
                     : `กะที่เลือก (${selectedShiftIds.length} กะ)`}{' '}
                   · วันที่ ({effectiveSelectedDates.length} วัน) แล้วกดปุ่ม{' '}
-                  <strong className="text-[#8E70C9]">“1. ตรวจสอบ Preview ก่อนบันทึก”</strong>{' '}
+                  <strong className="text-[#8066B5]">“1. ตรวจสอบ Preview ก่อนบันทึก”</strong>{' '}
                   เพื่อดูผลกระทบและความซ้ำซ้อนก่อนยืนยัน
                 </div>
               )}
@@ -4580,7 +4584,7 @@ export function ShiftsView({
         <div className="space-y-5">
           <div className="ent-card p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="relative w-full sm:max-w-md">
-              <Search className="w-4 h-4 text-[#746B83] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <Search className="w-4 h-4 text-[#777287] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="text"
                 value={templateSearch}
@@ -4591,7 +4595,7 @@ export function ShiftsView({
             </div>
 
             <div className="flex items-center gap-2.5">
-              <span className="text-[13px] text-[#746B83] tabular-nums">
+              <span className="text-[13px] text-[#777287] tabular-nums">
                 แสดง {filteredShifts.length} จาก {shifts.length} แม่แบบกะ
               </span>
               <button
@@ -4608,18 +4612,18 @@ export function ShiftsView({
           {showCreateTemplateForm && (
             <form
               onSubmit={handleCreateShift}
-              className="bg-white border border-[#E6DFF0] rounded-xl p-5 sm:p-6 space-y-5"
+              className="bg-white border border-[#E8E4EF] rounded-xl p-5 sm:p-6 space-y-5"
             >
-              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 border-b border-slate-200 pb-3.5">
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 border-b border-[#E8E4EF] pb-3.5">
                 <div>
-                  <h2 className="text-[17px] font-bold text-slate-900">
+                  <h2 className="text-[17px] font-bold text-[#292638]">
                     เพิ่มแม่แบบกะทำงานใหม่
                   </h2>
-                  <p className="text-[13px] text-slate-600 mt-0.5">
+                  <p className="text-[13px] text-[#777287] mt-0.5">
                     ระบุชื่อกะโดยไม่ต้องพิมพ์วงเล็บเวลาต่อท้าย ระบบจะแสดงเวลาเริ่ม–เลิกงานให้อัตโนมัติ
                   </p>
                 </div>
-                <span className="text-[12.5px] font-semibold text-[#543B7A] bg-[#F2EDFA] border border-[#E6DFF0] px-3 py-1 rounded-md self-start">
+                <span className="text-[12.5px] font-semibold text-[#4E3978] bg-[#F1ECFA] border border-[#E8E4EF] px-3 py-1 rounded-md self-start">
                   {endTime <= startTime
                     ? 'ประเภทเวลา: เวรข้ามเที่ยงคืน (+1 วัน)'
                     : 'ประเภทเวลา: เวรภายในวันเดียว'}
@@ -4630,7 +4634,7 @@ export function ShiftsView({
                 <div className="sm:col-span-2">
                   <label
                     htmlFor="shift-name"
-                    className="block text-[13px] font-semibold text-slate-700 mb-1.5"
+                    className="block text-[13px] font-semibold text-[#292638] mb-1.5"
                   >
                     ชื่อแม่แบบกะทำงาน <RequiredMark />
                   </label>
@@ -4641,14 +4645,14 @@ export function ShiftsView({
                     value={shiftName}
                     onChange={(e) => setShiftName(e.target.value)}
                     placeholder="เช่น เวรปกติ, เวรเช้า, เวรบ่าย, เวรดึก"
-                    className="w-full h-10 px-3 rounded-lg border border-slate-300 text-[13.5px] text-slate-800 focus:outline-none focus:border-[#8E70C9]"
+                    className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] text-[13.5px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                   />
                 </div>
 
                 <div>
                   <label
                     htmlFor="shift-code"
-                    className="block text-[13px] font-semibold text-slate-700 mb-1.5"
+                    className="block text-[13px] font-semibold text-[#292638] mb-1.5"
                   >
                     รหัสกะ (ข้อมูลรอง) <RequiredMark />
                   </label>
@@ -4659,14 +4663,14 @@ export function ShiftsView({
                     value={shiftCode}
                     onChange={(e) => setShiftCode(e.target.value)}
                     placeholder="เช่น ER-2008"
-                    className="w-full h-10 px-3 rounded-lg border border-slate-300 font-mono text-[13.5px] text-slate-800 focus:outline-none focus:border-[#8E70C9]"
+                    className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] font-mono text-[13.5px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                   />
                 </div>
 
                 <div>
                   <label
                     htmlFor="shift-category"
-                    className="block text-[13px] font-semibold text-slate-700 mb-1.5"
+                    className="block text-[13px] font-semibold text-[#292638] mb-1.5"
                   >
                     หมวดหมู่กะ <RequiredMark />
                   </label>
@@ -4674,7 +4678,7 @@ export function ShiftsView({
                     id="shift-category"
                     value={shiftCategory}
                     onChange={(e) => setShiftCategory(e.target.value)}
-                    className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-[13.5px] text-slate-800 focus:outline-none focus:border-[#8E70C9]"
+                    className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] bg-white text-[13.5px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                   >
                     <option value="OFFICIAL">เวรราชการ</option>
                     <option value="MORNING">เวรเช้า</option>
@@ -4688,7 +4692,7 @@ export function ShiftsView({
                 <div>
                   <label
                     htmlFor="shift-start"
-                    className="block text-[13px] font-semibold text-slate-700 mb-1.5"
+                    className="block text-[13px] font-semibold text-[#292638] mb-1.5"
                   >
                     เวลาเริ่มงาน (24 ชม.) <RequiredMark />
                   </label>
@@ -4698,14 +4702,14 @@ export function ShiftsView({
                     required
                     value={startTime}
                     onChange={(e) => setStartTime(e.target.value)}
-                    className="w-full h-10 px-3 rounded-lg border border-slate-300 font-mono tabular-nums text-[13.5px] text-slate-800 focus:outline-none focus:border-[#8E70C9]"
+                    className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] font-mono tabular-nums text-[13.5px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                   />
                 </div>
 
                 <div>
                   <label
                     htmlFor="shift-end"
-                    className="block text-[13px] font-semibold text-slate-700 mb-1.5"
+                    className="block text-[13px] font-semibold text-[#292638] mb-1.5"
                   >
                     เวลาเลิกงาน (24 ชม.) <RequiredMark />
                   </label>
@@ -4715,14 +4719,14 @@ export function ShiftsView({
                     required
                     value={endTime}
                     onChange={(e) => setEndTime(e.target.value)}
-                    className="w-full h-10 px-3 rounded-lg border border-slate-300 font-mono tabular-nums text-[13.5px] text-slate-800 focus:outline-none focus:border-[#8E70C9]"
+                    className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] font-mono tabular-nums text-[13.5px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                   />
                 </div>
 
                 <div>
                   <label
                     htmlFor="shift-grace"
-                    className="block text-[13px] font-semibold text-slate-700 mb-1.5"
+                    className="block text-[13px] font-semibold text-[#292638] mb-1.5"
                   >
                     เวลาผ่อนผันการมาสาย (นาที) <RequiredMark />
                   </label>
@@ -4734,14 +4738,14 @@ export function ShiftsView({
                     required
                     value={graceMinutes}
                     onChange={(e) => setGraceMinutes(Number(e.target.value))}
-                    className="w-full h-10 px-3 rounded-lg border border-slate-300 font-mono tabular-nums text-[13.5px] text-slate-800 focus:outline-none focus:border-[#8E70C9]"
+                    className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] font-mono tabular-nums text-[13.5px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                   />
                 </div>
 
                 <div>
                   <label
                     htmlFor="shift-cutoff"
-                    className="block text-[13px] font-semibold text-slate-700 mb-1.5"
+                    className="block text-[13px] font-semibold text-[#292638] mb-1.5"
                   >
                     เวลาตัดรอบสแกน <RequiredMark />
                   </label>
@@ -4751,23 +4755,23 @@ export function ShiftsView({
                     required
                     value={cutoffTime}
                     onChange={(e) => setCutoffTime(e.target.value)}
-                    className="w-full h-10 px-3 rounded-lg border border-slate-300 font-mono tabular-nums text-[13.5px] text-slate-800 focus:outline-none focus:border-[#8E70C9]"
+                    className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] font-mono tabular-nums text-[13.5px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
                   />
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center justify-end gap-2.5 pt-3 border-t border-slate-200">
+              <div className="flex flex-wrap items-center justify-end gap-2.5 pt-3 border-t border-[#E8E4EF]">
                 <button
                   type="button"
                   onClick={() => setShowCreateTemplateForm(false)}
-                  className="h-10 px-4 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-[13.5px] font-medium"
+                  className="h-10 px-4 rounded-lg border border-[#D8D1E6] bg-white hover:bg-[#F8F7FC] text-[#292638] text-[13.5px] font-medium"
                 >
                   ยกเลิก
                 </button>
                 <button
                   type="submit"
                   disabled={creatingTemplate}
-                  className="h-10 px-5 rounded-lg bg-[#8E70C9] hover:bg-[#795BB8] disabled:opacity-50 text-white text-[13.5px] font-semibold inline-flex items-center gap-2"
+                  className="h-10 px-5 rounded-lg bg-[#8066B5] hover:bg-[#6E54A3] disabled:opacity-50 text-white text-[13.5px] font-semibold inline-flex items-center gap-2"
                 >
                   <Plus className="w-4 h-4" />
                   <span>{creatingTemplate ? 'กำลังบันทึกแม่แบบกะ...' : 'บันทึกแม่แบบกะใหม่'}</span>
@@ -4789,74 +4793,69 @@ export function ShiftsView({
               return (
                 <div
                   key={s.id}
-                  className="bg-white border border-slate-200 rounded-xl p-5 flex flex-col justify-between space-y-4 hover:border-[#D5CBE8] transition-colors"
+                  className="his-surface p-5 flex flex-col justify-between space-y-4 hover:border-[#8066B5]/50 transition-colors"
                 >
                   {/* หัวการ์ด: ชื่อกะเด่นชัด + เวลา 1 ครั้ง ไม่ซ้ำซ้อน */}
-                  <div className="space-y-1.5">
+                  <div className="space-y-2">
                     <div className="flex items-start justify-between gap-2">
-                      <h3 className="text-[17px] font-bold text-slate-900 leading-snug">
+                      <h3 className="text-[16.5px] font-bold text-[#292638] leading-snug">
                         {cleanName}
                       </h3>
-                      <span className="inline-flex items-center gap-1 text-[12px] font-medium text-slate-600 shrink-0">
-                        {isCross ? (
-                          <>
-                            <Moon className="w-3.5 h-3.5 text-blue-700" />
-                            <span className="text-blue-700 font-semibold">เวรข้ามวัน</span>
-                          </>
-                        ) : (
-                          <>
-                            <Sun className="w-3.5 h-3.5 text-emerald-700" />
-                            <span>ภายในวัน</span>
-                          </>
-                        )}
-                      </span>
+                      <StatusBadge
+                        tone={isCross ? 'info' : 'success'}
+                        icon={
+                          isCross ? (
+                            <Moon className="w-3.5 h-3.5" aria-hidden="true" />
+                          ) : (
+                            <Sun className="w-3.5 h-3.5" aria-hidden="true" />
+                          )
+                        }
+                      >
+                        {isCross ? 'เวรข้ามวัน' : 'ภายในวัน'}
+                      </StatusBadge>
                     </div>
 
-                    <div className="text-[19px] font-bold font-mono tabular-nums text-violet-800">
+                    <div className="text-[19px] font-bold font-mono tabular-nums text-[#4E3978]">
                       {s.start_time}–{s.end_time} น.
                     </div>
 
-                    <div className="text-[12.5px] text-slate-500">
-                      รหัสกะ: <span className="font-mono text-slate-700">{s.shift_code}</span> ·{' '}
+                    <div className="text-[12.5px] text-[#777287]">
+                      รหัสกะ: <span className="font-mono text-[#292638] font-medium">{s.shift_code}</span> ·{' '}
                       {categoryText}
                     </div>
                   </div>
 
-                  {/* รายละเอียด 5 รายการตามข้อกำหนดข้อ 5 */}
-                  <div className="pt-3 border-t border-slate-200 space-y-1.5 text-[13.5px]">
+                  {/* รายละเอียด 5 รายการ */}
+                  <div className="pt-3 border-t border-[#E8E4EF] space-y-1.5 text-[13.5px]">
                     <div className="flex items-center justify-between">
-                      <span className="text-slate-500">เวลาเริ่มงาน:</span>
-                      <span className="font-mono font-semibold text-slate-800 tabular-nums">
+                      <span className="text-[#777287]">เวลาเริ่มงาน</span>
+                      <span className="font-mono font-semibold text-[#292638] tabular-nums">
                         {s.start_time} น.
                       </span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-slate-500">เวลาเลิกงาน:</span>
-                      <span className="font-mono font-semibold text-slate-800 tabular-nums">
+                      <span className="text-[#777287]">เวลาเลิกงาน</span>
+                      <span className="font-mono font-semibold text-[#292638] tabular-nums">
                         {s.end_time} น. {isCross ? '(วันถัดไป)' : ''}
                       </span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-slate-500">เวลาผ่อนผันการมาสาย:</span>
-                      <span className="font-mono font-semibold text-emerald-700 tabular-nums">
+                      <span className="text-[#777287]">เวลาผ่อนผันการมาสาย</span>
+                      <span className="font-mono font-semibold text-[#198568] tabular-nums">
                         {s.grace_minutes} นาที
                       </span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-slate-500">เวลาตัดรอบสแกน:</span>
-                      <span className="font-mono font-semibold text-amber-700 tabular-nums">
+                      <span className="text-[#777287]">เวลาตัดรอบสแกน</span>
+                      <span className="font-mono font-semibold text-[#B87516] tabular-nums">
                         {s.cutoff_time} น.
                       </span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-slate-500">สถานะเปิดใช้งาน:</span>
-                      <span
-                        className={`font-semibold ${
-                          isActive ? 'text-emerald-700' : 'text-slate-500'
-                        }`}
-                      >
+                      <span className="text-[#777287]">สถานะเปิดใช้งาน</span>
+                      <StatusBadge tone={isActive ? 'success' : 'neutral'} dot>
                         {isActive ? 'เปิดใช้งาน' : 'ปิดใช้งาน'}
-                      </span>
+                      </StatusBadge>
                     </div>
                   </div>
 
@@ -4869,7 +4868,7 @@ export function ShiftsView({
                           shiftId: Number(s.id),
                         })
                       }
-                      className="h-9 px-3 rounded-lg border border-[#E6DFF0] bg-[#F2EDFA] hover:bg-[#EDE5F8] text-[#543B7A] text-[12.5px] font-semibold inline-flex items-center justify-center gap-1.5 transition-colors"
+                      className="ent-btn-soft h-9 px-3 text-[12.5px]"
                     >
                       <User className="w-3.5 h-3.5" />
                       <span>จัดเวรรายบุคคล</span>
@@ -4882,7 +4881,7 @@ export function ShiftsView({
                           shiftId: Number(s.id),
                         })
                       }
-                      className="h-9 px-3 rounded-lg bg-[#8E70C9] hover:bg-[#795BB8] text-white text-[12.5px] font-semibold inline-flex items-center justify-center gap-1.5 transition-colors"
+                      className="ent-btn-primary h-9 px-3 text-[12.5px]"
                     >
                       <Users className="w-3.5 h-3.5" />
                       <span>จัดเวรหลายคน</span>
@@ -4896,23 +4895,23 @@ export function ShiftsView({
           {/* =================================================================
               ส่วนที่ 3.2: กฎกะเช้าเริ่มต้นตามประเภทบุคลากร (Personnel Type Default Shift Rules)
              ================================================================= */}
-          <div className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-200 pb-4">
+          <div className="bg-white border border-[#E8E4EF] rounded-xl p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#E8E4EF] pb-4">
               <div>
-                <div className="text-[12px] font-semibold text-[#543B7A]">
+                <div className="text-[12px] font-semibold text-[#4E3978]">
                   กฎกะเช้าเริ่มต้นอัตโนมัติตามประเภทบุคลากร (Default Morning Shift by Personnel Type)
                 </div>
-                <h3 className="text-[17px] font-bold text-slate-900">
+                <h3 className="text-[17px] font-bold text-[#292638]">
                   กำหนดเวลาเริ่ม–เลิกงาน กะเช้าเริ่มต้น และเวลาผ่อนผันสายแยกตามประเภทบุคลากร
                 </h3>
-                <p className="text-[13px] text-slate-600 mt-0.5">
+                <p className="text-[13px] text-[#777287] mt-0.5">
                   หากบุคลากรไม่มีการจัดเวรพิเศษและไม่ได้ถูกลบเวรในวันนั้น ระบบจะใช้กะเช้าเริ่มต้นตามประเภทบุคลากรโดยอัตโนมัติ (การแก้ไขมีผลตั้งแต่วันที่มีผลบังคับใช้เป็นต้นไป ไม่กระทบข้อมูลย้อนหลัง)
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => setShowAddRuleForm((v) => !v)}
-                className="h-10 px-4 rounded-lg bg-[#8E70C9] hover:bg-[#795BB8] text-white text-[13px] font-semibold inline-flex items-center gap-1.5 shrink-0"
+                className="h-10 px-4 rounded-lg bg-[#8066B5] hover:bg-[#6E54A3] text-white text-[13px] font-semibold inline-flex items-center gap-1.5 shrink-0"
               >
                 <Plus className="w-4 h-4" />
                 <span>{showAddRuleForm ? 'ปิดฟอร์มเพิ่มประเภทบุคลากร' : 'เพิ่มประเภทบุคลากรใหม่'}</span>
@@ -4922,10 +4921,10 @@ export function ShiftsView({
             {showAddRuleForm && (
               <form
                 onSubmit={handleCreateRule}
-                className="p-4 rounded-xl bg-[#F2EDFA]/50 border border-[#E6DFF0] grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end"
+                className="p-4 rounded-xl bg-[#F1ECFA]/50 border border-[#E8E4EF] grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 items-end"
               >
                 <div>
-                  <label className="block text-[12.5px] font-semibold text-slate-700 mb-1">
+                  <label className="block text-[12.5px] font-semibold text-[#292638] mb-1">
                     รหัสประเภท <RequiredMark />
                   </label>
                   <input
@@ -4934,11 +4933,11 @@ export function ShiftsView({
                     value={newRuleCode}
                     onChange={(e) => setNewRuleCode(e.target.value)}
                     placeholder="เช่น CONTRACT_EMP"
-                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-[13px]"
+                    className="w-full h-9 px-3 rounded-lg border border-[#D8D1E6] bg-white text-[13px]"
                   />
                 </div>
                 <div>
-                  <label className="block text-[12.5px] font-semibold text-slate-700 mb-1">
+                  <label className="block text-[12.5px] font-semibold text-[#292638] mb-1">
                     ชื่อประเภทบุคลากร <RequiredMark />
                   </label>
                   <input
@@ -4947,11 +4946,11 @@ export function ShiftsView({
                     value={newRuleName}
                     onChange={(e) => setNewRuleName(e.target.value)}
                     placeholder="เช่น ลูกจ้างเหมาบริการ"
-                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-[13px]"
+                    className="w-full h-9 px-3 rounded-lg border border-[#D8D1E6] bg-white text-[13px]"
                   />
                 </div>
                 <div>
-                  <label className="block text-[12.5px] font-semibold text-slate-700 mb-1">
+                  <label className="block text-[12.5px] font-semibold text-[#292638] mb-1">
                     เวลาเริ่ม–เลิกงาน
                   </label>
                   <div className="flex items-center gap-1">
@@ -4959,19 +4958,19 @@ export function ShiftsView({
                       type="time"
                       value={newRuleStart}
                       onChange={(e) => setNewRuleStart(e.target.value)}
-                      className="w-full h-9 px-2 rounded-lg border border-slate-300 bg-white text-[13px] font-mono"
+                      className="w-full h-9 px-2 rounded-lg border border-[#D8D1E6] bg-white text-[13px] font-mono"
                     />
                     <span>–</span>
                     <input
                       type="time"
                       value={newRuleEnd}
                       onChange={(e) => setNewRuleEnd(e.target.value)}
-                      className="w-full h-9 px-2 rounded-lg border border-slate-300 bg-white text-[13px] font-mono"
+                      className="w-full h-9 px-2 rounded-lg border border-[#D8D1E6] bg-white text-[13px] font-mono"
                     />
                   </div>
                 </div>
                 <div>
-                  <label className="block text-[12.5px] font-semibold text-slate-700 mb-1">
+                  <label className="block text-[12.5px] font-semibold text-[#292638] mb-1">
                     ผ่อนผันสาย (นาที)
                   </label>
                   <input
@@ -4980,11 +4979,11 @@ export function ShiftsView({
                     max={180}
                     value={newRuleGrace}
                     onChange={(e) => setNewRuleGrace(Number(e.target.value))}
-                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-[13px] font-mono"
+                    className="w-full h-9 px-3 rounded-lg border border-[#D8D1E6] bg-white text-[13px] font-mono"
                   />
                 </div>
                 <div>
-                  <label className="block text-[12.5px] font-semibold text-slate-700 mb-1">
+                  <label className="block text-[12.5px] font-semibold text-[#292638] mb-1">
                     เวลาตัดรอบ / วันที่มีผล
                   </label>
                   <div className="flex items-center gap-1">
@@ -4992,13 +4991,13 @@ export function ShiftsView({
                       type="time"
                       value={newRuleCutoff}
                       onChange={(e) => setNewRuleCutoff(e.target.value)}
-                      className="w-24 h-9 px-2 rounded-lg border border-slate-300 bg-white text-[12.5px] font-mono"
+                      className="w-24 h-9 px-2 rounded-lg border border-[#D8D1E6] bg-white text-[12.5px] font-mono"
                     />
                     <input
                       type="date"
                       value={newRuleEffectiveFrom}
                       onChange={(e) => setNewRuleEffectiveFrom(e.target.value)}
-                      className="w-full h-9 px-2 rounded-lg border border-slate-300 bg-white text-[12.5px] font-mono"
+                      className="w-full h-9 px-2 rounded-lg border border-[#D8D1E6] bg-white text-[12.5px] font-mono"
                     />
                   </div>
                 </div>
@@ -5006,7 +5005,7 @@ export function ShiftsView({
                   <button
                     type="submit"
                     disabled={ruleSaving}
-                    className="w-full h-9 px-4 rounded-lg bg-[#8E70C9] hover:bg-[#795BB8] text-white text-[13px] font-semibold"
+                    className="w-full h-9 px-4 rounded-lg bg-[#8066B5] hover:bg-[#6E54A3] text-white text-[13px] font-semibold"
                   >
                     {ruleSaving ? 'กำลังบันทึก...' : 'บันทึกกฎใหม่'}
                   </button>
@@ -5017,7 +5016,7 @@ export function ShiftsView({
             <div className="overflow-x-auto">
               <table className="w-full border-collapse text-left text-[13.5px]">
                 <thead>
-                  <tr className="border-b border-slate-200 bg-slate-50 text-slate-700">
+                  <tr className="border-b border-[#E8E4EF] bg-[#F8F7FC] text-[#292638]">
                     <th className="py-2.5 px-3 font-semibold">ประเภทบุคลากร</th>
                     <th className="py-2.5 px-3 font-semibold">รหัสอ้างอิง</th>
                     <th className="py-2.5 px-3 font-semibold">เวลากะเช้าเริ่มต้น</th>
@@ -5028,18 +5027,18 @@ export function ShiftsView({
                     <th className="py-2.5 px-3 font-semibold text-right">การจัดการ</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-200">
+                <tbody className="divide-y divide-[#E8E4EF]">
                   {personnelTypeRules.map((r) => {
                     const active = Number(r.is_active ?? 1) === 1;
                     return (
-                      <tr key={r.id} className="hover:bg-[#F2EDFA]/30">
-                        <td className="py-2.5 px-3 font-bold text-slate-900">
+                      <tr key={r.id} className="hover:bg-[#F1ECFA]/30">
+                        <td className="py-2.5 px-3 font-bold text-[#292638]">
                           {r.personnel_type_name}
                         </td>
-                        <td className="py-2.5 px-3 font-mono text-[12.5px] text-slate-600">
+                        <td className="py-2.5 px-3 font-mono text-[12.5px] text-[#777287]">
                           {r.personnel_type_code}
                         </td>
-                        <td className="py-2.5 px-3 font-mono font-bold text-[#543B7A]">
+                        <td className="py-2.5 px-3 font-mono font-bold text-[#4E3978]">
                           {r.default_start_time || '08:00'}–{r.default_end_time || '16:00'} น.
                         </td>
                         <td className="py-2.5 px-3 font-mono font-semibold text-emerald-700">
@@ -5048,13 +5047,13 @@ export function ShiftsView({
                         <td className="py-2.5 px-3 font-mono text-amber-800">
                           {r.default_cutoff_time || '11:00'} น.
                         </td>
-                        <td className="py-2.5 px-3 font-mono text-[12.5px] text-slate-600">
+                        <td className="py-2.5 px-3 font-mono text-[12.5px] text-[#777287]">
                           {formatThaiDate(String(r.effective_from || '2020-01-01').slice(0, 10))}
                         </td>
                         <td className="py-2.5 px-3">
                           <span
                             className={`text-[12.5px] font-semibold ${
-                              active ? 'text-emerald-700' : 'text-slate-400'
+                              active ? 'text-emerald-700' : 'text-[#9A94AA]'
                             }`}
                           >
                             {active ? 'เปิดใช้งาน' : 'ปิดใช้งาน'}
@@ -5064,7 +5063,7 @@ export function ShiftsView({
                           <button
                             type="button"
                             onClick={() => setEditingRule({ ...r })}
-                            className="h-8 px-3 rounded-md border border-[#E6DFF0] bg-[#F2EDFA] hover:bg-[#EDE5F8] text-[#543B7A] text-[12px] font-semibold inline-flex items-center gap-1"
+                            className="h-8 px-3 rounded-md border border-[#E8E4EF] bg-[#F1ECFA] hover:bg-[#E9DFF5] text-[#4E3978] text-[12px] font-semibold inline-flex items-center gap-1"
                           >
                             <Edit3 className="w-3.5 h-3.5" />
                             <span>แก้ไขเวลา/ค่าสาย</span>
@@ -5072,7 +5071,7 @@ export function ShiftsView({
                           <button
                             type="button"
                             onClick={() => handleToggleRuleActive(r)}
-                            className="h-8 px-3 rounded-md border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-[12px] font-medium"
+                            className="h-8 px-3 rounded-md border border-[#D8D1E6] bg-white hover:bg-[#F8F7FC] text-[#292638] text-[12px] font-medium"
                           >
                             {active ? 'ปิดใช้งาน' : 'เปิดใช้งาน'}
                           </button>
@@ -5114,7 +5113,7 @@ export function ShiftsView({
                     workDate: String(target.work_date).slice(0, 10),
                   });
                 }}
-                className="h-10 px-3.5 rounded-lg border border-[#D5CBE8] bg-[#F2EDFA] hover:bg-[#EDE5F8] text-[#543B7A] text-[13px] font-semibold inline-flex items-center gap-1.5"
+                className="h-10 px-3.5 rounded-lg border border-[#D8D1E6] bg-[#F1ECFA] hover:bg-[#E9DFF5] text-[#4E3978] text-[13px] font-semibold inline-flex items-center gap-1.5"
               >
                 <Plus className="w-4 h-4" />
                 <span>เพิ่มกะอื่นในวันนี้</span>
@@ -5140,36 +5139,36 @@ export function ShiftsView({
       >
         {inspectTarget && (
           <div className="space-y-4 text-[14px]">
-            <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-2.5">
+            <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-2.5">
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">บุคลากร:</span>
-                <span className="font-bold text-slate-900">
+                <span className="text-[#777287]">บุคลากร:</span>
+                <span className="font-bold text-[#292638]">
                   {inspectTarget.full_name} ({inspectTarget.person_id})
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">กลุ่มงาน/แผนก:</span>
-                <span className="font-medium text-slate-800">{inspectTarget.department_name}</span>
+                <span className="text-[#777287]">กลุ่มงาน/แผนก:</span>
+                <span className="font-medium text-[#292638]">{inspectTarget.department_name}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">วันที่ปฏิบัติงาน:</span>
-                <span className="font-mono font-bold text-slate-800">
+                <span className="text-[#777287]">วันที่ปฏิบัติงาน:</span>
+                <span className="font-mono font-bold text-[#292638]">
                   {formatThaiDate(inspectTarget.work_date)}
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">ชื่อกะ (Snapshot):</span>
-                <span className="font-bold text-[#543B7A]">
+                <span className="text-[#777287]">ชื่อกะ (Snapshot):</span>
+                <span className="font-bold text-[#4E3978]">
                   {formatCleanShiftName(inspectTarget.snapshot_shift_name)}
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">รหัสกะ:</span>
-                <span className="font-mono text-slate-700">{inspectTarget.snapshot_shift_code}</span>
+                <span className="text-[#777287]">รหัสกะ:</span>
+                <span className="font-mono text-[#292638]">{inspectTarget.snapshot_shift_code}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">เวลาเริ่ม–เลิกงาน:</span>
-                <span className="font-mono font-bold text-slate-900 tabular-nums">
+                <span className="text-[#777287]">เวลาเริ่ม–เลิกงาน:</span>
+                <span className="font-mono font-bold text-[#292638] tabular-nums">
                   {inspectTarget.snapshot_start_time}–{inspectTarget.snapshot_end_time} น.
                   {Number(inspectTarget.snapshot_is_cross_midnight) === 1
                     ? ' (ข้ามเที่ยงคืน +1 วัน)'
@@ -5177,23 +5176,23 @@ export function ShiftsView({
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">เวลาผ่อนผันการมาสาย:</span>
+                <span className="text-[#777287]">เวลาผ่อนผันการมาสาย:</span>
                 <span className="font-mono text-emerald-700 font-semibold">
                   {inspectTarget.snapshot_grace_minutes} นาที
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">เวลาตัดรอบสแกน:</span>
+                <span className="text-[#777287]">เวลาตัดรอบสแกน:</span>
                 <span className="font-mono text-amber-700 font-semibold">
                   {inspectTarget.snapshot_cutoff_time} น.
                 </span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">ผู้มอบหมายเวร:</span>
-                <span className="font-mono text-slate-700">{inspectTarget.assigned_by || '-'}</span>
+                <span className="text-[#777287]">ผู้มอบหมายเวร:</span>
+                <span className="font-mono text-[#292638]">{inspectTarget.assigned_by || '-'}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-slate-500">สถานะปัจจุบัน:</span>
+                <span className="text-[#777287]">สถานะปัจจุบัน:</span>
                 <span
                   className={`font-bold ${
                     inspectTarget.status === 'ACTIVE' ? 'text-emerald-700' : 'text-red-700'
@@ -5219,18 +5218,18 @@ export function ShiftsView({
       >
         {cancelTarget && (
           <form onSubmit={handleConfirmCancelAssignment} className="space-y-4 text-[14px]">
-            <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-1">
-              <div className="font-bold text-[15px] text-slate-900">
+            <div className="p-4 bg-[#F8F7FC] rounded-xl border border-[#E8E4EF] space-y-1">
+              <div className="font-bold text-[15px] text-[#292638]">
                 {cancelTarget.full_name} ({cancelTarget.person_id})
               </div>
-              <div className="text-slate-600">
+              <div className="text-[#777287]">
                 วันที่เวร: {formatThaiDate(cancelTarget.work_date)} · กะ:{' '}
                 {formatCleanShiftName(cancelTarget.snapshot_shift_name)} (
                 {cancelTarget.snapshot_start_time}–{cancelTarget.snapshot_end_time} น.)
               </div>
             </div>
             <div>
-              <label className="block text-[13.5px] font-semibold text-slate-700 mb-1.5">
+              <label className="block text-[13.5px] font-semibold text-[#292638] mb-1.5">
                 ระบุเหตุผลการยกเลิกเวร <RequiredMark />
               </label>
               <textarea
@@ -5238,10 +5237,10 @@ export function ShiftsView({
                 required
                 value={cancelReason}
                 onChange={(e) => setCancelReason(e.target.value)}
-                className="w-full p-3 border border-slate-300 rounded-lg text-[14px] text-slate-800 focus:outline-none focus:border-[#8E70C9]"
+                className="w-full p-3 border border-[#D8D1E6] rounded-lg text-[14px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
               />
             </div>
-            <div className="flex justify-end gap-2.5 pt-3 border-t border-slate-200">
+            <div className="flex justify-end gap-2.5 pt-3 border-t border-[#E8E4EF]">
               <button
                 type="submit"
                 className="w-full sm:w-auto h-10 px-5 text-[14px] font-semibold bg-red-700 text-white rounded-lg hover:bg-red-800 transition-colors"
@@ -5293,24 +5292,24 @@ export function ShiftsView({
           return (
             <div className="space-y-4 text-[13.5px]">
               {/* ส่วนหัว: ชื่อบุคลากร · วันที่ · ประเภทบุคลากร */}
-              <div className="p-3.5 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0] space-y-1.5">
+              <div className="p-3.5 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-1.5">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <span className="font-bold text-[#262238] text-[14.5px]">
+                    <span className="font-bold text-[#292638] text-[14.5px]">
                       {quickCellData?.person.full_name || quickCellTarget.person.full_name}
                     </span>{' '}
-                    <span className="font-mono text-[12px] text-slate-500">
+                    <span className="font-mono text-[12px] text-[#777287]">
                       ({quickCellData?.person.person_id || quickCellTarget.person.person_id})
                     </span>
                   </div>
-                  <span className="font-mono font-bold text-[#543B7A] bg-[#F2EDFA] border border-[#E6DFF0] px-2.5 py-0.5 rounded-md text-[12.5px]">
+                  <span className="font-mono font-bold text-[#4E3978] bg-[#F1ECFA] border border-[#E8E4EF] px-2.5 py-0.5 rounded-md text-[12.5px]">
                     {formatThaiDate(quickCellTarget.workDate)}
                   </span>
                 </div>
-                <div className="flex flex-wrap items-center justify-between gap-2 text-[12.5px] text-slate-600">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-[12.5px] text-[#777287]">
                   <span>
                     ประเภทบุคลากร:{' '}
-                    <strong className="text-[#262238]">
+                    <strong className="text-[#292638]">
                       {quickCellData?.person.personnel_type_name ||
                         quickCellTarget.person.personnel_type_name ||
                         'ไม่ระบุประเภท'}
@@ -5322,7 +5321,7 @@ export function ShiftsView({
                         quickCellData.clearedAll
                           ? 'bg-amber-50 border-amber-300 text-amber-900'
                           : quickCellData.effectiveState === 'CUSTOM_ASSIGNED'
-                            ? 'bg-[#F2EDFA] border-[#8E70C9] text-[#543B7A]'
+                            ? 'bg-[#F1ECFA] border-[#8066B5] text-[#4E3978]'
                             : 'bg-emerald-50 border-dashed border-emerald-400 text-emerald-900'
                       }`}
                     >
@@ -5338,8 +5337,8 @@ export function ShiftsView({
 
               {/* สถานะกำลังโหลดจาก Backend */}
               {quickCellLoading && (
-                <div className="py-10 text-center space-y-2 text-slate-600 bg-[#F8F7FC] rounded-xl border border-[#E6DFF0]">
-                  <RefreshCw className="w-5 h-5 animate-spin mx-auto text-[#543B7A]" />
+                <div className="py-10 text-center space-y-2 text-[#777287] bg-[#F8F7FC] rounded-xl border border-[#E8E4EF]">
+                  <RefreshCw className="w-5 h-5 animate-spin mx-auto text-[#4E3978]" />
                   <div className="text-[13.5px] font-medium">
                     กำลังโหลดข้อมูลกะทำงานล่าสุดจากระบบ...
                   </div>
@@ -5361,7 +5360,7 @@ export function ShiftsView({
                     <button
                       type="button"
                       onClick={() => openQuickCellModal(quickCellTarget.person, quickCellTarget.workDate)}
-                      className="h-9 px-3.5 rounded-lg bg-[#543B7A] hover:bg-[#543B7A] text-white text-[12.5px] font-semibold inline-flex items-center gap-1.5"
+                      className="h-9 px-3.5 rounded-lg bg-[#4E3978] hover:bg-[#4E3978] text-white text-[12.5px] font-semibold inline-flex items-center gap-1.5"
                     >
                       <RefreshCw className="w-3.5 h-3.5" />
                       <span>ลองโหลดใหม่</span>
@@ -5369,7 +5368,7 @@ export function ShiftsView({
                     <button
                       type="button"
                       onClick={closeQuickCellModal}
-                      className="h-9 px-3.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-[12.5px] font-semibold"
+                      className="h-9 px-3.5 rounded-lg border border-[#D8D1E6] bg-white hover:bg-[#F8F7FC] text-[#292638] text-[12.5px] font-semibold"
                     >
                       ปิดหน้าต่าง
                     </button>
@@ -5401,10 +5400,10 @@ export function ShiftsView({
                               key={`${co.shiftCode}-${idx}`}
                               className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-white/90 border border-indigo-200/80 text-[12.5px]"
                             >
-                              <div className="flex items-center gap-1.5 font-semibold text-[#262238]">
+                              <div className="flex items-center gap-1.5 font-semibold text-[#292638]">
                                 {renderShiftIcon(iconKind, 'w-3.5 h-3.5')}
                                 <span>{formatCleanShiftName(co.shiftName)}</span>
-                                <span className="font-mono text-[#543B7A]">
+                                <span className="font-mono text-[#4E3978]">
                                   {co.startTime}–{co.endTime} น.
                                 </span>
                               </div>
@@ -5425,16 +5424,16 @@ export function ShiftsView({
                   {!quickCellConfirmStep ? (
                     <div className="space-y-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="font-bold text-[#262238] text-[14px]">
+                        <div className="font-bold text-[#292638] text-[14px]">
                           เลือกกะที่ต้องการให้มีในวันนี้
                         </div>
-                        <span className="font-mono text-[12px] font-bold text-[#543B7A] bg-[#F2EDFA] border border-[#E6DFF0] px-2 py-0.5 rounded-md tabular-nums">
+                        <span className="font-mono text-[12px] font-bold text-[#4E3978] bg-[#F1ECFA] border border-[#E8E4EF] px-2 py-0.5 rounded-md tabular-nums">
                           เลือกอยู่ {quickCellSelectedIds.length + quickCellKeepSpecialIds.length} กะ
                         </span>
                       </div>
 
                       {!effectiveEditable && (
-                        <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 text-slate-600 text-[12px]">
+                        <div className="p-2.5 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] text-[#777287] text-[12px]">
                           บัญชีของคุณมีสิทธิ์ดูตารางเวรเท่านั้น ไม่สามารถแก้ไขกะทำงานได้
                         </div>
                       )}
@@ -5462,8 +5461,8 @@ export function ShiftsView({
                                 effectiveEditable ? 'cursor-pointer' : 'cursor-default opacity-85'
                               } ${
                                 checked
-                                  ? 'bg-[#F2EDFA] border-[#543B7A]'
-                                  : 'bg-white border-[#E6DFF0] hover:border-[#8E70C9]/70'
+                                  ? 'bg-[#F1ECFA] border-[#4E3978]'
+                                  : 'bg-white border-[#E8E4EF] hover:border-[#8066B5]/70'
                               }`}
                             >
                               <input
@@ -5471,21 +5470,21 @@ export function ShiftsView({
                                 checked={checked}
                                 disabled={!effectiveEditable || quickCellBusy}
                                 onChange={() => toggleQuickCellTemplate(tid)}
-                                className="w-4 h-4 rounded border-slate-300 text-[#543B7A] focus:ring-[#543B7A] shrink-0"
+                                className="w-4 h-4 rounded border-[#D8D1E6] text-[#4E3978] focus:ring-[#4E3978] shrink-0"
                               />
                               {renderShiftIcon(iconKind, 'w-4 h-4')}
                               <div className="min-w-0 flex-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-0.5">
                                 <div className="flex items-center gap-2 min-w-0">
-                                  <span className="font-bold text-[13.5px] text-[#262238] truncate">
+                                  <span className="font-bold text-[13.5px] text-[#292638] truncate">
                                     {formatCleanShiftName(tpl.shiftName)}
                                   </span>
                                   {isCurrentlyActive && (
-                                    <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded bg-white border border-[#E6DFF0] text-[#543B7A]">
+                                    <span className="text-[11px] font-semibold px-1.5 py-0.5 rounded bg-white border border-[#E8E4EF] text-[#4E3978]">
                                       กะเดิมวันนี้
                                     </span>
                                   )}
                                 </div>
-                                <span className="font-mono font-bold text-[12.5px] text-[#543B7A] tabular-nums shrink-0">
+                                <span className="font-mono font-bold text-[12.5px] text-[#4E3978] tabular-nums shrink-0">
                                   {tpl.startTime}–{tpl.endTime} น.
                                   {isCross ? ' (+1 วัน)' : ''}
                                 </span>
@@ -5515,15 +5514,15 @@ export function ShiftsView({
                                     checked={kept}
                                     disabled={!effectiveEditable || quickCellBusy}
                                     onChange={() => toggleQuickCellSpecialAssignment(aid)}
-                                    className="w-4 h-4 rounded border-amber-400 text-[#543B7A] focus:ring-[#543B7A]"
+                                    className="w-4 h-4 rounded border-amber-400 text-[#4E3978] focus:ring-[#4E3978]"
                                   />
-                                  <span className="font-semibold text-[#262238]">
+                                  <span className="font-semibold text-[#292638]">
                                     {formatCleanShiftName(sp.shiftName)}
                                   </span>
-                                  <span className="font-mono text-[#543B7A]">
+                                  <span className="font-mono text-[#4E3978]">
                                     {sp.startTime}–{sp.endTime} น.
                                   </span>
-                                  <span className="font-mono text-[11px] text-slate-500 ml-auto">
+                                  <span className="font-mono text-[11px] text-[#777287] ml-auto">
                                     #{aid}
                                   </span>
                                 </label>
@@ -5567,12 +5566,12 @@ export function ShiftsView({
                       )}
 
                       {/* ปุ่มหลักเพียง "บันทึกเวร" และปุ่มรอง "ยกเลิก" */}
-                      <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-[#E6DFF0]">
+                      <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-[#E8E4EF]">
                         <button
                           type="button"
                           disabled={quickCellBusy}
                           onClick={closeQuickCellModal}
-                          className="h-10 px-4 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-[13px]"
+                          className="h-10 px-4 rounded-lg border border-[#D8D1E6] bg-white hover:bg-[#F8F7FC] text-[#292638] font-semibold text-[13px]"
                         >
                           {effectiveEditable ? 'ยกเลิก' : 'ปิด'}
                         </button>
@@ -5584,7 +5583,7 @@ export function ShiftsView({
                               setQuickCellError(null);
                               setQuickCellConfirmStep(true);
                             }}
-                            className="h-10 px-5 rounded-lg bg-[#543B7A] hover:bg-[#543B7A] disabled:opacity-40 text-white font-semibold text-[13px] inline-flex items-center gap-1.5 transition-colors"
+                            className="h-10 px-5 rounded-lg bg-[#4E3978] hover:bg-[#4E3978] disabled:opacity-40 text-white font-semibold text-[13px] inline-flex items-center gap-1.5 transition-colors"
                           >
                             <Check className="w-4 h-4" />
                             <span>
@@ -5597,38 +5596,38 @@ export function ShiftsView({
                   ) : (
                     /* ขั้นตอนที่ 2 (Inline Confirmation Preview): แสดงกะเดิม / กะหลังแก้ไข / สรุปการเปลี่ยนแปลง ก่อนกดยืนยันบันทึก */
                     <div className="space-y-3.5">
-                      <div className="p-3.5 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0] space-y-3">
-                        <div className="font-bold text-[#543B7A] text-[14px]">
+                      <div className="p-3.5 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-3">
+                        <div className="font-bold text-[#4E3978] text-[14px]">
                           สรุปการเปลี่ยนแปลงก่อนยืนยันบันทึก
                         </div>
 
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          <div className="p-2.5 rounded-lg bg-white border border-[#E6DFF0] space-y-1">
-                            <div className="text-[12px] font-bold text-slate-600">กะเดิม:</div>
+                          <div className="p-2.5 rounded-lg bg-white border border-[#E8E4EF] space-y-1">
+                            <div className="text-[12px] font-bold text-[#777287]">กะเดิม:</div>
                             {quickCellPreview && quickCellPreview.existingEffectiveShifts.length > 0 ? (
-                              <ul className="space-y-1 text-[12.5px] text-[#262238]">
+                              <ul className="space-y-1 text-[12.5px] text-[#292638]">
                                 {quickCellPreview.existingEffectiveShifts.map((s, idx) => (
                                   <li key={idx} className="flex items-center justify-between gap-1">
                                     <span>• {formatCleanShiftName(s.shiftName)}</span>
-                                    <span className="font-mono text-[11.5px] text-slate-500">
+                                    <span className="font-mono text-[11.5px] text-[#777287]">
                                       {s.startTime}–{s.endTime}
                                     </span>
                                   </li>
                                 ))}
                               </ul>
                             ) : (
-                              <div className="text-[12.5px] text-slate-500">— ไม่มีเวร</div>
+                              <div className="text-[12.5px] text-[#777287]">— ไม่มีเวร</div>
                             )}
                           </div>
 
-                          <div className="p-2.5 rounded-lg bg-[#F2EDFA]/60 border border-[#8E70C9] space-y-1">
-                            <div className="text-[12px] font-bold text-[#543B7A]">กะหลังแก้ไข:</div>
+                          <div className="p-2.5 rounded-lg bg-[#F1ECFA]/60 border border-[#8066B5] space-y-1">
+                            <div className="text-[12px] font-bold text-[#4E3978]">กะหลังแก้ไข:</div>
                             {quickCellPreview && quickCellPreview.resultingShifts.length > 0 ? (
-                              <ul className="space-y-1 text-[12.5px] text-[#262238] font-semibold">
+                              <ul className="space-y-1 text-[12.5px] text-[#292638] font-semibold">
                                 {quickCellPreview.resultingShifts.map((s, idx) => (
                                   <li key={idx} className="flex items-center justify-between gap-1">
                                     <span>• {formatCleanShiftName(s.shiftName)}</span>
-                                    <span className="font-mono text-[11.5px] text-[#543B7A]">
+                                    <span className="font-mono text-[11.5px] text-[#4E3978]">
                                       {s.startTime}–{s.endTime}
                                       {s.isCrossMidnight === 1 ? ' (+1)' : ''}
                                     </span>
@@ -5644,8 +5643,8 @@ export function ShiftsView({
                         </div>
 
                         {quickCellPreview && (
-                          <div className="pt-2 border-t border-[#E6DFF0] space-y-1 text-[12.5px]">
-                            <div className="font-bold text-[#262238]">การเปลี่ยนแปลง:</div>
+                          <div className="pt-2 border-t border-[#E8E4EF] space-y-1 text-[12.5px]">
+                            <div className="font-bold text-[#292638]">การเปลี่ยนแปลง:</div>
                             <ul className="space-y-0.5">
                               {quickCellPreview.shiftsToAdd.map((a, idx) => (
                                 <li key={`add-${idx}`} className="text-emerald-800 font-medium">
@@ -5658,7 +5657,7 @@ export function ShiftsView({
                                 </li>
                               ))}
                               {quickCellPreview.shiftsToKeep.map((k, idx) => (
-                                <li key={`keep-${idx}`} className="text-slate-600">
+                                <li key={`keep-${idx}`} className="text-[#777287]">
                                   • คง {formatCleanShiftName(k.shiftName)} ({k.startTime}–{k.endTime} น.) 1 กะ
                                 </li>
                               ))}
@@ -5673,7 +5672,7 @@ export function ShiftsView({
                           value={quickCellReason}
                           onChange={(e) => setQuickCellReason(e.target.value)}
                           placeholder="หมายเหตุการแก้ไข (ถ้ามี)..."
-                          className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-[13px] text-slate-800 focus:outline-none focus:border-[#543B7A]"
+                          className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] bg-white text-[13px] text-[#292638] focus:outline-none focus:border-[#4E3978]"
                         />
                       </div>
 
@@ -5686,12 +5685,12 @@ export function ShiftsView({
                         </div>
                       )}
 
-                      <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-[#E6DFF0]">
+                      <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-[#E8E4EF]">
                         <button
                           type="button"
                           disabled={quickCellBusy}
                           onClick={() => setQuickCellConfirmStep(false)}
-                          className="h-10 px-4 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-semibold text-[13px]"
+                          className="h-10 px-4 rounded-lg border border-[#D8D1E6] bg-white hover:bg-[#F8F7FC] text-[#292638] font-semibold text-[13px]"
                         >
                           ยกเลิก
                         </button>
@@ -5699,7 +5698,7 @@ export function ShiftsView({
                           type="button"
                           disabled={quickCellBusy || hasConflicts}
                           onClick={handleConfirmQuickCellSync}
-                          className="h-10 px-5 rounded-lg bg-[#543B7A] hover:bg-[#543B7A] disabled:opacity-40 text-white font-semibold text-[13px] inline-flex items-center gap-1.5 transition-colors"
+                          className="h-10 px-5 rounded-lg bg-[#4E3978] hover:bg-[#4E3978] disabled:opacity-40 text-white font-semibold text-[13px] inline-flex items-center gap-1.5 transition-colors"
                         >
                           <Check className="w-4 h-4" />
                           <span>{quickCellBusy ? 'กำลังบันทึก...' : 'ยืนยันบันทึก'}</span>
@@ -5725,19 +5724,19 @@ export function ShiftsView({
         maxWidthClass="max-w-2xl"
       >
         <div className="space-y-4 text-[13.5px]">
-          <div className="p-3.5 rounded-xl bg-[#F2EDFA] border border-[#E6DFF0] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="p-3.5 rounded-xl bg-[#F1ECFA] border border-[#E8E4EF] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="space-y-0.5">
-              <div className="font-bold text-slate-900">
+              <div className="font-bold text-[#292638]">
                 คอลัมน์มาตรฐานที่รองรับ: person_id, full_name, work_date, shift_code
               </div>
-              <div className="text-[12.5px] text-slate-600">
+              <div className="text-[12.5px] text-[#777287]">
                 รหัสกะมาตรฐาน: MOR (เช้า), AFT (บ่าย), NIG (ดึก), MORAFT (เช้า–บ่าย), AFTNIG (บ่าย–ดึก), FULL (ทั้งวัน), OFF (ไม่มีเวร)
               </div>
             </div>
             <button
               type="button"
               onClick={handleDownloadExcelTemplate}
-              className="h-9 px-3.5 rounded-lg border border-[#D5CBE8] bg-white hover:bg-[#F2EDFA] text-[#543B7A] text-[12.5px] font-semibold inline-flex items-center gap-1.5 shrink-0"
+              className="h-9 px-3.5 rounded-lg border border-[#D8D1E6] bg-white hover:bg-[#F1ECFA] text-[#4E3978] text-[12.5px] font-semibold inline-flex items-center gap-1.5 shrink-0"
             >
               <Download className="w-4 h-4" />
               <span>ดาวน์โหลด Template Excel</span>
@@ -5746,24 +5745,24 @@ export function ShiftsView({
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="block text-[13px] font-semibold text-slate-700 mb-1">
+              <label className="block text-[13px] font-semibold text-[#292638] mb-1">
                 เลือกไฟล์ Excel (.xlsx) <RequiredMark />
               </label>
               <input
                 type="file"
                 accept=".xlsx"
                 onChange={handleSelectExcelFile}
-                className="w-full text-[13px] file:mr-3 file:py-2 file:px-3.5 file:rounded-lg file:border-0 file:text-[12.5px] file:font-semibold file:bg-violet-100 file:text-[#543B7A] hover:file:bg-violet-200"
+                className="w-full text-[13px] file:mr-3 file:py-2 file:px-3.5 file:rounded-lg file:border-0 file:text-[12.5px] file:font-semibold file:bg-[#E9DFF5] file:text-[#4E3978] hover:file:bg-violet-200"
               />
             </div>
             <div>
-              <label className="block text-[13px] font-semibold text-slate-700 mb-1">
+              <label className="block text-[13px] font-semibold text-[#292638] mb-1">
                 รูปแบบการนำเข้าเมื่อมีเวรเดิมในวันเดียวกัน
               </label>
               <select
                 value={excelImportMode}
                 onChange={(e) => setExcelImportMode(e.target.value as 'REPLACE_DATE' | 'ADD_SHIFT')}
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white text-[13px]"
+                className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] bg-white text-[13px]"
               >
                 <option value="REPLACE_DATE">แทนที่เวรเดิมของวันนั้น (แนะนำ)</option>
                 <option value="ADD_SHIFT">เพิ่มกะควบคู่โดยไม่ลบเวรเดิม</option>
@@ -5782,7 +5781,7 @@ export function ShiftsView({
               type="button"
               disabled={!excelFileBase64 || excelBusy}
               onClick={handlePreviewExcelImport}
-              className="h-10 px-4 rounded-lg border border-[#D5CBE8] bg-[#F2EDFA] hover:bg-[#EDE5F8] text-[#543B7A] font-semibold text-[13px] disabled:opacity-50"
+              className="h-10 px-4 rounded-lg border border-[#D8D1E6] bg-[#F1ECFA] hover:bg-[#E9DFF5] text-[#4E3978] font-semibold text-[13px] disabled:opacity-50"
             >
               {excelBusy ? 'กำลังตรวจสอบไฟล์...' : '1. ตรวจสอบข้อมูลก่อนนำเข้า (Preview)'}
             </button>
@@ -5791,7 +5790,7 @@ export function ShiftsView({
                 type="button"
                 disabled={excelBusy || Number(excelPreview.summary?.validCount || 0) === 0}
                 onClick={handleConfirmExcelImport}
-                className="h-10 px-4 rounded-lg bg-[#8E70C9] hover:bg-[#795BB8] text-white font-semibold text-[13px] disabled:opacity-50"
+                className="h-10 px-4 rounded-lg bg-[#8066B5] hover:bg-[#6E54A3] text-white font-semibold text-[13px] disabled:opacity-50"
               >
                 {excelBusy
                   ? 'กำลังบันทึก...'
@@ -5801,11 +5800,11 @@ export function ShiftsView({
           </div>
 
           {excelPreview && (
-            <div className="space-y-3 pt-2 border-t border-slate-200">
+            <div className="space-y-3 pt-2 border-t border-[#E8E4EF]">
               <div className="grid grid-cols-3 gap-2.5 text-center">
-                <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
-                  <div className="text-[11.5px] text-slate-500">จำนวนแถวทั้งหมด</div>
-                  <div className="text-[17px] font-bold font-mono text-slate-900">
+                <div className="p-2.5 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF]">
+                  <div className="text-[11.5px] text-[#777287]">จำนวนแถวทั้งหมด</div>
+                  <div className="text-[17px] font-bold font-mono text-[#292638]">
                     {excelPreview.summary?.totalRows || 0}
                   </div>
                 </div>
@@ -5823,10 +5822,10 @@ export function ShiftsView({
                 </div>
               </div>
 
-              <div className="max-h-60 overflow-y-auto border border-slate-200 rounded-lg">
+              <div className="max-h-60 overflow-y-auto border border-[#E8E4EF] rounded-lg">
                 <table className="w-full text-left border-collapse text-[12.5px]">
-                  <thead className="bg-slate-50 sticky top-0">
-                    <tr className="border-b border-slate-200">
+                  <thead className="bg-[#F8F7FC] sticky top-0">
+                    <tr className="border-b border-[#E8E4EF]">
                       <th className="py-2 px-2.5">แถว</th>
                       <th className="py-2 px-2.5">บุคลากร</th>
                       <th className="py-2 px-2.5">วันที่</th>
@@ -5834,7 +5833,7 @@ export function ShiftsView({
                       <th className="py-2 px-2.5">ผลการตรวจสอบ</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-200">
+                  <tbody className="divide-y divide-[#E8E4EF]">
                     {(excelPreview.items || []).map((it: any, idx: number) => (
                       <tr key={idx}>
                         <td className="py-1.5 px-2.5 font-mono">{it.rowNumber}</td>
@@ -5879,7 +5878,7 @@ export function ShiftsView({
         {editingRule && (
           <form onSubmit={handleSaveRuleEdit} className="space-y-3.5 text-[13.5px]">
             <div>
-              <label className="block font-semibold text-slate-700 mb-1">
+              <label className="block font-semibold text-[#292638] mb-1">
                 ชื่อประเภทบุคลากร <RequiredMark />
               </label>
               <input
@@ -5889,12 +5888,12 @@ export function ShiftsView({
                 onChange={(e) =>
                   setEditingRule({ ...editingRule, personnel_type_name: e.target.value })
                 }
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white"
+                className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] bg-white"
               />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">
+                <label className="block font-semibold text-[#292638] mb-1">
                   เวลาเริ่มงานกะเช้า <RequiredMark />
                 </label>
                 <input
@@ -5904,11 +5903,11 @@ export function ShiftsView({
                   onChange={(e) =>
                     setEditingRule({ ...editingRule, default_start_time: e.target.value })
                   }
-                  className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white font-mono"
+                  className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] bg-white font-mono"
                 />
               </div>
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">
+                <label className="block font-semibold text-[#292638] mb-1">
                   เวลาเลิกงานกะเช้า <RequiredMark />
                 </label>
                 <input
@@ -5918,13 +5917,13 @@ export function ShiftsView({
                   onChange={(e) =>
                     setEditingRule({ ...editingRule, default_end_time: e.target.value })
                   }
-                  className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white font-mono"
+                  className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] bg-white font-mono"
                 />
               </div>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">
+                <label className="block font-semibold text-[#292638] mb-1">
                   เวลาผ่อนผันสาย (นาที) <RequiredMark />
                 </label>
                 <input
@@ -5939,11 +5938,11 @@ export function ShiftsView({
                       default_grace_minutes: Number(e.target.value),
                     })
                   }
-                  className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white font-mono"
+                  className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] bg-white font-mono"
                 />
               </div>
               <div>
-                <label className="block font-semibold text-slate-700 mb-1">
+                <label className="block font-semibold text-[#292638] mb-1">
                   เวลาตัดรอบสแกนเข้า <RequiredMark />
                 </label>
                 <input
@@ -5953,12 +5952,12 @@ export function ShiftsView({
                   onChange={(e) =>
                     setEditingRule({ ...editingRule, default_cutoff_time: e.target.value })
                   }
-                  className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white font-mono"
+                  className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] bg-white font-mono"
                 />
               </div>
             </div>
             <div>
-              <label className="block font-semibold text-slate-700 mb-1">
+              <label className="block font-semibold text-[#292638] mb-1">
                 วันที่มีผลบังคับใช้ (ไม่กระทบการคำนวณย้อนหลังก่อนวันนี้)
               </label>
               <input
@@ -5967,21 +5966,21 @@ export function ShiftsView({
                 onChange={(e) =>
                   setEditingRule({ ...editingRule, effective_from: e.target.value })
                 }
-                className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white font-mono"
+                className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] bg-white font-mono"
               />
             </div>
-            <div className="flex justify-end gap-2 pt-3 border-t border-slate-200">
+            <div className="flex justify-end gap-2 pt-3 border-t border-[#E8E4EF]">
               <button
                 type="button"
                 onClick={() => setEditingRule(null)}
-                className="h-10 px-4 rounded-lg border border-slate-300 bg-white text-slate-700 font-semibold"
+                className="h-10 px-4 rounded-lg border border-[#D8D1E6] bg-white text-[#292638] font-semibold"
               >
                 ยกเลิก
               </button>
               <button
                 type="submit"
                 disabled={ruleSaving}
-                className="h-10 px-5 rounded-lg bg-[#8E70C9] hover:bg-[#795BB8] text-white font-semibold"
+                className="h-10 px-5 rounded-lg bg-[#8066B5] hover:bg-[#6E54A3] text-white font-semibold"
               >
                 {ruleSaving ? 'กำลังบันทึก...' : 'บันทึกการเปลี่ยนแปลง'}
               </button>
@@ -6018,8 +6017,8 @@ export function ShiftsView({
               : 'ยืนยันแทนที่กะเดิม'
         }
       >
-        <div className="space-y-3 text-[13.5px] text-[#262238]">
-          <div className="p-3.5 rounded-xl bg-[#F8F7FC] border border-[#E6DFF0] space-y-1.5">
+        <div className="space-y-3 text-[13.5px] text-[#292638]">
+          <div className="p-3.5 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-1.5">
             <div>
               จำนวนบุคลากร: <strong className="font-mono">{selectedPersonIds.length}</strong> คน ·
               จำนวนวันที่: <strong className="font-mono">{effectiveSelectedDates.length}</strong>{' '}
@@ -6038,7 +6037,7 @@ export function ShiftsView({
             {previewData && (
               <div>
                 รายการพร้อมดำเนินการ:{' '}
-                <strong className="font-mono text-[#543B7A]">
+                <strong className="font-mono text-[#4E3978]">
                   {previewData.summary.readyCount}
                 </strong>{' '}
                 รายการ

@@ -3,14 +3,6 @@
  * ไฟล์: frontend/src/pages/ReportsView.tsx
  * หน้าที่: หน้าจอรายงานสถิติการมาสาย (Lateness Report) และการส่งข้อมูลเข้า HOSOffice (Direct Push)
  * ============================================================================
- * ประกอบด้วย 2 คอมโพเนนต์หลัก:
- * 1. ReportsView (mode === 'reports'):
- *    - รายงานสรุปสถิติการมาสายของบุคลากรโรงพยาบาลสามชุก รองรับทุกประเภทบุคลากร กลุ่มงาน ค้นหา และสลับลำดับ
- *    - ส่งออกไฟล์ CSV (Export CSV) ที่เปิดอ่านภาษาไทยใน Excel ได้ทันที (UTF-8 BOM)
- * 2. PushView (mode === 'hosofficePush'):
- *    - หน้าจอส่งข้อมูลสรุปเวลาปฏิบัติงานเข้าสู่ระบบ HOSOffice โดยตรงแบบ 4 ขั้นตอน
- *    - มี ConfirmDialog, ProgressDialog, การปิดปุ่มส่งจริงเมื่อถูกล็อกเพื่อความปลอดภัย และการกู้คืนสถานะงาน
- * ============================================================================
  */
 
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
@@ -26,11 +18,17 @@ import {
   AlertTriangle,
   ChevronDown,
   ChevronUp,
+  Clock,
+  Users,
+  BarChart3,
 } from 'lucide-react';
 import { apiRequest, downloadLatenessCsv, ApiClientError, type UserRole } from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
 import {
   PageHeader,
+  SectionHeader,
+  MetricStrip,
+  StatusBadge,
   PeriodFilterBar,
   SortableHeader,
   TablePaginationBar,
@@ -83,7 +81,6 @@ export function ReportsView({
   const [inspectPayloadModal, setInspectPayloadModal] = useState<any | null>(null);
   const [showTechnicalError, setShowTechnicalError] = useState(false);
 
-  // HOSOffice Push Confirm & Progress Dialog state
   const [confirmPushOpen, setConfirmPushOpen] = useState(false);
   const [pushingLive, setPushingLive] = useState(false);
   const [pushProgressOpen, setPushProgressOpen] = useState(false);
@@ -93,7 +90,6 @@ export function ReportsView({
   const [pushSummary, setPushSummary] = useState<string | null>(null);
   const [pushError, setPushError] = useState<string | null>(null);
 
-  // Sorting & Pagination for Ranking Table
   const [sortKey, setSortKey] = useState('totalLateMinutes');
   const [sortDir, setSortDir] = useState<'ASC' | 'DESC'>('DESC');
   const [page, setPage] = useState(1);
@@ -144,7 +140,6 @@ export function ReportsView({
     loadData();
   }, [loadData]);
 
-  // กู้คืนสถานะงานส่งข้อมูลกลับ HOSOffice หากรีเฟรชหน้าจอ
   useEffect(() => {
     if (mode !== 'hosofficePush') return;
     let timer: ReturnType<typeof setInterval> | null = null;
@@ -305,27 +300,46 @@ export function ReportsView({
           }
         />
 
-        {/* Guided 4-Step Progress Bar */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {/* Unified Single-Elevation 4-Step Horizontal Stepper */}
+        <div className="his-surface grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-[#E8E4EF] overflow-hidden">
           {[
             { num: '1', title: 'เลือกช่วงข้อมูล', desc: effectiveRange.thaiPeriodLabel, active: true },
-            { num: '2', title: 'ตรวจสอบ Preview', desc: previewBatch ? `พร้อมส่ง ${previewBatch.validCount} รายการ` : 'ยังไม่ได้สร้างชุดจำลอง', active: Boolean(previewBatch) },
-            { num: '3', title: 'ยืนยันส่งจริง', desc: livePushEnabled ? 'พร้อมส่งเมื่อตรวจสอบครบ' : 'ล็อกเพื่อความปลอดภัย', active: livePushEnabled && Boolean(previewBatch) },
-            { num: '4', title: 'ดูผลและประวัติ', desc: `${pushHistoryData?.items?.length || 0} รอบล่าสุด`, active: (pushHistoryData?.items?.length || 0) > 0 },
+            {
+              num: '2',
+              title: 'ตรวจสอบ Preview',
+              desc: previewBatch ? `พร้อมส่ง ${previewBatch.validCount} รายการ` : 'ยังไม่ได้สร้างชุดจำลอง',
+              active: Boolean(previewBatch),
+            },
+            {
+              num: '3',
+              title: 'ยืนยันส่งจริง',
+              desc: livePushEnabled ? 'พร้อมส่งเมื่อตรวจสอบครบ' : 'ล็อกเพื่อความปลอดภัย',
+              active: livePushEnabled && Boolean(previewBatch),
+            },
+            {
+              num: '4',
+              title: 'ดูผลและประวัติ',
+              desc: `${pushHistoryData?.items?.length || 0} รอบล่าสุด`,
+              active: (pushHistoryData?.items?.length || 0) > 0,
+            },
           ].map((step) => (
             <div
               key={step.num}
-              className={`p-3.5 rounded-xl border ${
-                step.active ? 'bg-[#F2EDFA]/70 border-[#E6DFF0]' : 'bg-white border-[#E6DFF0]'
-              }`}
+              className={`px-4 py-3.5 ${step.active ? 'bg-[#F1ECFA]/50' : 'bg-white'}`}
             >
-              <div className="flex items-center gap-2">
-                <span className="w-6 h-6 rounded-full bg-[#8E70C9] text-white font-mono text-[12px] font-bold flex items-center justify-center shrink-0">
+              <div className="flex items-center gap-2.5">
+                <span
+                  className={`w-6 h-6 rounded-full font-mono text-[12px] font-bold flex items-center justify-center shrink-0 ${
+                    step.active
+                      ? 'bg-[#8066B5] text-white'
+                      : 'bg-[#F1ECFA] text-[#4E3978]'
+                  }`}
+                >
                   {step.num}
                 </span>
-                <span className="text-[13.5px] font-bold text-[#262238]">{step.title}</span>
+                <span className="text-[13.5px] font-bold text-[#292638]">{step.title}</span>
               </div>
-              <div className="text-[12px] text-[#746B83] mt-1 pl-8 truncate">{step.desc}</div>
+              <div className="text-[12.5px] text-[#777287] mt-1 pl-8.5 truncate">{step.desc}</div>
             </div>
           ))}
         </div>
@@ -345,13 +359,13 @@ export function ReportsView({
           customTo={customTo}
           onCustomToChange={setCustomTo}
           extraFilters={
-            <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto">
+            <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
               <button
                 type="button"
                 onClick={handlePreviewHosOfficePush}
                 className="ent-btn-secondary w-full sm:w-auto"
               >
-                <Eye className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
+                <Eye className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
                 <span>ขั้นที่ 2: ตรวจสอบชุดข้อมูล (Preview)</span>
               </button>
               <button
@@ -380,30 +394,29 @@ export function ReportsView({
           }
         />
 
-        {/* Friendly Lock Explanation Banner when Live Push is disabled */}
         {!loading && !livePushEnabled && (
-          <div className="ent-card p-4 bg-[#FEF8ED] border-[#F3DFBC] flex items-start gap-3 text-[13.5px]">
+          <div className="rounded-xl p-4 bg-[#FEF7EA] border border-[#B87516]/25 flex items-start gap-3 text-[13.5px]">
             <Lock className="w-4.5 h-4.5 text-[#B87516] shrink-0 mt-0.5" aria-hidden="true" />
             <div className="space-y-0.5">
               <div className="font-bold text-[#B87516]">
                 การส่งข้อมูลจริง (Live Push) ถูกล็อกไว้เพื่อความปลอดภัยของฐานข้อมูล HOSOffice
               </div>
-              <p className="text-[#262238] leading-relaxed">
-                ท่านยังสามารถกด <strong>“ตรวจสอบชุดข้อมูล (Preview)”</strong> เพื่อตรวจสอบความครบถ้วนของข้อมูลได้ตลอดเวลา โดยไม่กระทบฐานข้อมูลปลายทาง หากต้องการเปิดใช้งานส่งจริง โปรดประสานผู้ดูแลระบบส่วนกลาง
+              <p className="text-[#292638] leading-relaxed">
+                ท่านยังสามารถกด <strong>“ตรวจสอบชุดข้อมูล (Preview)”</strong> เพื่อตรวจสอบความครบถ้วนของข้อมูลได้ตลอดเวลา
+                โดยไม่กระทบฐานข้อมูลปลายทาง หากต้องการเปิดใช้งานส่งจริง โปรดประสานผู้ดูแลระบบส่วนกลาง
               </p>
             </div>
           </div>
         )}
 
-        {/* Friendly Error Banner + Expandable Technical Detail */}
         {error && (
-          <div className="rounded-xl border border-[#F3CCD0] bg-[#FDF2F3] p-4 space-y-2 text-[13.5px]">
+          <div className="rounded-xl border border-[#C74455]/25 bg-[#FDF2F4] p-4 space-y-2 text-[13.5px]">
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-start gap-2.5">
                 <AlertTriangle className="w-4.5 h-4.5 text-[#C74455] shrink-0 mt-0.5" aria-hidden="true" />
                 <div>
                   <div className="font-bold text-[#C74455]">ไม่สามารถดำเนินการส่งข้อมูลได้</div>
-                  <div className="text-[#262238] mt-0.5">{error.message}</div>
+                  <div className="text-[#292638] mt-0.5">{error.message}</div>
                 </div>
               </div>
               {error.code && (
@@ -422,7 +435,7 @@ export function ReportsView({
               )}
             </div>
             {showTechnicalError && error.code && (
-              <div className="p-2.5 rounded-lg bg-white border border-[#F3CCD0] font-mono text-[12px] text-[#746B83]">
+              <div className="p-2.5 rounded-lg bg-white border border-[#C74455]/20 font-mono text-[12px] text-[#777287]">
                 Error Code: {error.code}
               </div>
             )}
@@ -431,65 +444,70 @@ export function ReportsView({
 
         <NotificationBanner message={notice} onClose={() => setNotice(null)} />
 
-        {/* Step 2 Results: Summary Counts + Valid / Invalid Lists */}
         {previewBatch && (
-          <div className="space-y-4">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div className="ent-card p-4">
-                <div className="text-[12.5px] font-medium text-[#746B83]">จำนวนข้อมูลที่ตรวจสอบทั้งหมด</div>
-                <div className="mt-1 text-[24px] font-bold text-[#262238] tabular-nums">
-                  {totalPreviewCount} รายการ
-                </div>
-              </div>
-              <div className="ent-card p-4">
-                <div className="text-[12.5px] font-medium text-[#746B83]">พร้อมส่งกลับ HOSOffice</div>
-                <div className="mt-1 text-[24px] font-bold text-[#198568] tabular-nums flex items-center gap-2">
-                  <CheckCircle2 className="w-5 h-5" aria-hidden="true" />
-                  <span>{previewBatch.validCount} รายการ</span>
-                </div>
-              </div>
-              <div className="ent-card p-4">
-                <div className="text-[12.5px] font-medium text-[#746B83]">ไม่พร้อมส่ง (ต้องตรวจสอบก่อน)</div>
-                <div className="mt-1 text-[24px] font-bold text-[#C74455] tabular-nums flex items-center gap-2">
-                  <AlertTriangle className="w-5 h-5" aria-hidden="true" />
-                  <span>{previewBatch.invalidCount} รายการ</span>
-                </div>
-              </div>
-            </div>
+          <div className="space-y-5">
+            <MetricStrip
+              columns={3}
+              items={[
+                {
+                  id: 'total-preview',
+                  label: 'จำนวนข้อมูลที่ตรวจสอบทั้งหมด',
+                  value: totalPreviewCount,
+                  unit: 'รายการ',
+                  tone: 'default',
+                },
+                {
+                  id: 'valid-preview',
+                  label: 'พร้อมส่งกลับ HOSOffice',
+                  value: previewBatch.validCount,
+                  unit: 'รายการ',
+                  tone: 'success',
+                  icon: <CheckCircle2 className="w-4 h-4 text-[#198568]" />,
+                },
+                {
+                  id: 'invalid-preview',
+                  label: 'ไม่พร้อมส่ง (ต้องตรวจสอบก่อน)',
+                  value: previewBatch.invalidCount,
+                  unit: 'รายการ',
+                  tone: Number(previewBatch.invalidCount) > 0 ? 'danger' : 'default',
+                  icon: <AlertTriangle className="w-4 h-4 text-[#C74455]" />,
+                },
+              ]}
+            />
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              <div className="ent-card p-5 space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <h2 className="text-[16.5px] font-bold text-[#262238]">
-                    รายการที่พร้อมส่ง ({previewBatch.validCount} รายการ)
-                  </h2>
-                  <button
-                    type="button"
-                    onClick={() => setInspectPayloadModal(previewBatch)}
-                    className="text-[13px] font-semibold text-[#543B7A] hover:text-[#795BB8] hover:underline inline-flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <FileText className="w-4 h-4" aria-hidden="true" />
-                    <span>ดูโครงสร้าง Payload เต็มจอ</span>
-                  </button>
-                </div>
-                <pre className="p-4 bg-[#262238] text-[#F8F7FC] rounded-xl text-[12.5px] font-mono overflow-x-auto max-h-72">
+              <div className="his-surface p-5 space-y-3">
+                <SectionHeader
+                  title={`รายการที่พร้อมส่ง (${previewBatch.validCount} รายการ)`}
+                  actions={
+                    <button
+                      type="button"
+                      onClick={() => setInspectPayloadModal(previewBatch)}
+                      className="text-[13px] font-semibold text-[#8066B5] hover:text-[#4E3978] hover:underline inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <FileText className="w-4 h-4" aria-hidden="true" />
+                      <span>ดู Payload เต็มจอ</span>
+                    </button>
+                  }
+                />
+                <pre className="p-4 bg-[#292638] text-[#F8F7FC] rounded-xl text-[12.5px] font-mono overflow-x-auto max-h-72">
                   {JSON.stringify(previewBatch.validItems, null, 2)}
                 </pre>
               </div>
 
-              <div className="ent-card p-5 space-y-3">
-                <h2 className="text-[16.5px] font-bold text-[#C74455]">
-                  รายการที่ไม่พร้อมส่งและเหตุผล ({previewBatch.invalidCount} รายการ)
-                </h2>
+              <div className="his-surface p-5 space-y-3">
+                <SectionHeader
+                  title={`รายการที่ไม่พร้อมส่งและเหตุผล (${previewBatch.invalidCount} รายการ)`}
+                />
                 {previewBatch.invalidItems?.length === 0 ? (
-                  <div className="p-6 rounded-xl bg-[#EDF8F4] border border-[#C2E6DA] text-[13.5px] text-[#198568] font-medium">
+                  <div className="p-5 rounded-xl bg-[#EEF8F4] border border-[#198568]/20 text-[13.5px] text-[#198568] font-medium">
                     ข้อมูลทุกรายการผ่านเกณฑ์ความสมบูรณ์ พร้อมสำหรับการส่งกลับ HOSOffice
                   </div>
                 ) : (
-                  <div className="divide-y divide-[#E6DFF0] text-[13.5px] max-h-72 overflow-y-auto">
+                  <div className="divide-y divide-[#E8E4EF] text-[13.5px] max-h-72 overflow-y-auto">
                     {previewBatch.invalidItems?.map((inv: any) => (
                       <div key={inv.attendanceId} className="py-3">
-                        <div className="font-semibold text-[#262238]">
+                        <div className="font-semibold text-[#292638]">
                           เวร #{inv.attendanceId} · {inv.fullName} ({inv.personId}) —{' '}
                           {formatThaiDate(inv.workDate)}
                         </div>
@@ -505,45 +523,54 @@ export function ReportsView({
 
         {/* Step 4: Push History Table */}
         <div className="ent-table-wrapper">
-          <div className="px-5 py-4 border-b border-[#E6DFF0] bg-[#F8F7FC]">
-            <h2 className="text-[17px] font-bold text-[#262238]">
-              ขั้นที่ 4: ประวัติการตรวจสอบและส่งข้อมูลกลับ HOSOffice
-            </h2>
+          <div className="px-5 py-4 border-b border-[#E8E4EF] bg-white">
+            <SectionHeader title="ขั้นที่ 4: ประวัติการตรวจสอบและส่งข้อมูลกลับ HOSOffice" />
           </div>
           {loading ? (
             <TableLoadingSkeleton rows={4} cols={6} />
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse text-[14px]">
+              <table className="his-table">
                 <thead>
-                  <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
-                    <th className="py-3.5 px-5 font-semibold text-[13px]">รหัสอ้างอิงชุดข้อมูล</th>
-                    <th className="py-3.5 px-5 font-semibold text-[13px]">โหมดการทำงาน</th>
-                    <th className="py-3.5 px-5 font-semibold text-[13px]">ช่วงวันที่ข้อมูล</th>
-                    <th className="py-3.5 px-5 font-semibold text-[13px] text-right">ทั้งหมด / ผ่าน / ไม่ผ่าน</th>
-                    <th className="py-3.5 px-5 font-semibold text-[13px]">สถานะ</th>
-                    <th className="py-3.5 px-5 font-semibold text-[13px]">ผู้ดำเนินการ · วันเวลา</th>
+                  <tr>
+                    <th>รหัสอ้างอิงชุดข้อมูล</th>
+                    <th>โหมดการทำงาน</th>
+                    <th>ช่วงวันที่ข้อมูล</th>
+                    <th className="text-right">ทั้งหมด / ผ่าน / ไม่ผ่าน</th>
+                    <th>สถานะ</th>
+                    <th>ผู้ดำเนินการ · วันเวลา</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#E6DFF0]">
+                <tbody>
                   {!pushHistoryData?.items || pushHistoryData.items.length === 0 ? (
                     <TableEmptyState colSpan={6} title="ยังไม่มีประวัติการสร้างชุดข้อมูลส่งกลับ HOSOffice" />
                   ) : (
                     pushHistoryData.items.map((p: any) => (
-                      <tr key={p.id} className="hover:bg-[#F8F7FC]">
-                        <td className="py-3.5 px-5 font-mono font-semibold text-[#262238]">
-                          {p.idempotency_key}
-                        </td>
-                        <td className="py-3.5 px-5 font-mono text-[#746B83]">{p.push_mode}</td>
-                        <td className="py-3.5 px-5 font-mono tabular-nums text-[#262238]">
+                      <tr key={p.id}>
+                        <td className="font-mono font-semibold text-[#292638]">{p.idempotency_key}</td>
+                        <td className="font-mono text-[#777287]">{p.push_mode}</td>
+                        <td className="font-mono tabular-nums">
                           {formatThaiDate(p.date_from)} ถึง {formatThaiDate(p.date_to)}
                         </td>
-                        <td className="py-3.5 px-5 text-right font-mono tabular-nums">
-                          {p.total_records} / <span className="text-[#198568] font-bold">{p.valid_records}</span> /{' '}
+                        <td className="text-right font-mono tabular-nums">
+                          {p.total_records} /{' '}
+                          <span className="text-[#198568] font-bold">{p.valid_records}</span> /{' '}
                           <span className="text-[#C74455] font-bold">{p.invalid_records}</span>
                         </td>
-                        <td className="py-3.5 px-5 font-semibold text-[#543B7A]">{p.status}</td>
-                        <td className="py-3.5 px-5 font-mono tabular-nums text-[#746B83]">
+                        <td>
+                          <StatusBadge
+                            tone={
+                              p.status === 'SUCCESS' || p.status === 'PUSHED'
+                                ? 'success'
+                                : p.status === 'FAILED'
+                                  ? 'danger'
+                                  : 'brand'
+                            }
+                            label={p.status}
+                            compact
+                          />
+                        </td>
+                        <td className="font-mono tabular-nums text-[#777287]">
                           {p.initiated_by} · {formatThaiDateTime(p.created_at)}
                         </td>
                       </tr>
@@ -563,7 +590,7 @@ export function ReportsView({
         >
           {inspectPayloadModal && (
             <div className="space-y-3 text-[14px]">
-              <pre className="p-4 bg-[#262238] text-[#F8F7FC] rounded-xl font-mono text-[12.5px] overflow-x-auto max-h-96">
+              <pre className="p-4 bg-[#292638] text-[#F8F7FC] rounded-xl font-mono text-[12.5px] overflow-x-auto max-h-96">
                 {JSON.stringify(inspectPayloadModal, null, 2)}
               </pre>
             </div>
@@ -729,7 +756,7 @@ export function ReportsView({
               className="ent-btn-secondary w-full sm:w-auto"
               title="สลับลำดับการจัดเรียง"
             >
-              <ArrowUpDown className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
+              <ArrowUpDown className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
               <span>{sortDir === 'DESC' ? 'เรียง: มาก → น้อย' : 'เรียง: น้อย → มาก'}</span>
             </button>
           </>
@@ -739,102 +766,96 @@ export function ReportsView({
       <ErrorBanner error={error} onRetry={loadData} />
       <NotificationBanner message={notice} onClose={() => setNotice(null)} />
 
+      {/* Unified Single-Elevation KPI Strip */}
       {kpi && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-          <div className="ent-card p-5">
-            <div className="text-[13px] font-semibold text-[#746B83]">
-              จำนวนบุคลากรที่มาสาย (ไม่ซ้ำคน)
-            </div>
-            <div className="mt-1.5 text-[28px] font-bold text-[#B87516] tabular-nums">
-              {kpi.latePeople} คน
-            </div>
-            <div className="text-[12.5px] text-[#746B83] mt-1 tabular-nums">
-              เฉลี่ย {kpi.avgLateMinutesPerLatePerson} นาที/คน
-            </div>
-          </div>
-          <div className="ent-card p-5">
-            <div className="text-[13px] font-semibold text-[#746B83]">
-              จำนวนครั้งที่มาสายรวมทั้งหมด
-            </div>
-            <div className="mt-1.5 text-[28px] font-bold text-[#262238] tabular-nums">
-              {kpi.lateOccurrences} ครั้ง
-            </div>
-            <div className="text-[12.5px] text-[#746B83] mt-1 tabular-nums">
-              จากเวรปฏิบัติงานทั้งหมด {kpi.totalShifts} เวร
-            </div>
-          </div>
-          <div className="ent-card p-5">
-            <div className="text-[13px] font-semibold text-[#746B83]">
-              นาทีสายสะสมรวมทั้งองค์กร
-            </div>
-            <div className="mt-1.5 text-[28px] font-bold text-[#262238] tabular-nums">
-              {kpi.totalLateMinutes} นาที
-            </div>
-            <div className="text-[12.5px] text-[#746B83] mt-1">
-              คำนวณหลังหักเวลาผ่อนผันตามกะแล้ว
-            </div>
-          </div>
-          <div className="ent-card p-5">
-            <div className="text-[13px] font-semibold text-[#746B83]">
-              ค่าเฉลี่ยนาทีสายต่อครั้ง
-            </div>
-            <div className="mt-1.5 text-[28px] font-bold text-[#543B7A] tabular-nums">
-              {kpi.avgLateMinutesPerOccurrence} นาที/ครั้ง
-            </div>
-            <div className="text-[12.5px] text-[#746B83] mt-1">
-              นาทีสายรวม ÷ จำนวนครั้งที่สาย
-            </div>
-          </div>
-        </div>
+        <MetricStrip
+          columns={4}
+          items={[
+            {
+              id: 'late-people',
+              label: 'บุคลากรที่มาสาย (ไม่ซ้ำคน)',
+              value: kpi.latePeople,
+              unit: 'คน',
+              sublabel: `เฉลี่ย ${kpi.avgLateMinutesPerLatePerson} นาที/คน`,
+              tone: 'warning',
+              icon: <Users className="w-4 h-4 text-[#B87516]" />,
+            },
+            {
+              id: 'late-occ',
+              label: 'จำนวนครั้งที่มาสายรวม',
+              value: kpi.lateOccurrences,
+              unit: 'ครั้ง',
+              sublabel: `จากเวรปฏิบัติงานทั้งหมด ${kpi.totalShifts} เวร`,
+              tone: 'default',
+              icon: <Clock className="w-4 h-4 text-[#8066B5]" />,
+            },
+            {
+              id: 'late-mins',
+              label: 'นาทีสายสะสมรวมทั้งองค์กร',
+              value: kpi.totalLateMinutes,
+              unit: 'นาที',
+              sublabel: 'คำนวณหลังหักเวลาผ่อนผันตามกะแล้ว',
+              tone: 'default',
+              icon: <BarChart3 className="w-4 h-4 text-[#8066B5]" />,
+            },
+            {
+              id: 'late-avg',
+              label: 'ค่าเฉลี่ยนาทีสายต่อครั้ง',
+              value: kpi.avgLateMinutesPerOccurrence,
+              unit: 'นาที/ครั้ง',
+              sublabel: 'นาทีสายรวม ÷ จำนวนครั้งที่สาย',
+              tone: 'brand',
+            },
+          ]}
+        />
       )}
 
       {deptBreakdown.length > 0 && (
-        <div className="ent-card p-5 sm:p-6 space-y-4">
-          <div>
-            <h2 className="text-[17px] sm:text-[18px] font-bold text-[#262238]">
-              แผนภูมิเปรียบเทียบสถิติการมาสายแยกตามกลุ่มงาน / หน่วยงาน
-            </h2>
-            <p className="text-[13px] text-[#746B83]">
-              แสดงนาทีสายสะสมเทียบกับจำนวนคนที่สายไม่ซ้ำและจำนวนครั้งที่สายในแต่ละหน่วยงาน
-            </p>
-          </div>
-          <div className="space-y-3.5">
+        <section className="his-surface p-5 sm:p-6 space-y-4">
+          <SectionHeader
+            title="เปรียบเทียบสถิติการมาสายแยกตามกลุ่มงาน / หน่วยงาน"
+            subtitle="แสดงนาทีสายสะสมเทียบกับจำนวนคนที่สายไม่ซ้ำและจำนวนครั้งที่สายในแต่ละหน่วยงาน"
+          />
+          <div className="space-y-3.5 pt-1">
             {deptBreakdown.map((d: any) => {
               const barPct = Math.round((Number(d.totalLateMinutes || 0) / maxDeptLateMins) * 100);
               return (
                 <div key={d.departmentName} className="space-y-1.5">
                   <div className="flex flex-wrap items-center justify-between gap-2 text-[13.5px]">
-                    <span className="font-semibold text-[#262238]">{d.departmentName}</span>
+                    <span className="font-semibold text-[#292638]">{d.departmentName}</span>
                     <div className="flex flex-wrap items-center gap-3 sm:gap-4 font-mono text-[13px] tabular-nums">
-                      <span className="text-[#746B83]">เวรรวม {d.totalShifts} เวร</span>
+                      <span className="text-[#777287]">เวรรวม {d.totalShifts} เวร</span>
                       <span className="text-[#B87516] font-semibold">
                         สาย {d.latePeople} คน ({d.lateOccurrences} ครั้ง)
                       </span>
-                      <span className="font-bold text-[#543B7A]">
+                      <span className="font-bold text-[#4E3978]">
                         รวม {d.totalLateMinutes} นาที
                       </span>
                     </div>
                   </div>
-                  <div className="h-3 w-full bg-[#F2EDFA] rounded-full overflow-hidden border border-[#E6DFF0]">
+                  <div className="h-2.5 w-full bg-[#F1ECFA] rounded-full overflow-hidden">
                     <div
-                      style={{ width: `${Math.max(d.totalLateMinutes > 0 ? 5 : 0, barPct)}%` }}
-                      className="h-full bg-[#8E70C9] rounded-full transition-all"
+                      style={{ width: `${Math.max(d.totalLateMinutes > 0 ? 4 : 0, barPct)}%` }}
+                      className="h-full bg-[#8066B5] rounded-full transition-all"
                     />
                   </div>
                 </div>
               );
             })}
           </div>
-        </div>
+        </section>
       )}
 
       <div className="ent-table-wrapper">
-        <div className="px-4 sm:px-6 py-4 border-b border-[#E6DFF0] bg-[#F8F7FC] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-          <h2 className="text-[17px] sm:text-[18px] font-bold text-[#262238]">
-            ตารางจัดอันดับสถิติการมาสายรายบุคคล ({filteredAndSortedRanking.length} คน)
-          </h2>
+        <div className="px-5 py-4 border-b border-[#E8E4EF] bg-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <SectionHeader
+            title={`ตารางจัดอันดับสถิติการมาสายรายบุคคล (${filteredAndSortedRanking.length} คน)`}
+          />
           <div className="relative w-full sm:w-64">
-            <Search className="w-4 h-4 text-[#746B83] absolute left-3.5 top-3" aria-hidden="true" />
+            <Search
+              className="w-4 h-4 text-[#777287] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+              aria-hidden="true"
+            />
             <input
               type="text"
               aria-label="ค้นหาชื่อบุคลากรในรายงาน"
@@ -844,7 +865,7 @@ export function ReportsView({
                 setPage(1);
               }}
               placeholder="ค้นหาชื่อ หรือ รหัสบุคลากร..."
-              className="ent-input pl-10 pr-4 w-full"
+              className="ent-input ent-input-with-icon pr-4 w-full"
             />
           </div>
         </div>
@@ -853,42 +874,31 @@ export function ReportsView({
           <TableLoadingSkeleton rows={6} cols={6} />
         ) : (
           <>
-            <div className="md:hidden divide-y divide-[#E6DFF0]">
+            <div className="md:hidden divide-y divide-[#E8E4EF]">
               {pagedRanking.length === 0 ? (
-                <div className="py-10 px-4 text-center text-[14px] text-[#746B83]">
+                <div className="py-10 px-4 text-center text-[14px] text-[#777287]">
                   ไม่พบข้อมูลการจัดอันดับในช่วงเวลาที่เลือก
                 </div>
               ) : (
                 pagedRanking.map((r: any, idx: number) => (
-                  <div key={r.personId} className="p-4 space-y-2.5 bg-white">
+                  <div key={r.personId} className="p-4 space-y-2 bg-white">
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <div className="font-bold text-[15px] text-[#262238]">
+                        <div className="font-bold text-[14.5px] text-[#292638]">
                           #{(page - 1) * numericSize + idx + 1} · {r.fullName}
                         </div>
-                        <div className="text-[12.5px] text-[#746B83]">
+                        <div className="text-[12.5px] text-[#777287]">
                           {r.departmentName} · {r.personnelTypeName}
                         </div>
                       </div>
-                      <span className="font-mono font-bold text-[13.5px] text-[#B87516] bg-[#FEF8ED] px-2.5 py-0.5 rounded-md border border-[#F3DFBC] tabular-nums shrink-0">
-                        รวม {r.totalLateMinutes} น.
-                      </span>
+                      <StatusBadge tone="warning" label={`รวม ${r.totalLateMinutes} น.`} compact />
                     </div>
-                    <div className="grid grid-cols-3 gap-2 pt-1 text-center font-mono text-[12.5px]">
-                      <div className="p-2 rounded-lg bg-[#F8F7FC] border border-[#E6DFF0]">
-                        <div className="text-[11px] text-[#746B83] font-sans">เวรทั้งหมด</div>
-                        <div className="font-bold text-[#262238] tabular-nums">{r.totalShifts}</div>
-                      </div>
-                      <div className="p-2 rounded-lg bg-[#FEF8ED] border border-[#F3DFBC]">
-                        <div className="text-[11px] text-[#B87516] font-sans">สาย (ครั้ง)</div>
-                        <div className="font-bold text-[#B87516] tabular-nums">{r.lateOccurrences} ครั้ง</div>
-                      </div>
-                      <div className="p-2 rounded-lg bg-[#FDF2F3] border border-[#F3CCD0]">
-                        <div className="text-[11px] text-[#C74455] font-sans">ขาด/ลืมออก</div>
-                        <div className="font-bold text-[#C74455] tabular-nums">
-                          {r.noScanCount}/{r.missingCheckoutCount}
-                        </div>
-                      </div>
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] font-mono tabular-nums">
+                      <span className="text-[#777287]">เวร {r.totalShifts}</span>
+                      <span className="text-[#B87516] font-semibold">สาย {r.lateOccurrences} ครั้ง</span>
+                      <span className="text-[#C74455] font-semibold">
+                        ขาด/ลืมออก {r.noScanCount}/{r.missingCheckoutCount}
+                      </span>
                     </div>
                   </div>
                 ))
@@ -896,10 +906,10 @@ export function ReportsView({
             </div>
 
             <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-left border-collapse text-[14px]">
+              <table className="his-table">
                 <thead>
-                  <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
-                    <th className="py-3.5 px-4 font-semibold text-[13px]">อันดับ</th>
+                  <tr>
+                    <th>อันดับ</th>
                     <SortableHeader
                       label="ชื่อ-นามสกุล · รหัสบุคลากร"
                       sortKey="fullName"
@@ -956,38 +966,36 @@ export function ReportsView({
                     />
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#E6DFF0]">
+                <tbody>
                   {pagedRanking.length === 0 ? (
                     <TableEmptyState colSpan={8} title="ไม่พบข้อมูลการจัดอันดับในช่วงเวลาที่เลือก" />
                   ) : (
                     pagedRanking.map((r: any, idx: number) => (
-                      <tr key={r.personId} className="hover:bg-[#F8F7FC] transition-colors">
-                        <td className="py-3.5 px-4 font-mono tabular-nums font-semibold text-[#746B83]">
+                      <tr key={r.personId}>
+                        <td className="font-mono tabular-nums font-semibold text-[#777287]">
                           #{(page - 1) * numericSize + idx + 1}
                         </td>
-                        <td className="py-3.5 px-4">
-                          <div className="font-semibold text-[14.5px] text-[#262238]">{r.fullName}</div>
-                          <div className="text-[12px] font-mono text-[#746B83] mt-0.5">
+                        <td>
+                          <div className="font-semibold text-[14px] text-[#292638]">{r.fullName}</div>
+                          <div className="text-[12px] font-mono text-[#777287] mt-0.5">
                             รหัสบุคลากร: {r.personId}
                           </div>
                         </td>
-                        <td className="py-3.5 px-4">
-                          <div className="font-medium text-[#262238]">{r.departmentName}</div>
-                          <div className="text-[12px] text-[#746B83] mt-0.5">{r.personnelTypeName}</div>
+                        <td>
+                          <div className="font-medium text-[#292638]">{r.departmentName}</div>
+                          <div className="text-[12px] text-[#777287] mt-0.5">{r.personnelTypeName}</div>
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-[#262238]">
-                          {r.totalShifts}
-                        </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums font-semibold text-[#B87516]">
+                        <td className="text-right font-mono tabular-nums">{r.totalShifts}</td>
+                        <td className="text-right font-mono tabular-nums font-semibold text-[#B87516]">
                           {r.lateOccurrences} ครั้ง
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums font-bold text-[#262238]">
+                        <td className="text-right font-mono tabular-nums font-bold">
                           {r.totalLateMinutes} นาที
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-[#746B83]">
+                        <td className="text-right font-mono tabular-nums text-[#777287]">
                           {r.avgLateMinutesPerOccurrence}
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-[#C74455] font-semibold">
+                        <td className="text-right font-mono tabular-nums text-[#C74455] font-semibold">
                           {r.noScanCount} / {r.missingCheckoutCount}
                         </td>
                       </tr>

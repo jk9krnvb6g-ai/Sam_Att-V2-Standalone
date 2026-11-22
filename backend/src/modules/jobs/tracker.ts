@@ -6,12 +6,30 @@ export type CentralJobType =
   | 'HOSOFFICE_LIVE_PUSH'
   | 'SCANNER_MANUAL_SYNC';
 
-export type CentralJobStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'UNKNOWN';
+export type CentralJobStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'SUCCESS'
+  | 'PARTIAL_SUCCESS'
+  | 'FAILED'
+  | 'UNKNOWN';
+
+export type CentralJobStage =
+  | 'READING_SCANNER'
+  | 'DEDUPLICATING'
+  | 'MAPPING'
+  | 'PROCESSING_ATTENDANCE'
+  | 'SYNCING_PERSONNEL'
+  | 'PUSHING_HOSOFFICE'
+  | 'COMPLETED'
+  | 'PARTIAL_SUCCESS'
+  | 'FAILED';
 
 export interface CentralJobState {
   jobId: string;
   jobType: CentralJobType;
   status: CentralJobStatus;
+  stage: CentralJobStage | null;
   currentStep: string;
   processedCount: number | null;
   totalCount: number | null;
@@ -75,6 +93,7 @@ export function startCentralJob(params: {
   jobType: CentralJobType;
   actorUsername: string;
   initialStep: string;
+  stage?: CentralJobStage | null;
   totalCount?: number | null;
 }): CentralJobState {
   const active = getActiveJobByType(params.jobType);
@@ -96,6 +115,7 @@ export function startCentralJob(params: {
     jobId,
     jobType: params.jobType,
     status: 'RUNNING',
+    stage: params.stage ?? null,
     currentStep: params.initialStep,
     processedCount: totalCount !== null ? 0 : null,
     totalCount,
@@ -116,6 +136,7 @@ export function startCentralJob(params: {
 export function updateCentralJobStep(
   jobId: string,
   update: {
+    stage?: CentralJobStage | null;
     currentStep?: string;
     processedCount?: number | null;
     totalCount?: number | null;
@@ -124,6 +145,9 @@ export function updateCentralJobStep(
   const job = jobsById.get(jobId);
   if (!job) return null;
 
+  if (update.stage !== undefined) {
+    job.stage = update.stage;
+  }
   if (typeof update.currentStep === 'string' && update.currentStep.trim()) {
     job.currentStep = update.currentStep.trim();
   }
@@ -143,10 +167,9 @@ export function updateCentralJobStep(
     typeof job.totalCount === 'number' &&
     job.totalCount > 0
   ) {
-    job.progressPercent = Math.min(
-      100,
-      Math.max(0, Math.round((job.processedCount / job.totalCount) * 100))
-    );
+    // ห้ามแสดง 100% ระหว่างที่งานยัง RUNNING — ให้สูงสุด 99% จนกว่า Backend จะจบจริง
+    const rawPct = Math.round((job.processedCount / job.totalCount) * 100);
+    job.progressPercent = Math.min(99, Math.max(0, rawPct));
   } else {
     job.progressPercent = null;
   }
@@ -157,6 +180,7 @@ export function updateCentralJobStep(
 export function completeCentralJob(
   jobId: string,
   params: {
+    status?: 'SUCCESS' | 'PARTIAL_SUCCESS';
     currentStep?: string;
     processedCount?: number | null;
     totalCount?: number | null;
@@ -166,8 +190,14 @@ export function completeCentralJob(
   const job = jobsById.get(jobId);
   if (!job) return null;
 
-  job.status = 'SUCCESS';
-  job.currentStep = params.currentStep || 'ดำเนินการเสร็จสมบูรณ์';
+  const finalStatus = params.status || 'SUCCESS';
+  job.status = finalStatus;
+  job.stage = finalStatus === 'PARTIAL_SUCCESS' ? 'PARTIAL_SUCCESS' : 'COMPLETED';
+  job.currentStep =
+    params.currentStep ||
+    (finalStatus === 'PARTIAL_SUCCESS'
+      ? 'ดำเนินการเสร็จสิ้นบางส่วน (กรุณาตรวจสอบรายละเอียดเครื่องหรือรายการที่ไม่สำเร็จ)'
+      : 'ดำเนินการเสร็จสมบูรณ์');
   if (params.totalCount !== undefined) {
     job.totalCount = params.totalCount;
   }
@@ -182,6 +212,8 @@ export function completeCentralJob(
     typeof job.totalCount === 'number' &&
     job.totalCount > 0
   ) {
+    job.progressPercent = 100;
+  } else {
     job.progressPercent = 100;
   }
   job.finishedAt = nowBkkString();
@@ -203,6 +235,7 @@ export function failCentralJob(
   if (!job) return null;
 
   job.status = params.status || 'FAILED';
+  job.stage = 'FAILED';
   job.currentStep = params.currentStep || 'พบข้อผิดพลาดในการดำเนินการ';
   job.errorCode = params.errorCode;
   job.errorMessage = params.errorMessage;

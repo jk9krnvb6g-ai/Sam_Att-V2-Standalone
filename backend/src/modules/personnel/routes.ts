@@ -4,13 +4,29 @@ import { loadConfig, isAutomatedTestRuntime } from '../../config/env.ts';
 import { dbQuery, dbExecute } from '../../database/adapter.ts';
 import { requireAuth, requireRoles } from '../../middleware/auth.ts';
 import { writeAuditLog } from '../audit/service.ts';
-import { repairThaiMojibakeIfCorrupted } from '../../utils/crypto.ts';
+import {
+  repairThaiMojibakeIfCorrupted,
+  getCurrentBangkokDateParts,
+} from '../../utils/crypto.ts';
 import {
   startCentralJob,
   updateCentralJobStep,
   completeCentralJob,
   failCentralJob,
 } from '../jobs/tracker.ts';
+import { normalizeWorkDateString } from '../shifts/routes.ts';
+import { addDaysYmd } from '../attendance/matchingEngine.ts';
+import {
+  resolveRawScanPersonnelMappings,
+  reprocessAttendanceRange,
+  normalizeBkkTimestamp,
+} from '../attendance/processor.ts';
+import { verifyActorReauthentication } from '../auth/reauth.ts';
+import {
+  assertRoleAuthorizedForDateRange,
+  isValidYmdDate,
+  ScannerSyncRangeError,
+} from '../scanners/syncRange.ts';
 
 export interface HosOfficeHrPersonRow {
   PERSON_ID: string;
@@ -415,6 +431,298 @@ personnelRouter.get(
   }
 );
 
+interface HistoricalMappingConflictItem {
+  mappingId: number;
+  personId: string;
+  fullName: string | null;
+  fingleId: string;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  conflictState: string;
+}
+
+async function analyzeRetroactiveMappingImpact(
+  mappingId: number,
+  proposedEffectiveFrom: string,
+  proposedEffectiveTo: string | null
+) {
+  const targetRows = await dbQuery<{
+    id: number;
+    person_id: string;
+    fingle_id: string;
+    effective_from: unknown;
+    effective_to: unknown;
+    original_effective_from: unknown;
+    conflict_state: string;
+    conflict_reason: string | null;
+    source: string;
+    full_name: string | null;
+    department_name: string | null;
+  }>(
+    `SELECT fm.*, p.full_name, p.department_name
+     FROM fingerprint_mappings fm
+     LEFT JOIN personnel p ON p.person_id = fm.person_id
+     WHERE fm.id = ? LIMIT 1`,
+    [mappingId]
+  );
+
+  if (targetRows.length === 0) {
+    return null;
+  }
+
+  const target = targetRows[0];
+  const fingleId = String(target.fingle_id || '').trim();
+  const currentEffectiveFrom = normalizeWorkDateString(target.effective_from);
+  const currentEffectiveTo =
+    target.effective_to !== null &&
+    target.effective_to !== undefined &&
+    String(target.effective_to).trim() !== ''
+      ? normalizeWorkDateString(target.effective_to)
+      : null;
+
+  const otherMappingsRaw = await dbQuery<{
+    id: number;
+    person_id: string;
+    fingle_id: string;
+    effective_from: unknown;
+    effective_to: unknown;
+    conflict_state: string;
+    full_name: string | null;
+  }>(
+    `SELECT fm.id, fm.person_id, fm.fingle_id, fm.effective_from, fm.effective_to, fm.conflict_state, p.full_name
+     FROM fingerprint_mappings fm
+     LEFT JOIN personnel p ON p.person_id = fm.person_id
+     WHERE TRIM(fm.fingle_id) = ? AND fm.id != ?`,
+    [fingleId, mappingId]
+  );
+
+  const proposedEndBound = proposedEffectiveTo || '9999-12-31';
+  const conflicts: HistoricalMappingConflictItem[] = [];
+  const otherNormalized = otherMappingsRaw.map((m) => ({
+    id: Number(m.id),
+    personId: String(m.person_id || '').trim(),
+    fullName: m.full_name || null,
+    fingleId: String(m.fingle_id || '').trim(),
+    effectiveFrom: normalizeWorkDateString(m.effective_from),
+    effectiveTo:
+      m.effective_to !== null && m.effective_to !== undefined && String(m.effective_to).trim() !== ''
+        ? normalizeWorkDateString(m.effective_to)
+        : null,
+    conflictState: String(m.conflict_state || 'NONE').trim().toUpperCase(),
+  }));
+
+  for (const other of otherNormalized) {
+    const otherEndBound = other.effectiveTo || '9999-12-31';
+    if (proposedEffectiveFrom <= otherEndBound && other.effectiveFrom <= proposedEndBound) {
+      conflicts.push({
+        mappingId: other.id,
+        personId: other.personId,
+        fullName: other.fullName,
+        fingleId: other.fingleId,
+        effectiveFrom: other.effectiveFrom,
+        effectiveTo: other.effectiveTo,
+        conflictState: other.conflictState,
+      });
+    }
+  }
+
+  const scans = await dbQuery<{
+    id: number;
+    canonical_bkk_time: unknown;
+    mapping_state: string | null;
+    matched_person_id: string | null;
+  }>(
+    `SELECT rs.id, rs.canonical_bkk_time, rsm.mapping_state, rsm.matched_person_id
+     FROM raw_scans rs
+     LEFT JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
+     WHERE TRIM(rs.enroll_number) = ?
+     ORDER BY rs.canonical_bkk_time ASC, rs.id ASC`,
+    [fingleId]
+  );
+
+  let willBecomeMatchedCount = 0;
+  let alreadyMatchedCount = 0;
+  let willBecomeUnmatchedCount = 0;
+  let blockedByConflictCount = 0;
+  let outOfRangeRemainingUnmatchedCount = 0;
+  let earliestScanDate: string | null = null;
+  let latestScanDate: string | null = null;
+  const affectedDates = new Set<string>();
+
+  for (const s of scans) {
+    const scanDate = normalizeBkkTimestamp(s.canonical_bkk_time).slice(0, 10);
+    if (!scanDate) continue;
+    if (!earliestScanDate || scanDate < earliestScanDate) earliestScanDate = scanDate;
+    if (!latestScanDate || scanDate > latestScanDate) latestScanDate = scanDate;
+
+    const inProposed =
+      scanDate >= proposedEffectiveFrom &&
+      (!proposedEffectiveTo || scanDate <= proposedEffectiveTo);
+    const inCurrent =
+      scanDate >= currentEffectiveFrom &&
+      (!currentEffectiveTo || scanDate <= currentEffectiveTo);
+    const currentState = String(s.mapping_state || 'UNMATCHED').toUpperCase();
+    const otherCoversDate = otherNormalized.some(
+      (o) => scanDate >= o.effectiveFrom && (!o.effectiveTo || scanDate <= o.effectiveTo)
+    );
+
+    if (inProposed) {
+      if (otherCoversDate || String(target.conflict_state || 'NONE').toUpperCase() !== 'NONE') {
+        blockedByConflictCount++;
+      } else if (
+        currentState === 'MATCHED' &&
+        String(s.matched_person_id || '').trim() === String(target.person_id).trim()
+      ) {
+        alreadyMatchedCount++;
+      } else {
+        willBecomeMatchedCount++;
+        affectedDates.add(scanDate);
+      }
+    } else if (inCurrent && currentState === 'MATCHED') {
+      willBecomeUnmatchedCount++;
+      affectedDates.add(scanDate);
+    } else if (currentState !== 'MATCHED') {
+      outOfRangeRemainingUnmatchedCount++;
+    }
+  }
+
+  const sortedAffected = Array.from(affectedDates).sort();
+  const targetHasConflictState =
+    String(target.conflict_state || 'NONE').trim().toUpperCase() !== 'NONE';
+  const canApprove = conflicts.length === 0 && !targetHasConflictState;
+
+  return {
+    mapping: {
+      id: Number(target.id),
+      personId: String(target.person_id).trim(),
+      fullName: target.full_name || null,
+      departmentName: target.department_name || null,
+      fingleId,
+      currentEffectiveFrom,
+      currentEffectiveTo,
+      originalEffectiveFrom: target.original_effective_from
+        ? normalizeWorkDateString(target.original_effective_from)
+        : currentEffectiveFrom,
+      conflictState: String(target.conflict_state || 'NONE').toUpperCase(),
+      conflictReason: target.conflict_reason,
+      source: target.source,
+    },
+    proposedEffectiveFrom,
+    proposedEffectiveTo,
+    canApprove,
+    blockReason: !canApprove
+      ? targetHasConflictState
+        ? `รายการจับคู่นี้มีสถานะความขัดแย้ง (${target.conflict_state}) อยู่แล้ว ไม่สามารถอนุมัติย้อนหลังได้จนกว่าจะแก้ไขความซ้ำซ้อน`
+        : `พบรหัส FINGLE_ID ${fingleId} ซ้อนทับกับบุคลากรรายอื่นในช่วงวันที่ที่ขอปรับ (${conflicts.length} รายการ) ระบบไม่อนุญาตให้บังคับจับคู่ทับซ้อน`
+      : null,
+    conflicts,
+    totalRawScansForFingleId: scans.length,
+    willBecomeMatchedCount,
+    alreadyMatchedCount,
+    willBecomeUnmatchedCount,
+    blockedByConflictCount,
+    outOfRangeRemainingUnmatchedCount,
+    earliestScanDate,
+    latestScanDate,
+    affectedDateFrom: sortedAffected[0] ?? null,
+    affectedDateTo: sortedAffected[sortedAffected.length - 1] ?? null,
+    impactSummary: {
+      totalRawScansForFingleId: scans.length,
+      willBecomeMatchedCount,
+      alreadyMatchedCount,
+      willBecomeUnmatchedCount,
+      blockedByConflictCount,
+      outOfRangeRemainingUnmatchedCount,
+      earliestScanDate,
+      latestScanDate,
+      affectedDateFrom: sortedAffected[0] ?? null,
+      affectedDateTo: sortedAffected[sortedAffected.length - 1] ?? null,
+    },
+  };
+}
+
+async function loadMappingHistoryWithUnmatchedStats() {
+  const mappingHistory = await dbQuery<{
+    id: number;
+    person_id: string;
+    fingle_id: string;
+    effective_from: unknown;
+    effective_to: unknown;
+    original_effective_from?: unknown;
+    retroactive_adjusted_by?: string | null;
+    retroactive_adjusted_at?: string | null;
+    retroactive_reason?: string | null;
+    conflict_state: string;
+    conflict_reason: string | null;
+    source: string;
+    created_by: string | null;
+    created_at: string;
+    full_name: string | null;
+    department_name: string | null;
+  }>(
+    `SELECT fm.*, p.full_name, p.department_name
+     FROM fingerprint_mappings fm
+     LEFT JOIN personnel p ON p.person_id = fm.person_id
+     ORDER BY fm.id DESC`
+  );
+
+  const scanAggRows = await dbQuery<{
+    enroll_number: string;
+    canonical_bkk_time: unknown;
+    mapping_state: string | null;
+  }>(
+    `SELECT rs.enroll_number, rs.canonical_bkk_time, COALESCE(rsm.mapping_state, 'UNMATCHED') AS mapping_state
+     FROM raw_scans rs
+     LEFT JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id`
+  );
+
+  const scansByFingle = new Map<string, Array<{ scanDate: string; state: string }>>();
+  for (const r of scanAggRows) {
+    const fid = String(r.enroll_number || '').trim();
+    const scanDate = normalizeBkkTimestamp(r.canonical_bkk_time).slice(0, 10);
+    if (!fid || !scanDate) continue;
+    const list = scansByFingle.get(fid) || [];
+    list.push({ scanDate, state: String(r.mapping_state || 'UNMATCHED').toUpperCase() });
+    scansByFingle.set(fid, list);
+  }
+
+  return mappingHistory.map((m) => {
+    const fid = String(m.fingle_id || '').trim();
+    const effFrom = normalizeWorkDateString(m.effective_from);
+    const effTo =
+      m.effective_to !== null && m.effective_to !== undefined && String(m.effective_to).trim() !== ''
+        ? normalizeWorkDateString(m.effective_to)
+        : null;
+    const allScans = scansByFingle.get(fid) || [];
+    let unmatchedBeforeEffectiveCount = 0;
+    let earliestUnmatchedDate: string | null = null;
+    let latestUnmatchedDate: string | null = null;
+    for (const s of allScans) {
+      if (s.state !== 'MATCHED' && s.scanDate < effFrom) {
+        unmatchedBeforeEffectiveCount++;
+        if (!earliestUnmatchedDate || s.scanDate < earliestUnmatchedDate) {
+          earliestUnmatchedDate = s.scanDate;
+        }
+        if (!latestUnmatchedDate || s.scanDate > latestUnmatchedDate) {
+          latestUnmatchedDate = s.scanDate;
+        }
+      }
+    }
+    return {
+      ...m,
+      effective_from: effFrom,
+      effective_to: effTo,
+      original_effective_from: m.original_effective_from
+        ? normalizeWorkDateString(m.original_effective_from)
+        : null,
+      total_scans_for_fingle_id: allScans.length,
+      unmatched_before_effective_count: unmatchedBeforeEffectiveCount,
+      earliest_unmatched_date: earliestUnmatchedDate,
+      latest_unmatched_date: latestUnmatchedDate,
+    };
+  });
+}
+
 personnelRouter.get(
   '/personnel/mapping-issues',
   requireAuth,
@@ -424,12 +732,7 @@ personnelRouter.get(
       const personnelIssues = await dbQuery(
         "SELECT * FROM personnel WHERE mapping_status != 'VALID' ORDER BY person_id ASC"
       );
-      const mappingHistory = await dbQuery(
-        `SELECT fm.*, p.full_name, p.department_name
-         FROM fingerprint_mappings fm
-         LEFT JOIN personnel p ON p.person_id = fm.person_id
-         ORDER BY fm.id DESC`
-      );
+      const mappingHistory = await loadMappingHistoryWithUnmatchedStats();
       const unmatchedRawScans = await dbQuery(
         `SELECT rs.enroll_number, COUNT(*) as scan_count,
                 MIN(rs.canonical_bkk_time) as first_seen,
@@ -451,13 +754,378 @@ personnelRouter.get(
   }
 );
 
+personnelRouter.get(
+  '/personnel/mappings',
+  requireAuth,
+  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
+  async (_req, res, next) => {
+    try {
+      const items = await loadMappingHistoryWithUnmatchedStats();
+      res.json({ items });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+personnelRouter.post(
+  '/personnel/mappings/:id/retroactive-preview',
+  requireAuth,
+  requireRoles('ADMIN'),
+  async (req, res, next) => {
+    try {
+      const mappingId = Number(req.params.id);
+      if (!Number.isInteger(mappingId) || mappingId <= 0) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'รหัสการจับคู่ลายนิ้วมือไม่ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const proposedEffectiveFrom = String(req.body?.proposedEffectiveFrom || '').trim();
+      const rawProposedTo = req.body?.proposedEffectiveTo;
+      const proposedEffectiveTo =
+        rawProposedTo !== undefined && rawProposedTo !== null && String(rawProposedTo).trim() !== ''
+          ? String(rawProposedTo).trim()
+          : null;
+
+      if (!isValidYmdDate(proposedEffectiveFrom)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'กรุณาระบุวันที่มีผลใหม่ (proposedEffectiveFrom) ในรูปแบบ YYYY-MM-DD ที่ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (proposedEffectiveTo && !isValidYmdDate(proposedEffectiveTo)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'วันที่สิ้นสุดผล (proposedEffectiveTo) ไม่ถูกต้องตามปฏิทิน',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (proposedEffectiveTo && proposedEffectiveFrom > proposedEffectiveTo) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'วันที่มีผลต้องไม่มากกว่าวันที่สิ้นสุดผล',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const preview = await analyzeRetroactiveMappingImpact(
+        mappingId,
+        proposedEffectiveFrom,
+        proposedEffectiveTo
+      );
+      if (!preview) {
+        res.status(404).json({
+          error: 'MAPPING_NOT_FOUND',
+          message: 'ไม่พบข้อมูลการจับคู่รหัสลายนิ้วมือที่เลือก',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      res.json(preview);
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+personnelRouter.post(
+  '/personnel/mappings/:id/retroactive-approve',
+  requireAuth,
+  requireRoles('ADMIN'),
+  async (req, res, next) => {
+    try {
+      const mappingId = Number(req.params.id);
+      if (!Number.isInteger(mappingId) || mappingId <= 0) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'รหัสการจับคู่ลายนิ้วมือไม่ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const proposedEffectiveFrom = String(req.body?.proposedEffectiveFrom || '').trim();
+      const rawProposedTo = req.body?.proposedEffectiveTo;
+      const proposedEffectiveTo =
+        rawProposedTo !== undefined && rawProposedTo !== null && String(rawProposedTo).trim() !== ''
+          ? String(rawProposedTo).trim()
+          : null;
+      const reason = String(req.body?.reason || '').trim();
+      const reprocessAttendance = req.body?.reprocessAttendance !== false;
+
+      if (!isValidYmdDate(proposedEffectiveFrom)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'กรุณาระบุวันที่มีผลใหม่ (proposedEffectiveFrom) ในรูปแบบ YYYY-MM-DD ที่ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+      if (proposedEffectiveTo && !isValidYmdDate(proposedEffectiveTo)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'วันที่สิ้นสุดผล (proposedEffectiveTo) ไม่ถูกต้องตามปฏิทิน',
+          requestId: req.requestId,
+        });
+        return;
+      }
+      if (proposedEffectiveTo && proposedEffectiveFrom > proposedEffectiveTo) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'วันที่มีผลต้องไม่มากกว่าวันที่สิ้นสุดผล',
+          requestId: req.requestId,
+        });
+        return;
+      }
+      if (reason.length < 5) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'กรุณาระบุเหตุผลการปรับวันที่มีผลย้อนหลังอย่างน้อย 5 ตัวอักษร',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const analysis = await analyzeRetroactiveMappingImpact(
+        mappingId,
+        proposedEffectiveFrom,
+        proposedEffectiveTo
+      );
+      if (!analysis) {
+        res.status(404).json({
+          error: 'MAPPING_NOT_FOUND',
+          message: 'ไม่พบข้อมูลการจับคู่รหัสลายนิ้วมือที่เลือก',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      // ห้ามบังคับ UNMATCHED -> MATCHED เมื่อมีความซ้ำซ้อนหรือทับซ้อนกับบุคลากรรายอื่น
+      if (!analysis.canApprove) {
+        res.status(409).json({
+          error: 'HISTORICAL_MAPPING_CONFLICT',
+          message: analysis.blockReason,
+          conflicts: analysis.conflicts,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      // ยืนยันการรับทราบผลกระทบและรหัสผ่านของผู้ดูแลระบบที่ล็อกอินอยู่จริงเท่านั้น
+      const reauth = await verifyActorReauthentication({
+        userId: req.user!.id,
+        username: req.user!.username,
+        role: req.user!.role,
+        ipAddress: req.ip || '127.0.0.1',
+        requestId: req.requestId,
+        operationName: 'FINGERPRINT_MAPPING_RETROACTIVE_APPROVE',
+        targetType: 'FINGERPRINT_MAPPING',
+        targetId: String(mappingId),
+        confirmPassword: req.body?.confirmPassword,
+        impactAcknowledged: req.body?.impactAcknowledged,
+      });
+
+      if (!reauth.ok) {
+        res.status(reauth.statusCode || 401).json({
+          error: reauth.errorCode,
+          message: reauth.message,
+          lockedUntil: reauth.lockedUntil ?? undefined,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      await dbExecute(
+        `UPDATE fingerprint_mappings
+         SET original_effective_from = COALESCE(original_effective_from, effective_from),
+             effective_from = ?,
+             effective_to = ?,
+             retroactive_adjusted_by = ?,
+             retroactive_adjusted_at = CURRENT_TIMESTAMP,
+             retroactive_reason = ?
+         WHERE id = ?`,
+        [proposedEffectiveFrom, proposedEffectiveTo, req.user!.username, reason, mappingId]
+      );
+
+      const resolveFrom =
+        analysis.impactSummary.earliestScanDate &&
+        analysis.impactSummary.earliestScanDate < proposedEffectiveFrom
+          ? analysis.impactSummary.earliestScanDate
+          : proposedEffectiveFrom;
+      const bkkToday = getCurrentBangkokDateParts().todayYmd;
+      const resolveTo =
+        analysis.impactSummary.latestScanDate && analysis.impactSummary.latestScanDate > bkkToday
+          ? analysis.impactSummary.latestScanDate
+          : bkkToday;
+
+      const mappingResolution = await resolveRawScanPersonnelMappings(resolveFrom, resolveTo, {
+        fingleId: analysis.mapping.fingleId,
+      });
+
+      let reprocessResult: unknown = null;
+      if (
+        reprocessAttendance &&
+        analysis.impactSummary.affectedDateFrom &&
+        analysis.impactSummary.affectedDateTo
+      ) {
+        reprocessResult = await reprocessAttendanceRange({
+          dateFrom: addDaysYmd(analysis.impactSummary.affectedDateFrom, -1),
+          dateTo: analysis.impactSummary.affectedDateTo,
+          personId: analysis.mapping.personId,
+          actorUsername: req.user!.username,
+          actorRole: req.user!.role,
+          requestId: req.requestId,
+          ipAddress: req.ip || '127.0.0.1',
+        });
+      }
+
+      await writeAuditLog({
+        requestId: req.requestId,
+        actorUsername: req.user!.username,
+        actorRole: req.user!.role,
+        ipAddress: req.ip || '127.0.0.1',
+        action: 'FINGERPRINT_MAPPING_RETROACTIVE_APPROVED',
+        targetType: 'FINGERPRINT_MAPPING',
+        targetId: String(mappingId),
+        result: 'SUCCESS',
+        detail: {
+          personId: analysis.mapping.personId,
+          fingleId: analysis.mapping.fingleId,
+          previousEffectiveFrom: analysis.mapping.currentEffectiveFrom,
+          newEffectiveFrom: proposedEffectiveFrom,
+          previousEffectiveTo: analysis.mapping.currentEffectiveTo,
+          newEffectiveTo: proposedEffectiveTo,
+          reason,
+          mappingResolution,
+          reprocessed: Boolean(reprocessResult),
+        },
+      });
+
+      res.json({
+        status: 'APPROVED',
+        mappingId,
+        personId: analysis.mapping.personId,
+        fingleId: analysis.mapping.fingleId,
+        previousEffectiveFrom: analysis.mapping.currentEffectiveFrom,
+        newEffectiveFrom: proposedEffectiveFrom,
+        newEffectiveTo: proposedEffectiveTo,
+        reason,
+        mappingResolution,
+        reprocessResult,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+personnelRouter.post(
+  '/personnel/mappings/resolve-unmatched',
+  requireAuth,
+  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
+  async (req, res, next) => {
+    try {
+      const bkk = getCurrentBangkokDateParts();
+      const dateFrom = String(req.body?.dateFrom || bkk.monthStartYmd).trim();
+      const dateTo = String(req.body?.dateTo || bkk.todayYmd).trim();
+      const fingleId = req.body?.fingleId ? String(req.body.fingleId).trim() : undefined;
+      const reprocessAttendance = req.body?.reprocessAttendance !== false;
+
+      if (!isValidYmdDate(dateFrom) || !isValidYmdDate(dateTo) || dateFrom > dateTo) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'ช่วงวันที่สำหรับตรวจสอบการจับคู่สแกนค้างไม่ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      try {
+        assertRoleAuthorizedForDateRange({
+          role: req.user!.role,
+          syncMode: 'CUSTOM_RANGE',
+          dateFrom,
+          dateTo,
+        });
+      } catch (authErr: unknown) {
+        if (authErr instanceof ScannerSyncRangeError) {
+          res.status(authErr.statusCode).json({
+            error: authErr.code,
+            message: authErr.message,
+            requestId: req.requestId,
+          });
+          return;
+        }
+        throw authErr;
+      }
+
+      const mappingResolution = await resolveRawScanPersonnelMappings(dateFrom, dateTo, {
+        fingleId,
+      });
+
+      let reprocessResult: unknown = null;
+      if (reprocessAttendance) {
+        reprocessResult = await reprocessAttendanceRange({
+          dateFrom,
+          dateTo,
+          actorUsername: req.user!.username,
+          actorRole: req.user!.role,
+          requestId: req.requestId,
+          ipAddress: req.ip || '127.0.0.1',
+        });
+      }
+
+      await writeAuditLog({
+        requestId: req.requestId,
+        actorUsername: req.user!.username,
+        actorRole: req.user!.role,
+        ipAddress: req.ip || '127.0.0.1',
+        action: 'RAW_SCAN_MAPPINGS_RESOLVED',
+        targetType: 'RAW_SCAN_MAPPINGS',
+        targetId: `${dateFrom}..${dateTo}`,
+        result: 'SUCCESS',
+        detail: {
+          dateFrom,
+          dateTo,
+          fingleId: fingleId || null,
+          mappingResolution,
+          reprocessed: Boolean(reprocessResult),
+        },
+      });
+
+      res.json({
+        status: 'RESOLVED',
+        dateFrom,
+        dateTo,
+        mappingResolution,
+        reprocessResult,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 personnelRouter.post(
   '/personnel/sync',
   requireAuth,
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
   async (req, res, _next) => {
     const actor = req.user!.username;
-    const effectiveDate = String(req.body?.effectiveDate || new Date().toISOString().slice(0, 10));
+    const rawEff = String(req.body?.effectiveDate || '').trim();
+    const effectiveDate =
+      rawEff && isValidYmdDate(rawEff) ? rawEff : getCurrentBangkokDateParts().todayYmd;
 
     let trackedJobId: string | null = null;
     try {
@@ -586,25 +1254,32 @@ personnelRouter.post(
         // Maintain effective-dated fingerprint_mappings without corrupting historical mappings
         if (fingleId) {
           const conflictState = mappingStatus === 'DUPLICATE_FINGLE_ID' ? 'DUPLICATE_CONFLICT' : 'NONE';
-          const activeMappings = await dbQuery<{ id: number; fingle_id: string }>(
-            'SELECT id, fingle_id FROM fingerprint_mappings WHERE person_id = ? AND effective_to IS NULL',
+          const activeMappings = await dbQuery<{
+            id: number;
+            fingle_id: string;
+            effective_from: unknown;
+          }>(
+            'SELECT id, fingle_id, effective_from FROM fingerprint_mappings WHERE person_id = ? AND effective_to IS NULL',
             [personId]
           );
 
-          const sameMapping = activeMappings.find((m) => m.fingle_id === fingleId);
+          const sameMapping = activeMappings.find((m) => String(m.fingle_id).trim() === fingleId);
           if (!sameMapping) {
-            // Close previous open mapping as of day before effectiveDate
+            // ปิด mapping เก่าให้สิ้นสุดก่อนหน้า effectiveDate 1 วัน เพื่อไม่ให้เกิดช่วงทับซ้อน 1 วัน
             for (const oldMap of activeMappings) {
+              const oldFrom = normalizeWorkDateString(oldMap.effective_from);
+              const prevDay = addDaysYmd(effectiveDate, -1);
+              const closeTo = prevDay >= oldFrom ? prevDay : oldFrom;
               await dbExecute(
                 'UPDATE fingerprint_mappings SET effective_to = ? WHERE id = ?',
-                [effectiveDate, oldMap.id]
+                [closeTo, oldMap.id]
               );
             }
             await dbExecute(
               `INSERT INTO fingerprint_mappings (
-                person_id, fingle_id, effective_from, effective_to, conflict_state, conflict_reason, source, created_by
-              ) VALUES (?, ?, ?, NULL, ?, ?, 'HOSOFFICE_SYNC', ?)`,
-              [personId, fingleId, effectiveDate, conflictState, issueDetail, actor]
+                person_id, fingle_id, effective_from, effective_to, original_effective_from, conflict_state, conflict_reason, source, created_by
+              ) VALUES (?, ?, ?, NULL, ?, ?, ?, 'HOSOFFICE_SYNC', ?)`,
+              [personId, fingleId, effectiveDate, effectiveDate, conflictState, issueDetail, actor]
             );
           } else {
             await dbExecute(
@@ -615,11 +1290,48 @@ personnelRouter.post(
         }
         if (trackedJobId && (upsertedCount % 25 === 0 || upsertedCount === externalRows.length)) {
           updateCentralJobStep(trackedJobId, {
+            stage: 'SYNCING_PERSONNEL',
             currentStep: `กำลังอัปเดตทะเบียนบุคลากร (${upsertedCount}/${externalRows.length} คน) โดยคงตารางเวรเดิมไว้ครบถ้วน...`,
             processedCount: upsertedCount,
             totalCount: externalRows.length,
           });
         }
+      }
+
+      // ตรวจสอบและจับคู่ข้อมูลสแกนค้างที่อยู่ในช่วงวันที่มีผล (ไม่ย้อนหลังอัตโนมัติเกิน effective_from)
+      let autoMappingResolution: {
+        totalEvaluated: number;
+        newlyMatched: number;
+        matchedCount: number;
+        unmatchedCount: number;
+        conflictCount: number;
+      } | null = null;
+      try {
+        const pendingScanBounds = await dbQuery<{ min_ts: unknown; max_ts: unknown }>(
+          `SELECT MIN(rs.canonical_bkk_time) AS min_ts, MAX(rs.canonical_bkk_time) AS max_ts
+           FROM raw_scans rs
+           LEFT JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
+           WHERE COALESCE(rsm.mapping_state, 'UNMATCHED') != 'MATCHED'`
+        );
+        const minTs = normalizeBkkTimestamp(pendingScanBounds[0]?.min_ts);
+        const maxTs = normalizeBkkTimestamp(pendingScanBounds[0]?.max_ts);
+        if (minTs && maxTs) {
+          const resolveFrom = minTs.slice(0, 10);
+          const resolveTo = maxTs.slice(0, 10);
+          autoMappingResolution = await resolveRawScanPersonnelMappings(resolveFrom, resolveTo);
+          if (autoMappingResolution.newlyMatched > 0) {
+            await reprocessAttendanceRange({
+              dateFrom: addDaysYmd(resolveFrom, -1),
+              dateTo: resolveTo,
+              actorUsername: actor,
+              actorRole: req.user!.role,
+              requestId: req.requestId,
+              ipAddress: req.ip || '127.0.0.1',
+            });
+          }
+        }
+      } catch {
+        // ไม่ให้ขั้นตอนตรวจสอบสแกนค้างทำให้การซิงก์บุคลากรหลักล้มเหลว
       }
 
       await dbExecute(
@@ -639,6 +1351,7 @@ personnelRouter.post(
             recordsUpserted: upsertedCount,
             mappingConflictsFound: conflictsFound,
             effectiveDate,
+            autoMappingResolution,
           },
         });
       }
@@ -666,6 +1379,7 @@ personnelRouter.post(
         recordsUpserted: upsertedCount,
         mappingConflictsFound: conflictsFound,
         effectiveDate,
+        autoMappingResolution,
       });
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code || 'HOSOFFICE_SYNC_FAILED';

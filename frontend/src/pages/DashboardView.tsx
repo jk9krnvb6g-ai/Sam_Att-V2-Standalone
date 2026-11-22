@@ -3,12 +3,6 @@
  * หน้าแดชบอร์ดภาพรวมองค์กร (Organization Attendance Overview Dashboard)
  * ไฟล์: frontend/src/pages/DashboardView.tsx
  * ============================================================================
- * หน้าที่หลัก:
- * 1. แสดงการ์ดตัวชี้วัดหลัก 4 ด้าน (เวรทั้งหมด, ลงเวลาตรงเวลา, มาสายแยกจำนวนคนไม่ซ้ำ/จำนวนครั้ง, รายการต้องตรวจสอบ)
- * 2. แสดงแถบสัดส่วนสถานะการลงเวลา (คำนวณสัดส่วนรวม 100.0% พอดีโดยไม่นับซ้ำ)
- * 3. แสดงแผง "รายการที่ต้องดูแล" โดยคำนวณตัวเลขจริงจากข้อมูลลงเวลา (รอตรวจ HR / ไม่สแกนเข้า-ออก / ขาดสแกน / ออกก่อนเวลา / ต้องตรวจสอบซ้ำ)
- * 4. แสดงสรุปผลการลงเวลาแยกตามกลุ่มงาน/แผนก และตารางจัดอันดับบุคลากร 4 มุมมอง
- * 5. รองรับการคลิกเจาะลึก (Interactive Drill-Down Modal) และแสดงผลแบบการ์ดบนมือถือ (md:hidden) คู่กับตารางบนคอมพิวเตอร์
  */
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import {
@@ -25,12 +19,17 @@ import {
 import { apiRequest, ApiClientError, type AuthUser } from '../services/api.ts';
 import { AttendanceStatusText, ErrorBanner } from '../components/StatusText.tsx';
 import {
+  PageHeader,
+  SectionHeader,
+  MetricStrip,
+  StatusBadge,
   PeriodFilterBar,
   SharedModal,
   SortableHeader,
   TablePaginationBar,
   TableEmptyState,
   type PageSizeOption,
+  type MetricStripItem,
 } from '../components/common/SharedComponents.tsx';
 import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
 import {
@@ -64,7 +63,6 @@ export function DashboardView({
 }) {
   const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
 
-  // Period Filter State (Daily / Monthly / Yearly / Custom) — initialized to real current Asia/Bangkok date
   const [periodMode, setPeriodMode] = useState<PeriodMode>('MONTHLY');
   const [dailyDate, setDailyDate] = useState(initialBkk.todayYmd);
   const [monthValue, setMonthValue] = useState(initialBkk.currentYearMonth);
@@ -80,7 +78,6 @@ export function DashboardView({
   const [data, setData] = useState<any>(null);
   const [attendanceRows, setAttendanceRows] = useState<any[]>([]);
 
-  // Personnel Ranking Tabs, Search, Sort & Pagination
   const [rankTab, setRankTab] = useState<RankTabKey>('LATE_MINS');
   const [rankSearch, setRankSearch] = useState('');
   const [rankSortKey, setRankSortKey] = useState('totalLateMinutes');
@@ -88,7 +85,6 @@ export function DashboardView({
   const [rankPage, setRankPage] = useState(1);
   const [rankPageSize, setRankPageSize] = useState<PageSizeOption>(10);
 
-  // Drill-down Modal State
   const [drillModal, setDrillModal] = useState<{
     title: string;
     subtitle: string;
@@ -274,7 +270,7 @@ export function DashboardView({
     });
   }
 
-  // Mutually Exclusive Primary Shift Status Breakdown (Sum === totalShifts === 100%, Zero Double-Counting)
+  // Mutually Exclusive Primary Shift Status Breakdown (Sum === totalShifts === 100%)
   const totalShiftsCount = Number(kpi?.totalShifts || 0);
   const totalShiftsSafe = Math.max(1, totalShiftsCount);
   const statusNormalCount = attendanceRows.filter((r) => r.status === 'NORMAL').length;
@@ -289,7 +285,6 @@ export function DashboardView({
     (r) => r.status === 'PENDING_MAPPING' || r.status === 'NO_SCHEDULE' || r.status === 'EARLY_CHECKOUT'
   ).length;
 
-  // Action-required real indicators from loaded attendance rows
   const earlyCheckoutCount = attendanceRows.filter(
     (r) =>
       Number(r.early_checkout_indicator || 0) === 1 ||
@@ -307,55 +302,131 @@ export function DashboardView({
   const noScanPct = totalShiftsCount > 0 ? Number(((statusNoScanCount / totalShiftsSafe) * 100).toFixed(1)) : 0;
   const pendingMapPct = totalShiftsCount > 0 ? Number(((statusPendingMappingCount / totalShiftsSafe) * 100).toFixed(1)) : 0;
 
+  const scannerOnlineCount = Number(telemetry?.onlineDevices ?? telemetry?.activeDevices ?? 0);
+  const scannerTotalCount = Number(telemetry?.totalDevices ?? 0);
+  const lastSyncLabel = telemetry?.lastSuccessTimestamp
+    ? formatThaiDateTime(telemetry.lastSuccessTimestamp)
+    : 'ยังไม่มีประวัติซิงก์';
+
+  const metricItems: MetricStripItem[] = kpi
+    ? [
+        {
+          id: 'personnel',
+          label: 'บุคลากรที่มีตารางเวร',
+          value: kpi.evaluatedPersonnelCount,
+          unit: `คน / ${data.activePersonnelTotal}`,
+          sublabel: `เวรรวม ${kpi.totalShifts} เวร`,
+          tone: 'default',
+          icon: <Users className="w-4 h-4" />,
+          onClick: () => openKpiDrilldown('ALL'),
+          actionHint: 'ดูทั้งหมด',
+        },
+        {
+          id: 'normal',
+          label: 'สแกนเข้า–ออกปกติ',
+          value: kpi.normalCount,
+          unit: `เวร (${normalPct}%)`,
+          sublabel: 'สแกนครบตามตารางเวร',
+          tone: 'success',
+          icon: <CheckCircle2 className="w-4 h-4 text-[#198568]" />,
+          onClick: () => openKpiDrilldown('NORMAL'),
+          actionHint: 'ดูรายชื่อ',
+        },
+        {
+          id: 'late',
+          label: 'ผู้มาสาย · จำนวนครั้ง',
+          value: `${kpi.latePeople} / ${kpi.lateOccurrences}`,
+          unit: 'คน / ครั้ง',
+          sublabel: `สะสม ${kpi.totalLateMinutes} น. (เฉลี่ย ${kpi.avgLateMinutesPerOccurrence} น.)`,
+          tone: 'warning',
+          icon: <Clock className="w-4 h-4 text-[#B87516]" />,
+          onClick: () => openKpiDrilldown('LATE'),
+          actionHint: 'เจาะลึก',
+        },
+        {
+          id: 'anomalies',
+          label: 'ไม่พบสแกน · ไม่สแกนออก',
+          value: `${kpi.noScanCount} / ${kpi.missingCheckoutCount}`,
+          unit: 'เวร',
+          sublabel: `รอตรวจสอบ HR ${kpi.pendingReviewCount} รายการ`,
+          tone: kpi.noScanCount > 0 ? 'danger' : 'default',
+          icon: <AlertTriangle className="w-4 h-4 text-[#C74455]" />,
+          onClick: () => openKpiDrilldown('PENDING_REVIEW'),
+          actionHint: 'ตรวจรายการ',
+        },
+        {
+          id: 'scanner-sync',
+          label: 'เครื่องสแกน · ซิงก์ล่าสุด',
+          value:
+            scannerTotalCount > 0
+              ? `${scannerOnlineCount}/${scannerTotalCount}`
+              : telemetry?.lastSuccessTimestamp
+                ? 'พร้อมใช้งาน'
+                : 'รอซิงก์',
+          unit: scannerTotalCount > 0 ? 'เครื่อง' : undefined,
+          sublabel: lastSyncLabel,
+          tone: 'brand',
+          icon: <Radio className="w-4 h-4 text-[#8066B5]" />,
+          onClick: onNavigate ? () => onNavigate('scanners') : undefined,
+          actionHint: onNavigate ? 'จัดการ' : undefined,
+        },
+      ]
+    : [];
+
   return (
     <div className="space-y-6">
-      {/* 1. Compact Lavender Welcome & Operational Context Header */}
-      <div className="ent-card p-5 sm:p-6 bg-gradient-to-r from-[#F2EDFA]/70 via-white to-white flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-        <div className="space-y-1 min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2 text-[12.5px] font-semibold text-[#543B7A]">
-            <span>ภาพรวมการปฏิบัติงาน · โรงพยาบาลสามชุก</span>
+      {/* 1. Clean Institutional Page Header (Zero Gradients) */}
+      <PageHeader
+        category="ภาพรวมการปฏิบัติงาน · โรงพยาบาลสามชุก"
+        title={user ? `สวัสดีคุณ${user.displayName}` : 'แดชบอร์ดภาพรวมการลงเวลาปฏิบัติงาน'}
+        subtitle="ติดตามสถานะการลงเวลาปฏิบัติงานของบุคลากร จำนวนผู้สแกนและผู้มาสาย สถานะเครื่องสแกน และรายการที่ต้องตรวจสอบ"
+        meta={
+          <>
+            <span>
+              ช่วงเวลาที่แสดง: <strong className="text-[#292638]">{resolvedRange.thaiPeriodLabel}</strong>
+            </span>
+            <span aria-hidden="true">·</span>
+            <span>
+              ซิงก์เครื่องสแกนล่าสุด: <strong className="font-mono text-[#292638]">{lastSyncLabel}</strong>
+            </span>
             {data?.dataMode === 'DEMO' && (
-              <span className="px-2 py-0.5 rounded-md bg-[#FEF8ED] border border-[#F3DFBC] text-[#B87516] text-[11.5px] font-bold">
-                โหมด DEMO
-              </span>
+              <>
+                <span aria-hidden="true">·</span>
+                <StatusBadge tone="warning" label="โหมด DEMO" compact />
+              </>
             )}
-          </div>
-          <h1 className="text-[20px] sm:text-[23px] lg:text-[25px] font-bold text-[#262238] tracking-tight leading-snug">
-            {user ? `สวัสดีคุณ${user.displayName}` : 'แดชบอร์ดภาพรวมการลงเวลาปฏิบัติงาน'}
-          </h1>
-          <p className="text-[13.5px] text-[#746B83]">
-            ช่วงเวลาที่เลือก: <strong className="text-[#262238]">{resolvedRange.thaiPeriodLabel}</strong>
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-          <PageHelpAction
-            guideKey="dashboard"
-            userRole={user?.role}
-            onNavigate={onNavigate}
-          />
-          {onNavigate && (
-            <>
-              <button
-                type="button"
-                onClick={() => onNavigate('attendanceReview')}
-                className="ent-btn-primary"
-              >
-                <ClipboardCheck className="w-4 h-4" aria-hidden="true" />
-                <span>ตรวจสอบรายการค้าง ({kpi?.pendingReviewCount ?? 0})</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => onNavigate('scanners')}
-                className="ent-btn-secondary"
-              >
-                <Radio className="w-4 h-4 text-[#8E70C9]" aria-hidden="true" />
-                <span>เครื่องสแกน</span>
-              </button>
-            </>
-          )}
-        </div>
-      </div>
+          </>
+        }
+        actions={
+          <>
+            <PageHelpAction
+              guideKey="dashboard"
+              userRole={user?.role}
+              onNavigate={onNavigate}
+            />
+            {onNavigate && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('scanners')}
+                  className="ent-btn-secondary"
+                >
+                  <Radio className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+                  <span>เครื่องสแกน</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onNavigate('attendanceReview')}
+                  className="ent-btn-primary"
+                >
+                  <ClipboardCheck className="w-4 h-4" aria-hidden="true" />
+                  <span>ตรวจสอบรายการค้าง ({kpi?.pendingReviewCount ?? 0})</span>
+                </button>
+              </>
+            )}
+          </>
+        }
+      />
 
       {/* 2. Period & Department Filter Bar */}
       <PeriodFilterBar
@@ -406,7 +477,7 @@ export function DashboardView({
               onClick={loadSummary}
               className="ent-btn-secondary w-full sm:w-auto"
             >
-              <RefreshCw className="w-4 h-4 text-[#746B83]" aria-hidden="true" />
+              <RefreshCw className="w-4 h-4 text-[#777287]" aria-hidden="true" />
               <span>รีเฟรช</span>
             </button>
           </>
@@ -416,28 +487,30 @@ export function DashboardView({
       <ErrorBanner error={error} onRetry={loadSummary} />
 
       {loading ? (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="ent-card p-6 h-36 animate-pulse bg-white">
-              <div className="h-3.5 w-32 bg-[#EDE5F8] rounded mb-3" />
-              <div className="h-7 w-20 bg-[#F2EDFA] rounded mb-6" />
-              <div className="h-3 w-full bg-[#F8F7FC] rounded" />
+        <div className="his-metric-strip grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 divide-y sm:divide-y-0 sm:divide-x divide-[#E8E4EF]">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} className="p-5 h-28 animate-pulse bg-white space-y-3">
+              <div className="h-3.5 w-28 bg-[#E9DFF5] rounded" />
+              <div className="h-7 w-20 bg-[#F1ECFA] rounded" />
+              <div className="h-3 w-36 bg-[#F8F7FC] rounded" />
             </div>
           ))}
         </div>
       ) : !error && kpi ? (
         <>
           {data?.isEmptyPeriod && (
-            <div className="ent-card p-4 bg-[#F8F7FC] flex flex-wrap items-center justify-between gap-3 text-[13.5px] text-[#746B83]">
+            <div className="his-surface px-4 py-3.5 bg-[#F8F7FC] flex flex-wrap items-center justify-between gap-3 text-[13.5px] text-[#777287]">
               <div>
-                <strong className="text-[#262238]">ยังไม่มีข้อมูลสำหรับช่วงเวลาที่เลือก ({resolvedRange.thaiPeriodLabel}):</strong>{' '}
+                <strong className="text-[#292638]">
+                  ยังไม่มีข้อมูลสำหรับช่วงเวลาที่เลือก ({resolvedRange.thaiPeriodLabel}):
+                </strong>{' '}
                 ตัวเลข 0 ด้านล่างเป็นผลลัพธ์จริงจากฐานข้อมูลโดยไม่มีการแทรกข้อมูลจำลอง
               </div>
               {onNavigate && (
                 <button
                   type="button"
                   onClick={() => onNavigate('shifts')}
-                  className="font-semibold text-[#543B7A] hover:text-[#795BB8] hover:underline inline-flex items-center gap-1 cursor-pointer"
+                  className="font-semibold text-[#8066B5] hover:text-[#4E3978] hover:underline inline-flex items-center gap-1 cursor-pointer"
                 >
                   <span>ไปกำหนดตารางเวรหรือประมวลผลเวลา</span>
                   <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
@@ -446,190 +519,30 @@ export function DashboardView({
             </div>
           )}
 
-          {/* 3. 4 Operational KPI Cards (Preserving Exact Formulas & Drilldowns) */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-            {/* Card 1: Personnel & Total Shifts */}
-            <div className="ent-card p-5 flex flex-col justify-between space-y-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-[13px] font-semibold text-[#746B83]">
-                    บุคลากรที่มีตารางเวร
-                  </div>
-                  <div className="mt-1.5 flex items-baseline gap-2">
-                    <span className="text-[28px] font-bold text-[#262238] tabular-nums leading-none">
-                      {kpi.evaluatedPersonnelCount}
-                    </span>
-                    <span className="text-[13px] text-[#746B83]">
-                      คน (จาก {data.activePersonnelTotal} คน)
-                    </span>
-                  </div>
-                </div>
-                <div className="w-10 h-10 rounded-xl bg-[#F2EDFA] flex items-center justify-center text-[#8E70C9] shrink-0">
-                  <Users className="w-5 h-5" aria-hidden="true" />
-                </div>
+          {/* 3. Unified Single-Elevation Metric Strip (5 Core Hospital KPIs) */}
+          <MetricStrip items={metricItems} columns={5} />
+
+          {/* 4. Attendance Status Breakdown + Action-Required Queue (Hairline Divided, Zero Nested Cards) */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            {/* Left 7 Cols: Mutually Exclusive 100% Shift Status Breakdown */}
+            <section className="lg:col-span-7 his-surface flex flex-col justify-between overflow-hidden">
+              <div className="px-5 py-4 border-b border-[#E8E4EF]">
+                <SectionHeader
+                  title="สัดส่วนสถานะหลักของเวรปฏิบัติงานทั้งหมด"
+                  subtitle="จำแนกตามสถานะหลักของแต่ละเวรโดยไม่ซ้อนทับ เพื่อเปรียบเทียบผู้สแกนครบกับผู้ไม่พบสแกน"
+                  actions={
+                    <StatusBadge
+                      tone="brand"
+                      label={`ฐานคำนวณ ${totalShiftsCount} เวร = 100%`}
+                      compact
+                    />
+                  }
+                />
               </div>
 
-              <div className="pt-3 border-t border-[#E6DFF0] flex items-center justify-between text-[13px]">
-                <span className="text-[#746B83]">
-                  เวรรวม <strong className="text-[#262238] tabular-nums">{kpi.totalShifts} เวร</strong>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => openKpiDrilldown('ALL')}
-                  className="font-semibold text-[#543B7A] hover:text-[#795BB8] hover:underline inline-flex items-center gap-1 cursor-pointer"
-                >
-                  <span>ดูทั้งหมด</span>
-                  <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
-                </button>
-              </div>
-            </div>
-
-            {/* Card 2: Normal On-Time Attendance */}
-            <div className="ent-card p-5 flex flex-col justify-between space-y-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-[13px] font-semibold text-[#746B83]">
-                    ลงเวลาปกติ (ตรงเวลา)
-                  </div>
-                  <div className="mt-1.5 flex items-baseline gap-2">
-                    <span className="text-[28px] font-bold text-[#198568] tabular-nums leading-none">
-                      {kpi.normalCount}
-                    </span>
-                    <span className="text-[13px] text-[#746B83]">
-                      เวร ({normalPct}%)
-                    </span>
-                  </div>
-                </div>
-                <div className="w-10 h-10 rounded-xl bg-[#EDF8F4] flex items-center justify-center text-[#198568] shrink-0">
-                  <CheckCircle2 className="w-5 h-5" aria-hidden="true" />
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-[#E6DFF0] flex items-center justify-between text-[13px]">
-                <span className="text-[#746B83]">สแกนเข้า–ออกครบตามกะ</span>
-                <button
-                  type="button"
-                  onClick={() => openKpiDrilldown('NORMAL')}
-                  className="font-semibold text-[#198568] hover:underline inline-flex items-center gap-1 cursor-pointer"
-                >
-                  <span>ดูรายชื่อ</span>
-                  <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
-                </button>
-              </div>
-            </div>
-
-            {/* Card 3: Lateness (Distinct People vs Occurrences + Total/Avg Minutes) */}
-            <div className="ent-card p-5 flex flex-col justify-between space-y-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-[13px] font-semibold text-[#746B83]">
-                    มาสาย (คนไม่ซ้ำ · จำนวนครั้ง)
-                  </div>
-                  <div className="mt-1.5 flex items-baseline gap-1.5 flex-wrap">
-                    <span className="text-[28px] font-bold text-[#B87516] tabular-nums leading-none">
-                      {kpi.latePeople}
-                    </span>
-                    <span className="text-[13px] font-semibold text-[#262238]">คน</span>
-                    <span className="text-[#E6DFF0]">·</span>
-                    <span className="text-[19px] font-bold text-[#262238] tabular-nums">
-                      {kpi.lateOccurrences}
-                    </span>
-                    <span className="text-[13px] text-[#746B83]">ครั้ง</span>
-                  </div>
-                </div>
-                <div className="w-10 h-10 rounded-xl bg-[#FEF8ED] flex items-center justify-center text-[#B87516] shrink-0">
-                  <Clock className="w-5 h-5" aria-hidden="true" />
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-[#E6DFF0] flex items-center justify-between gap-2 text-[13px]">
-                <span className="text-[#746B83] tabular-nums truncate">
-                  สะสม <strong className="text-[#262238]">{kpi.totalLateMinutes} น.</strong> (เฉลี่ย {kpi.avgLateMinutesPerOccurrence} น.)
-                </span>
-                <button
-                  type="button"
-                  onClick={() => openKpiDrilldown('LATE')}
-                  className="font-semibold text-[#B87516] hover:underline inline-flex items-center gap-1 shrink-0 cursor-pointer"
-                >
-                  <span>เจาะลึก</span>
-                  <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
-                </button>
-              </div>
-            </div>
-
-            {/* Card 4: Scan Anomalies (NO_SCAN & MISSING_CHECKOUT) */}
-            <div className="ent-card p-5 flex flex-col justify-between space-y-4">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <div className="text-[13px] font-semibold text-[#746B83]">
-                    ไม่พบสแกน · ไม่สแกนออก
-                  </div>
-                  <div className="mt-1.5 flex items-baseline gap-2">
-                    <button
-                      type="button"
-                      onClick={() => openKpiDrilldown('NO_SCAN')}
-                      className="text-left group cursor-pointer"
-                    >
-                      <span className="text-[28px] font-bold text-[#C74455] tabular-nums leading-none group-hover:underline">
-                        {kpi.noScanCount}
-                      </span>
-                      <span className="text-[13px] text-[#746B83] ml-1">ขาดสแกน</span>
-                    </button>
-                    <span className="text-[#E6DFF0]">/</span>
-                    <button
-                      type="button"
-                      onClick={() => openKpiDrilldown('MISSING_CHECKOUT')}
-                      className="text-left group cursor-pointer"
-                    >
-                      <span className="text-[22px] font-bold text-[#B87516] tabular-nums leading-none group-hover:underline">
-                        {kpi.missingCheckoutCount}
-                      </span>
-                      <span className="text-[13px] text-[#746B83] ml-1">ไม่สแกนออก</span>
-                    </button>
-                  </div>
-                </div>
-                <div className="w-10 h-10 rounded-xl bg-[#FDF2F3] flex items-center justify-center text-[#C74455] shrink-0">
-                  <AlertTriangle className="w-5 h-5" aria-hidden="true" />
-                </div>
-              </div>
-
-              <div className="pt-3 border-t border-[#E6DFF0] flex items-center justify-between text-[13px]">
-                <span className="text-[#746B83]">
-                  รอตรวจ HR <strong className="text-[#C74455] tabular-nums">{kpi.pendingReviewCount} รายการ</strong>
-                </span>
-                <button
-                  type="button"
-                  onClick={() => openKpiDrilldown('PENDING_REVIEW')}
-                  className="font-semibold text-[#543B7A] hover:text-[#795BB8] hover:underline inline-flex items-center gap-1 shrink-0 cursor-pointer"
-                >
-                  <span>ตรวจรายการ</span>
-                  <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* 4. Attendance Status Visualization (100% Non-Overlapping) + Action-Required Panel */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-            {/* Left 2 Columns: Mutually Exclusive 100% Shift Status Breakdown */}
-            <div className="lg:col-span-2 ent-card p-5 sm:p-6 flex flex-col justify-between space-y-5">
-              <div className="space-y-1">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h2 className="text-[17px] sm:text-[18px] font-bold text-[#262238]">
-                    สัดส่วนสถานะหลักของเวรปฏิบัติงานทั้งหมด
-                  </h2>
-                  <span className="text-[12.5px] font-semibold text-[#543B7A] bg-[#F2EDFA] px-3 py-1 rounded-lg border border-[#E6DFF0] tabular-nums">
-                    ฐานการคำนวณ: {totalShiftsCount} เวร = 100% (ไม่นับซ้ำ)
-                  </span>
-                </div>
-                <p className="text-[13px] text-[#746B83]">
-                  จำแนกตามสถานะหลักของแต่ละเวรโดยไม่ซ้อนทับ เพื่อความชัดเจนในการติดตามและตรวจสอบ
-                </p>
-              </div>
-
-              {/* Stacked Horizontal Bar (Guaranteed Sum === totalShifts) */}
-              <div className="space-y-3.5">
-                <div className="h-3.5 w-full bg-[#F2EDFA] rounded-lg overflow-hidden flex border border-[#E6DFF0]">
+              <div className="px-5 py-4 space-y-4">
+                {/* Stacked Horizontal Bar */}
+                <div className="h-3 w-full bg-[#F1ECFA] rounded-full overflow-hidden flex">
                   {statusNormalCount > 0 && (
                     <div
                       style={{ width: `${(statusNormalCount / totalShiftsSafe) * 100}%` }}
@@ -674,17 +587,20 @@ export function DashboardView({
                   )}
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                {/* Hairline-Divided Breakdown List (No Nested Cards) */}
+                <div className="divide-y divide-[#E8E4EF] border-t border-[#E8E4EF]">
                   <button
                     type="button"
                     onClick={() => openKpiDrilldown('NORMAL')}
-                    className="p-3.5 rounded-xl border border-[#E6DFF0] bg-[#F8F7FC] hover:bg-[#F2EDFA] flex items-center justify-between text-left transition-colors cursor-pointer"
+                    className="w-full py-3 flex items-center justify-between gap-3 text-left hover:bg-[#F8F7FC] px-2 -mx-2 rounded-md transition-colors cursor-pointer"
                   >
-                    <div className="flex items-center gap-2.5">
-                      <span className="w-3 h-3 rounded-xs bg-[#198568] shrink-0" />
-                      <span className="text-[13.5px] font-semibold text-[#262238]">ลงเวลาปกติ</span>
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#198568] shrink-0" />
+                      <span className="text-[14px] font-medium text-[#292638]">
+                        ลงเวลาปกติ (สแกนเข้า–ออกครบ)
+                      </span>
                     </div>
-                    <span className="text-[13.5px] font-mono font-bold text-[#198568] tabular-nums">
+                    <span className="text-[13.5px] font-mono font-bold text-[#198568] tabular-nums shrink-0">
                       {statusNormalCount} เวร ({normalPct}%)
                     </span>
                   </button>
@@ -692,13 +608,15 @@ export function DashboardView({
                   <button
                     type="button"
                     onClick={() => openKpiDrilldown('LATE')}
-                    className="p-3.5 rounded-xl border border-[#E6DFF0] bg-[#F8F7FC] hover:bg-[#F2EDFA] flex items-center justify-between text-left transition-colors cursor-pointer"
+                    className="w-full py-3 flex items-center justify-between gap-3 text-left hover:bg-[#F8F7FC] px-2 -mx-2 rounded-md transition-colors cursor-pointer"
                   >
-                    <div className="flex items-center gap-2.5">
-                      <span className="w-3 h-3 rounded-xs bg-[#B87516] shrink-0" />
-                      <span className="text-[13.5px] font-semibold text-[#262238]">มาสาย (สแกนออกครบ)</span>
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#B87516] shrink-0" />
+                      <span className="text-[14px] font-medium text-[#292638]">
+                        มาสาย (สแกนออกครบ)
+                      </span>
                     </div>
-                    <span className="text-[13.5px] font-mono font-bold text-[#B87516] tabular-nums">
+                    <span className="text-[13.5px] font-mono font-bold text-[#B87516] tabular-nums shrink-0">
                       {statusLateOnlyCount} เวร ({lateOnlyPct}%)
                     </span>
                   </button>
@@ -706,15 +624,15 @@ export function DashboardView({
                   <button
                     type="button"
                     onClick={() => openKpiDrilldown('MISSING_CHECKOUT')}
-                    className="p-3.5 rounded-xl border border-[#E6DFF0] bg-[#F8F7FC] hover:bg-[#F2EDFA] flex items-center justify-between text-left transition-colors cursor-pointer"
+                    className="w-full py-3 flex items-center justify-between gap-3 text-left hover:bg-[#F8F7FC] px-2 -mx-2 rounded-md transition-colors cursor-pointer"
                   >
-                    <div>
+                    <div className="min-w-0">
                       <div className="flex items-center gap-2.5">
-                        <span className="w-3 h-3 rounded-xs bg-[#E5A93C] shrink-0" />
-                        <span className="text-[13.5px] font-semibold text-[#262238]">ไม่สแกนออกงาน</span>
+                        <span className="w-2.5 h-2.5 rounded-full bg-[#E5A93C] shrink-0" />
+                        <span className="text-[14px] font-medium text-[#292638]">ไม่สแกนออกงาน</span>
                       </div>
                       {statusMissingOutAndLateCount > 0 && (
-                        <div className="text-[11.5px] text-[#746B83] pl-5 mt-0.5">
+                        <div className="text-[12px] text-[#777287] pl-5 mt-0.5">
                           เข้าสายร่วมด้วย {statusMissingOutAndLateCount} เวร
                         </div>
                       )}
@@ -727,170 +645,142 @@ export function DashboardView({
                   <button
                     type="button"
                     onClick={() => openKpiDrilldown('NO_SCAN')}
-                    className="p-3.5 rounded-xl border border-[#E6DFF0] bg-[#F8F7FC] hover:bg-[#F2EDFA] flex items-center justify-between text-left transition-colors cursor-pointer"
+                    className="w-full py-3 flex items-center justify-between gap-3 text-left hover:bg-[#F8F7FC] px-2 -mx-2 rounded-md transition-colors cursor-pointer"
                   >
-                    <div className="flex items-center gap-2.5">
-                      <span className="w-3 h-3 rounded-xs bg-[#C74455] shrink-0" />
-                      <span className="text-[13.5px] font-semibold text-[#262238]">ไม่พบข้อมูลสแกน</span>
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#C74455] shrink-0" />
+                      <span className="text-[14px] font-medium text-[#292638]">
+                        ไม่พบข้อมูลสแกน (NO_SCAN)
+                      </span>
                     </div>
-                    <span className="text-[13.5px] font-mono font-bold text-[#C74455] tabular-nums">
+                    <span className="text-[13.5px] font-mono font-bold text-[#C74455] tabular-nums shrink-0">
                       {statusNoScanCount} เวร ({noScanPct}%)
                     </span>
                   </button>
+
+                  {statusMissingInCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => openKpiDrilldown('MISSING_CHECKIN')}
+                      className="w-full py-3 flex items-center justify-between gap-3 text-left hover:bg-[#F8F7FC] px-2 -mx-2 rounded-md transition-colors cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <span className="w-2.5 h-2.5 rounded-full bg-[#D97757] shrink-0" />
+                        <span className="text-[14px] font-medium text-[#292638]">ไม่สแกนเข้างาน</span>
+                      </div>
+                      <span className="text-[13.5px] font-mono font-bold text-[#C74455] tabular-nums shrink-0">
+                        {statusMissingInCount} เวร ({missingInPct}%)
+                      </span>
+                    </button>
+                  )}
                 </div>
               </div>
-            </div>
+            </section>
 
-            {/* Right Column: Real Action-Required Panel */}
-            <div className="ent-card p-5 sm:p-6 flex flex-col justify-between space-y-4">
-              <div className="space-y-0.5">
-                <h2 className="text-[17px] sm:text-[18px] font-bold text-[#262238]">
-                  รายการที่ต้องดูแล
-                </h2>
-                <p className="text-[13px] text-[#746B83]">
-                  สรุปรายการผิดปกติจากฐานข้อมูลจริงเพื่อดำเนินการต่อ
-                </p>
+            {/* Right 5 Cols: Action-Required Queue (Clean Hairline List) */}
+            <section className="lg:col-span-5 his-surface flex flex-col justify-between overflow-hidden">
+              <div className="px-5 py-4 border-b border-[#E8E4EF]">
+                <SectionHeader
+                  title="รายการที่ต้องดูแล"
+                  subtitle="คลิกแต่ละหัวข้อเพื่อเปิดดูรายชื่อและดำเนินการตรวจสอบ"
+                />
               </div>
 
-              <div className="space-y-2 flex-1">
+              <div className="divide-y divide-[#E8E4EF] flex-1">
                 <button
                   type="button"
                   onClick={() => openKpiDrilldown('PENDING_REVIEW')}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#F2EDFA] hover:bg-[#EDE5F8] border border-[#E6DFF0] flex items-center justify-between text-left transition-colors cursor-pointer"
+                  className="w-full px-5 py-3.5 bg-[#F1ECFA]/60 hover:bg-[#F1ECFA] flex items-center justify-between gap-3 text-left transition-colors cursor-pointer"
                 >
-                  <span className="text-[13.5px] font-semibold text-[#543B7A]">รอตรวจสอบเหตุผล HR</span>
-                  <span className="font-mono font-bold text-[14px] text-[#543B7A] tabular-nums">
+                  <span className="text-[14px] font-semibold text-[#4E3978]">
+                    รอตรวจสอบเหตุผลโดยเจ้าหน้าที่ HR
+                  </span>
+                  <span className="font-mono font-bold text-[14px] text-[#4E3978] tabular-nums shrink-0">
                     {kpi.pendingReviewCount} รายการ
                   </span>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => openKpiDrilldown('NO_SCAN')}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-white hover:bg-[#F8F7FC] border border-[#E6DFF0] flex items-center justify-between text-left transition-colors cursor-pointer"
-                >
-                  <span className="text-[13.5px] font-medium text-[#262238]">ไม่พบข้อมูลสแกน (NO_SCAN)</span>
-                  <span className={`font-mono font-bold text-[13.5px] tabular-nums ${statusNoScanCount > 0 ? 'text-[#C74455]' : 'text-[#746B83]'}`}>
-                    {statusNoScanCount}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => openKpiDrilldown('MISSING_CHECKIN')}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-white hover:bg-[#F8F7FC] border border-[#E6DFF0] flex items-center justify-between text-left transition-colors cursor-pointer"
-                >
-                  <span className="text-[13.5px] font-medium text-[#262238]">ไม่พบสแกนเข้างาน</span>
-                  <span className={`font-mono font-bold text-[13.5px] tabular-nums ${statusMissingInCount > 0 ? 'text-[#C74455]' : 'text-[#746B83]'}`}>
-                    {statusMissingInCount}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => openKpiDrilldown('MISSING_CHECKOUT')}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-white hover:bg-[#F8F7FC] border border-[#E6DFF0] flex items-center justify-between text-left transition-colors cursor-pointer"
-                >
-                  <span className="text-[13.5px] font-medium text-[#262238]">ไม่สแกนออกงาน</span>
-                  <span className={`font-mono font-bold text-[13.5px] tabular-nums ${statusMissingOutCount > 0 ? 'text-[#B87516]' : 'text-[#746B83]'}`}>
-                    {statusMissingOutCount}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => openKpiDrilldown('EARLY_CHECKOUT')}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-white hover:bg-[#F8F7FC] border border-[#E6DFF0] flex items-center justify-between text-left transition-colors cursor-pointer"
-                >
-                  <span className="text-[13.5px] font-medium text-[#262238]">ออกงานก่อนเวลา</span>
-                  <span className={`font-mono font-bold text-[13.5px] tabular-nums ${earlyCheckoutCount > 0 ? 'text-[#C74455]' : 'text-[#746B83]'}`}>
-                    {earlyCheckoutCount}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => openKpiDrilldown('NEEDS_RE_REVIEW')}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-white hover:bg-[#F8F7FC] border border-[#E6DFF0] flex items-center justify-between text-left transition-colors cursor-pointer"
-                >
-                  <span className="text-[13.5px] font-medium text-[#262238]">ต้องตรวจสอบซ้ำ</span>
-                  <span className={`font-mono font-bold text-[13.5px] tabular-nums ${needsReReviewCount > 0 ? 'text-[#B87516]' : 'text-[#746B83]'}`}>
-                    {needsReReviewCount}
-                  </span>
-                </button>
-              </div>
-
-              {/* Compact Scanner Last Sync Footer */}
-              <div className="pt-3 border-t border-[#E6DFF0] flex items-center justify-between gap-2 text-[12.5px] text-[#746B83]">
-                <div className="truncate">
-                  ซิงก์เครื่องสแกนล่าสุด:{' '}
-                  <span className="font-mono text-[#262238]">
-                    {telemetry?.lastSuccessTimestamp
-                      ? formatThaiDateTime(telemetry.lastSuccessTimestamp)
-                      : 'ยังไม่มีประวัติ'}
-                  </span>
-                </div>
-                {onNavigate && (
+                {[
+                  {
+                    key: 'NO_SCAN' as DrillFilterType,
+                    label: 'ไม่พบข้อมูลสแกน (NO_SCAN)',
+                    count: statusNoScanCount,
+                    color: statusNoScanCount > 0 ? 'text-[#C74455]' : 'text-[#777287]',
+                  },
+                  {
+                    key: 'MISSING_CHECKIN' as DrillFilterType,
+                    label: 'ไม่พบสแกนเข้างาน',
+                    count: statusMissingInCount,
+                    color: statusMissingInCount > 0 ? 'text-[#C74455]' : 'text-[#777287]',
+                  },
+                  {
+                    key: 'MISSING_CHECKOUT' as DrillFilterType,
+                    label: 'ไม่สแกนออกงาน',
+                    count: statusMissingOutCount,
+                    color: statusMissingOutCount > 0 ? 'text-[#B87516]' : 'text-[#777287]',
+                  },
+                  {
+                    key: 'EARLY_CHECKOUT' as DrillFilterType,
+                    label: 'ออกงานก่อนเวลา',
+                    count: earlyCheckoutCount,
+                    color: earlyCheckoutCount > 0 ? 'text-[#C74455]' : 'text-[#777287]',
+                  },
+                  {
+                    key: 'NEEDS_RE_REVIEW' as DrillFilterType,
+                    label: 'ต้องตรวจสอบซ้ำหลังคำนวณใหม่',
+                    count: needsReReviewCount,
+                    color: needsReReviewCount > 0 ? 'text-[#B87516]' : 'text-[#777287]',
+                  },
+                ].map((row) => (
                   <button
+                    key={row.key}
                     type="button"
-                    onClick={() => onNavigate('scanners')}
-                    className="font-semibold text-[#5879BC] hover:underline shrink-0 cursor-pointer"
+                    onClick={() => openKpiDrilldown(row.key)}
+                    className="w-full px-5 py-3 hover:bg-[#F8F7FC] flex items-center justify-between gap-3 text-left transition-colors cursor-pointer"
                   >
-                    ดูสถานะ
+                    <span className="text-[13.5px] font-medium text-[#292638]">{row.label}</span>
+                    <span className={`font-mono font-bold text-[13.5px] tabular-nums ${row.color}`}>
+                      {row.count}
+                    </span>
                   </button>
-                )}
+                ))}
               </div>
-            </div>
+            </section>
           </div>
 
           {/* 5. Department Summary Table */}
           <div className="ent-table-wrapper">
-            <div className="px-4 sm:px-6 py-4 border-b border-[#E6DFF0] bg-[#F8F7FC] flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h2 className="text-[17px] sm:text-[18px] font-bold text-[#262238]">
-                  สรุปผลการลงเวลาแยกตามกลุ่มงาน / หน่วยงาน
-                </h2>
-                <p className="text-[13px] text-[#746B83]">
-                  เปรียบเทียบจำนวนบุคลากรที่มาสาย (ไม่ซ้ำคน) จำนวนครั้งที่สาย และจำนวนเวรที่ไม่พบข้อมูลสแกน
-                </p>
-              </div>
-              <span className="text-[12.5px] font-medium text-[#746B83]">{resolvedRange.thaiPeriodLabel}</span>
+            <div className="px-5 py-4 border-b border-[#E8E4EF] flex flex-wrap items-center justify-between gap-2 bg-white">
+              <SectionHeader
+                title="สรุปผลการลงเวลาแยกตามกลุ่มงาน / หน่วยงาน"
+                subtitle="เปรียบเทียบจำนวนบุคลากรที่มาสาย (ไม่ซ้ำคน) จำนวนครั้งที่สาย และจำนวนเวรที่ไม่พบข้อมูลสแกน"
+              />
+              <span className="text-[12.5px] font-medium text-[#777287]">
+                {resolvedRange.thaiPeriodLabel}
+              </span>
             </div>
 
             {/* Mobile Card View (< md) */}
-            <div className="md:hidden divide-y divide-[#E6DFF0]">
+            <div className="md:hidden divide-y divide-[#E8E4EF]">
               {data.departmentBreakdown?.length === 0 ? (
-                <div className="p-8 text-center text-[14px] text-[#746B83]">
+                <div className="p-8 text-center text-[14px] text-[#777287]">
                   ไม่มีข้อมูลการลงเวลาในช่วงเวลาที่เลือก
                 </div>
               ) : (
                 data.departmentBreakdown?.map((d: any) => (
-                  <div key={d.departmentName} className="p-4 space-y-2.5 bg-white">
+                  <div key={d.departmentName} className="p-4 space-y-2 bg-white">
                     <div className="flex items-center justify-between gap-2">
-                      <span className="font-bold text-[15px] text-[#262238]">{d.departmentName}</span>
-                      <span className="font-mono text-[13px] font-semibold text-[#746B83] tabular-nums">
+                      <span className="font-bold text-[14.5px] text-[#292638]">{d.departmentName}</span>
+                      <span className="font-mono text-[13px] font-semibold text-[#777287] tabular-nums">
                         {d.totalShifts} เวร
                       </span>
                     </div>
-                    <div className="grid grid-cols-3 gap-2 p-2.5 rounded-lg bg-[#F8F7FC] border border-[#E6DFF0] text-[12.5px] text-center">
-                      <div>
-                        <div className="text-[#746B83]">คนสาย</div>
-                        <div className="font-mono font-bold text-[#B87516] mt-0.5 tabular-nums">
-                          {d.latePeople} คน ({d.lateOccurrences})
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[#746B83]">นาทีสายสะสม</div>
-                        <div className="font-mono font-bold text-[#262238] mt-0.5 tabular-nums">
-                          {d.totalLateMinutes} น.
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[#746B83]">ไม่พบสแกน</div>
-                        <div className="font-mono font-bold text-[#C74455] mt-0.5 tabular-nums">
-                          {d.noScanCount} เวร
-                        </div>
-                      </div>
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] font-mono tabular-nums">
+                      <span className="text-[#B87516] font-semibold">
+                        สาย {d.latePeople} คน ({d.lateOccurrences} ครั้ง)
+                      </span>
+                      <span className="text-[#292638] font-semibold">{d.totalLateMinutes} น.</span>
+                      <span className="text-[#C74455] font-semibold">ขาดสแกน {d.noScanCount} เวร</span>
                     </div>
                   </div>
                 ))
@@ -899,37 +789,33 @@ export function DashboardView({
 
             {/* Desktop Table View (>= md) */}
             <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-left border-collapse text-[14px]">
+              <table className="his-table">
                 <thead>
-                  <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
-                    <th className="py-3.5 px-5 font-semibold text-[13px]">กลุ่มงาน / หน่วยงาน</th>
-                    <th className="py-3.5 px-5 font-semibold text-[13px] text-right">เวรปฏิบัติงานทั้งหมด</th>
-                    <th className="py-3.5 px-5 font-semibold text-[13px] text-right">จำนวนคนที่สาย (ไม่ซ้ำคน)</th>
-                    <th className="py-3.5 px-5 font-semibold text-[13px] text-right">จำนวนครั้งที่สาย</th>
-                    <th className="py-3.5 px-5 font-semibold text-[13px] text-right">นาทีสายสะสม</th>
-                    <th className="py-3.5 px-5 font-semibold text-[13px] text-right">ไม่พบข้อมูลสแกน</th>
+                  <tr>
+                    <th>กลุ่มงาน / หน่วยงาน</th>
+                    <th className="text-right">เวรปฏิบัติงานทั้งหมด</th>
+                    <th className="text-right">จำนวนคนที่สาย (ไม่ซ้ำคน)</th>
+                    <th className="text-right">จำนวนครั้งที่สาย</th>
+                    <th className="text-right">นาทีสายสะสม</th>
+                    <th className="text-right">ไม่พบข้อมูลสแกน</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#E6DFF0]">
+                <tbody>
                   {data.departmentBreakdown?.length === 0 ? (
                     <TableEmptyState colSpan={6} title="ไม่มีข้อมูลการลงเวลาในช่วงเวลาที่เลือก" />
                   ) : (
                     data.departmentBreakdown?.map((d: any) => (
-                      <tr key={d.departmentName} className="hover:bg-[#F8F7FC] transition-colors">
-                        <td className="py-3.5 px-5 font-semibold text-[#262238]">{d.departmentName}</td>
-                        <td className="py-3.5 px-5 text-right font-mono tabular-nums text-[#262238]">
-                          {d.totalShifts} เวร
-                        </td>
-                        <td className="py-3.5 px-5 text-right font-mono tabular-nums text-[#B87516] font-semibold">
+                      <tr key={d.departmentName}>
+                        <td className="font-semibold text-[#292638]">{d.departmentName}</td>
+                        <td className="text-right font-mono tabular-nums">{d.totalShifts} เวร</td>
+                        <td className="text-right font-mono tabular-nums text-[#B87516] font-semibold">
                           {d.latePeople} คน
                         </td>
-                        <td className="py-3.5 px-5 text-right font-mono tabular-nums text-[#262238]">
-                          {d.lateOccurrences} ครั้ง
-                        </td>
-                        <td className="py-3.5 px-5 text-right font-mono tabular-nums font-bold text-[#262238]">
+                        <td className="text-right font-mono tabular-nums">{d.lateOccurrences} ครั้ง</td>
+                        <td className="text-right font-mono tabular-nums font-bold">
                           {d.totalLateMinutes} นาที
                         </td>
-                        <td className="py-3.5 px-5 text-right font-mono tabular-nums text-[#C74455] font-semibold">
+                        <td className="text-right font-mono tabular-nums text-[#C74455] font-semibold">
                           {d.noScanCount} เวร
                         </td>
                       </tr>
@@ -942,15 +828,11 @@ export function DashboardView({
 
           {/* 6. Personnel Attendance Ranking Table */}
           <div className="ent-table-wrapper">
-            <div className="px-4 sm:px-6 py-4 border-b border-[#E6DFF0] bg-[#F8F7FC] flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
-              <div>
-                <h2 className="text-[17px] sm:text-[18px] font-bold text-[#262238]">
-                  ตารางสรุปสถิติการลงเวลารายบุคคล
-                </h2>
-                <p className="text-[13px] text-[#746B83] mt-0.5">
-                  จัดเรียงตามนาทีสายสะสม จำนวนครั้งที่มาสาย บุคลากรตรงเวลาดีเด่น หรือรายการไม่สมบูรณ์
-                </p>
-              </div>
+            <div className="px-5 py-4 border-b border-[#E8E4EF] bg-white flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
+              <SectionHeader
+                title="ตารางสรุปสถิติการลงเวลารายบุคคล"
+                subtitle="จัดเรียงตามนาทีสายสะสม จำนวนครั้งที่มาสาย บุคลากรตรงเวลาดีเด่น หรือรายการไม่สมบูรณ์"
+              />
 
               <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-3 w-full xl:w-auto">
                 <div className="ent-tab-bar grid grid-cols-2 sm:inline-flex">
@@ -975,7 +857,10 @@ export function DashboardView({
                 </div>
 
                 <div className="relative w-full sm:w-64">
-                  <Search className="w-4 h-4 text-[#746B83] absolute left-3.5 top-3" aria-hidden="true" />
+                  <Search
+                    className="w-4 h-4 text-[#777287] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                    aria-hidden="true"
+                  />
                   <input
                     type="text"
                     aria-label="ค้นหาบุคลากรในตารางจัดอันดับ"
@@ -985,54 +870,41 @@ export function DashboardView({
                       setRankPage(1);
                     }}
                     placeholder="ค้นหาชื่อ หรือ รหัสบุคลากร..."
-                    className="ent-input pl-10 pr-4 w-full"
+                    className="ent-input ent-input-with-icon pr-4 w-full"
                   />
                 </div>
               </div>
             </div>
 
-            {/* Mobile Card View (< md) */}
-            <div className="md:hidden divide-y divide-[#E6DFF0]">
+            {/* Mobile View (< md) */}
+            <div className="md:hidden divide-y divide-[#E8E4EF]">
               {pagedRanking.length === 0 ? (
-                <div className="p-8 text-center text-[14px] text-[#746B83]">
+                <div className="p-8 text-center text-[14px] text-[#777287]">
                   ไม่พบข้อมูลบุคลากรตามเงื่อนไขที่ค้นหา
                 </div>
               ) : (
                 pagedRanking.map((p: any, idx: number) => (
-                  <div key={p.personId} className="p-4 space-y-2.5 bg-white">
+                  <div key={p.personId} className="p-4 space-y-2 bg-white">
                     <div className="flex items-start justify-between gap-2">
                       <div>
-                        <span className="font-mono text-[12.5px] font-bold text-[#8E70C9] mr-1.5 tabular-nums">
+                        <span className="font-mono text-[12.5px] font-bold text-[#8066B5] mr-1.5 tabular-nums">
                           #{(rankPageSize === 'ALL' ? 0 : (rankPage - 1) * rankPageSize) + idx + 1}
                         </span>
-                        <span className="font-bold text-[15px] text-[#262238]">{p.fullName}</span>
-                        <div className="text-[12.5px] text-[#746B83] mt-0.5">
+                        <span className="font-bold text-[14.5px] text-[#292638]">{p.fullName}</span>
+                        <div className="text-[12.5px] text-[#777287] mt-0.5">
                           <span className="font-mono">{p.personId}</span> · {p.departmentName}
                         </div>
                       </div>
-                      <span className="font-mono text-[12.5px] text-[#746B83] shrink-0 tabular-nums">
+                      <span className="font-mono text-[12.5px] text-[#777287] shrink-0 tabular-nums">
                         {p.totalShifts} เวร
                       </span>
                     </div>
-                    <div className="grid grid-cols-3 gap-2 p-2.5 rounded-lg bg-[#F8F7FC] border border-[#E6DFF0] text-[12.5px] text-center">
-                      <div>
-                        <div className="text-[#746B83]">ครั้งที่สาย</div>
-                        <div className="font-mono font-bold text-[#B87516] mt-0.5 tabular-nums">
-                          {p.lateOccurrences} ครั้ง
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[#746B83]">นาทีสายสะสม</div>
-                        <div className="font-mono font-bold text-[#262238] mt-0.5 tabular-nums">
-                          {p.totalLateMinutes} นาที
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[#746B83]">ขาด/ไม่สแกนออก</div>
-                        <div className="font-mono font-bold text-[#C74455] mt-0.5 tabular-nums">
-                          {p.noScanCount}/{p.missingCheckoutCount}
-                        </div>
-                      </div>
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] font-mono tabular-nums">
+                      <span className="text-[#B87516] font-semibold">สาย {p.lateOccurrences} ครั้ง</span>
+                      <span className="text-[#292638] font-bold">รวม {p.totalLateMinutes} น.</span>
+                      <span className="text-[#C74455] font-semibold">
+                        ขาด/ไม่สแกนออก {p.noScanCount}/{p.missingCheckoutCount}
+                      </span>
                     </div>
                   </div>
                 ))
@@ -1041,10 +913,10 @@ export function DashboardView({
 
             {/* Desktop Table View (>= md) */}
             <div className="hidden md:block overflow-x-auto">
-              <table className="w-full text-left border-collapse text-[14px]">
+              <table className="his-table">
                 <thead>
-                  <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
-                    <th className="py-3.5 px-4 font-semibold text-[13px]">ลำดับ</th>
+                  <tr>
+                    <th>ลำดับ</th>
                     <SortableHeader
                       label="ชื่อ-นามสกุล · รหัสบุคลากร"
                       sortKey="fullName"
@@ -1101,35 +973,33 @@ export function DashboardView({
                     />
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-[#E6DFF0]">
+                <tbody>
                   {pagedRanking.length === 0 ? (
                     <TableEmptyState colSpan={8} title="ไม่พบข้อมูลบุคลากรตามเงื่อนไขที่ค้นหา" />
                   ) : (
                     pagedRanking.map((p: any, idx: number) => (
-                      <tr key={p.personId} className="hover:bg-[#F8F7FC] transition-colors">
-                        <td className="py-3.5 px-4 font-mono tabular-nums font-semibold text-[#746B83]">
+                      <tr key={p.personId}>
+                        <td className="font-mono tabular-nums font-semibold text-[#777287]">
                           #{(rankPageSize === 'ALL' ? 0 : (rankPage - 1) * rankPageSize) + idx + 1}
                         </td>
-                        <td className="py-3.5 px-4">
-                          <div className="font-semibold text-[14.5px] text-[#262238]">{p.fullName}</div>
-                          <div className="text-[12.5px] text-[#746B83] font-mono mt-0.5">
+                        <td>
+                          <div className="font-semibold text-[14px] text-[#292638]">{p.fullName}</div>
+                          <div className="text-[12px] text-[#777287] font-mono mt-0.5">
                             {p.personId} · {p.personnelTypeName}
                           </div>
                         </td>
-                        <td className="py-3.5 px-4 text-[#262238]">{p.departmentName}</td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-[#262238]">
-                          {p.totalShifts}
-                        </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums font-semibold text-[#B87516]">
+                        <td>{p.departmentName}</td>
+                        <td className="text-right font-mono tabular-nums">{p.totalShifts}</td>
+                        <td className="text-right font-mono tabular-nums font-semibold text-[#B87516]">
                           {p.lateOccurrences} ครั้ง
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums font-bold text-[#262238]">
+                        <td className="text-right font-mono tabular-nums font-bold">
                           {p.totalLateMinutes} นาที
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-[#746B83]">
+                        <td className="text-right font-mono tabular-nums text-[#777287]">
                           {p.avgLateMinutesPerOccurrence}
                         </td>
-                        <td className="py-3.5 px-4 text-right font-mono tabular-nums text-[#C74455] font-semibold">
+                        <td className="text-right font-mono tabular-nums text-[#C74455] font-semibold">
                           {p.noScanCount} / {p.missingCheckoutCount}
                         </td>
                       </tr>
@@ -1174,40 +1044,40 @@ export function DashboardView({
           ) : null
         }
       >
-        <div className="border border-[#E6DFF0] rounded-xl overflow-hidden">
+        <div className="border border-[#E8E4EF] rounded-xl overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse text-[13.5px]">
+            <table className="his-table text-[13.5px]">
               <thead>
-                <tr className="border-b border-[#E6DFF0] bg-[#F8F7FC] text-[#543B7A]">
-                  <th className="py-3 px-4 font-semibold whitespace-nowrap">วันที่ปฏิบัติงาน</th>
-                  <th className="py-3 px-4 font-semibold whitespace-nowrap">ชื่อ-นามสกุล · รหัสบุคลากร</th>
-                  <th className="py-3 px-4 font-semibold whitespace-nowrap">กะปฏิบัติงาน</th>
-                  <th className="py-3 px-4 font-semibold whitespace-nowrap">เวลาเข้า / เวลาออก</th>
-                  <th className="py-3 px-4 font-semibold text-right whitespace-nowrap">นาทีสาย</th>
-                  <th className="py-3 px-4 font-semibold whitespace-nowrap">สถานะ</th>
+                <tr>
+                  <th>วันที่ปฏิบัติงาน</th>
+                  <th>ชื่อ-นามสกุล · รหัสบุคลากร</th>
+                  <th>กะปฏิบัติงาน</th>
+                  <th>เวลาเข้า / เวลาออก</th>
+                  <th className="text-right">นาทีสาย</th>
+                  <th>สถานะ</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-[#E6DFF0]">
+              <tbody>
                 {drillModal?.rows.length === 0 ? (
                   <TableEmptyState colSpan={6} title="ไม่มีรายการในหมวดหมู่นี้สำหรับช่วงเวลาที่เลือก" />
                 ) : (
                   drillModal?.rows.map((r: any) => (
-                    <tr key={r.id} className="hover:bg-[#F8F7FC]">
-                      <td className="py-3 px-4 font-mono tabular-nums text-[#262238] whitespace-nowrap">
+                    <tr key={r.id}>
+                      <td className="font-mono tabular-nums whitespace-nowrap">
                         {formatThaiDate(r.work_date)}
                       </td>
-                      <td className="py-3 px-4">
-                        <div className="font-semibold text-[#262238]">{r.full_name}</div>
-                        <div className="text-[12px] font-mono text-[#746B83]">{r.person_id}</div>
+                      <td>
+                        <div className="font-semibold text-[#292638]">{r.full_name}</div>
+                        <div className="text-[12px] font-mono text-[#777287]">{r.person_id}</div>
                       </td>
-                      <td className="py-3 px-4 text-[#262238] whitespace-nowrap">{r.shift_name}</td>
-                      <td className="py-3 px-4 font-mono tabular-nums text-[#262238] whitespace-nowrap">
+                      <td className="whitespace-nowrap">{r.shift_name}</td>
+                      <td className="font-mono tabular-nums whitespace-nowrap">
                         {r.check_in_time?.slice(11, 16) || '—'} / {r.check_out_time?.slice(11, 16) || '—'}
                       </td>
-                      <td className="py-3 px-4 text-right font-mono tabular-nums font-bold text-[#B87516] whitespace-nowrap">
+                      <td className="text-right font-mono tabular-nums font-bold text-[#B87516] whitespace-nowrap">
                         {r.late_minutes > 0 ? `${r.late_minutes} นาที` : '0'}
                       </td>
-                      <td className="py-3 px-4 whitespace-nowrap">
+                      <td className="whitespace-nowrap">
                         <AttendanceStatusText
                           status={r.status}
                           secondaryFlags={r.secondary_flags}

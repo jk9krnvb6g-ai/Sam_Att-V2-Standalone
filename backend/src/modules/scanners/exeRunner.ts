@@ -114,6 +114,8 @@ export interface ParsedScannerContractSuccess {
   ok: true;
   events: unknown[];
   machines: ScannerMachineStatusReport[];
+  partialFailure?: boolean;
+  warningMessage?: string | null;
 }
 
 export interface ParsedScannerContractFailure {
@@ -197,7 +199,9 @@ export function emitScannerSyncDiagnostic(entry: ScannerSyncDiagnosticLog): void
     testDiagnosticLogger(entry);
   }
   const serialized = JSON.stringify(entry);
-  if (entry.errorCode) {
+  if (entry.errorCode === 'BLOCKED_BY_EXTERNAL_CONTRACT') {
+    console.warn(`[ScannerSyncDiagnostic] ${serialized}`);
+  } else if (entry.errorCode) {
     console.error(`[ScannerSyncDiagnostic] ${serialized}`);
   } else {
     console.info(`[ScannerSyncDiagnostic] ${serialized}`);
@@ -538,11 +542,27 @@ export function extractScannerContractPayload(parsed: unknown): ParsedScannerCon
     ? (wrapper.machines as ScannerMachineStatusReport[])
     : [];
 
+  const hasOkMachine = machines.some((m) => String(m.status || '').toUpperCase() === 'OK');
+  const hasFailedMachine = machines.some((m) => {
+    const st = String(m.status || '').toUpperCase();
+    return Boolean(st) && st !== 'OK';
+  });
+
   if (wrapper.success === false) {
     const rawMsg =
       (typeof wrapper.error === 'string' && wrapper.error.trim()) ||
       (typeof wrapper.message === 'string' && wrapper.message.trim()) ||
       'ไม่สามารถดึงข้อมูลจากเครื่องสแกนนิ้วได้';
+    // หากบางเครื่องอ่านสำเร็จและส่ง scans กลับมา (เช่น ScannerSyncCli.exe exitCode=1) ให้เก็บข้อมูลเครื่องที่สำเร็จไว้แบบ PARTIAL_SUCCESS
+    if (Array.isArray(wrapper.scans) && hasOkMachine && hasFailedMachine) {
+      return {
+        ok: true,
+        partialFailure: true,
+        warningMessage: sanitizeScannerErrorMessage(rawMsg),
+        events: wrapper.scans,
+        machines,
+      };
+    }
     return {
       ok: false,
       errorMessage: sanitizeScannerErrorMessage(rawMsg),
@@ -562,5 +582,10 @@ export function extractScannerContractPayload(parsed: unknown): ParsedScannerCon
     ok: true,
     events: wrapper.scans,
     machines,
+    partialFailure: hasOkMachine && hasFailedMachine,
+    warningMessage:
+      hasOkMachine && hasFailedMachine
+        ? 'ไม่สามารถเชื่อมต่อหรืออ่านข้อมูลจากเครื่องสแกนบางเครื่องได้ ระบบได้บันทึกข้อมูลจากเครื่องที่สำเร็จแล้ว'
+        : null,
   };
 }

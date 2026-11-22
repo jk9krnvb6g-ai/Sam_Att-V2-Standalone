@@ -1,5 +1,16 @@
 import React, { useState } from 'react';
-import { HeartHandshake, Lock, User, ArrowRight, Eye, EyeOff } from 'lucide-react';
+import {
+  HeartHandshake,
+  Lock,
+  User,
+  ArrowRight,
+  Eye,
+  EyeOff,
+  CalendarDays,
+  Fingerprint,
+  FileBarChart2,
+  ShieldCheck,
+} from 'lucide-react';
 import { apiRequest, setStoredToken, type AuthUser, ApiClientError } from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
 import { RequiredMark } from '../components/common/SharedComponents.tsx';
@@ -53,33 +64,74 @@ export function LoginView({
   }
 
   return (
-    <div className="min-h-screen bg-[#F8F7FC] flex flex-col justify-center py-10 px-4 sm:px-6 lg:px-8">
-      <div className="sm:mx-auto sm:w-full sm:max-w-[460px] space-y-6">
-        {/* Hospital Identity Header */}
-        <div className="flex flex-col items-center text-center space-y-3">
-          <div className="w-13 h-13 rounded-2xl bg-[#8E70C9] text-white flex items-center justify-center shadow-xs">
-            <HeartHandshake className="w-7 h-7" />
-          </div>
-          <div className="space-y-1">
-            <div className="text-[13px] font-semibold text-[#543B7A]">
-              โรงพยาบาลสามชุก · จังหวัดสุพรรณบุรี
+    <div className="min-h-screen bg-[#F8F7FC] flex items-center justify-center py-8 px-4 sm:px-6 lg:px-8">
+      <div className="w-full max-w-[920px] his-surface overflow-hidden grid grid-cols-1 lg:grid-cols-12">
+        {/* Left Institutional Hospital Panel — Soft Lavender #F1ECFA (Flat, Zero Gradient) */}
+        <div className="lg:col-span-5 bg-[#F1ECFA] border-b lg:border-b-0 lg:border-r border-[#E8E4EF] p-6 sm:p-8 flex flex-col justify-between gap-8">
+          <div className="space-y-5">
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-xl bg-[#8066B5] text-white flex items-center justify-center shrink-0">
+                <HeartHandshake className="w-6 h-6" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[12.5px] font-semibold text-[#4E3978]">
+                  โรงพยาบาลสามชุก · จังหวัดสุพรรณบุรี
+                </div>
+                <div className="text-[12px] text-[#777287]">Sam_Att V2 Standalone</div>
+              </div>
             </div>
-            <h1 className="text-[24px] font-bold text-[#262238] tracking-tight">
-              ระบบบริหารเวลาปฏิบัติงานบุคลากร
-            </h1>
-            <p className="text-[13.5px] text-[#746B83]">
-              Sam_Att V2 Standalone · สำหรับเจ้าหน้าที่และบุคลากรโรงพยาบาล
-            </p>
+
+            <div className="space-y-2">
+              <h1 className="text-[22px] sm:text-[24px] font-bold text-[#292638] tracking-tight leading-snug">
+                ระบบบริหารเวลาปฏิบัติงานบุคลากร
+              </h1>
+              <p className="text-[13.5px] text-[#777287] leading-relaxed">
+                พื้นที่ทำงานกลางสำหรับการจัดตารางเวร ดึงข้อมูลสแกนลายนิ้วมือ
+                ตรวจสอบการลงเวลา และสรุปรายงานส่งต่อระบบ HOSOffice
+              </p>
+            </div>
+
+            <div className="pt-2 border-t border-[#E8E4EF] divide-y divide-[#E8E4EF]">
+              <div className="py-3 flex items-start gap-3">
+                <CalendarDays className="w-4.5 h-4.5 text-[#8066B5] shrink-0 mt-0.5" aria-hidden="true" />
+                <div>
+                  <div className="text-[13.5px] font-semibold text-[#292638]">ตารางเวรและกะทำงาน</div>
+                  <div className="text-[12.5px] text-[#777287]">รองรับเวรเช้า บ่าย ดึก และจัดตารางหลายคนพร้อมกัน</div>
+                </div>
+              </div>
+              <div className="py-3 flex items-start gap-3">
+                <Fingerprint className="w-4.5 h-4.5 text-[#8066B5] shrink-0 mt-0.5" aria-hidden="true" />
+                <div>
+                  <div className="text-[13.5px] font-semibold text-[#292638]">ข้อมูลสแกนต้นฉบับที่ตรวจสอบได้</div>
+                  <div className="text-[12.5px] text-[#777287]">ดึงข้อมูลจากเครื่องสแกนและจับคู่กะอัตโนมัติ</div>
+                </div>
+              </div>
+              <div className="py-3 flex items-start gap-3">
+                <FileBarChart2 className="w-4.5 h-4.5 text-[#8066B5] shrink-0 mt-0.5" aria-hidden="true" />
+                <div>
+                  <div className="text-[13.5px] font-semibold text-[#292638]">รายงานประจำงวดและ HOSOffice</div>
+                  <div className="text-[12.5px] text-[#777287]">สรุปสถิติการมาสายและตรวจสอบก่อนส่งข้อมูลกลับ</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 text-[12px] text-[#4E3978] pt-3 border-t border-[#E8E4EF]">
+            <ShieldCheck className="w-4 h-4 text-[#8066B5] shrink-0" aria-hidden="true" />
+            <span>ระบบควบคุมสิทธิ์ตามบทบาท (RBAC) สำหรับบุคลากรโรงพยาบาล</span>
           </div>
         </div>
 
-        {/* Main Login Card */}
-        <div className="ent-card p-6 sm:p-8 space-y-5">
-          <div className="flex items-center justify-between gap-2 pb-4 border-b border-[#E6DFF0]">
-            <div>
-              <h2 className="text-[18px] font-bold text-[#262238]">เข้าสู่ระบบ</h2>
+        {/* Right Sign-In Workspace — Crisp White Surface */}
+        <div className="lg:col-span-7 bg-white p-6 sm:p-8 lg:p-10 flex flex-col justify-center space-y-6">
+          <div className="flex items-start justify-between gap-3 pb-4 border-b border-[#E8E4EF]">
+            <div className="space-y-0.5">
+              <h2 className="text-[20px] font-bold text-[#292638]">ลงชื่อเข้าใช้งานระบบ</h2>
+              <p className="text-[13px] text-[#777287]">
+                ระบุชื่อผู้ใช้งานและรหัสผ่านที่ได้รับจากกลุ่มงานบริหารทั่วไป
+              </p>
               {dataMode === 'DEMO' && (
-                <div className="text-[12.5px] font-semibold text-[#B87516] mt-0.5">
+                <div className="inline-block mt-1.5 px-2.5 py-0.5 rounded-md bg-[#FEF7EA] border border-[#B87516]/25 text-[12px] font-semibold text-[#B87516]">
                   โหมดข้อมูลตัวอย่าง (DEMO)
                 </div>
               )}
@@ -96,7 +148,7 @@ export function LoginView({
               </label>
               <div className="relative flex items-center">
                 <User
-                  className="w-4 h-4 text-[#746B83] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                  className="w-4 h-4 text-[#777287] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
                   aria-hidden="true"
                 />
                 <input
@@ -119,7 +171,7 @@ export function LoginView({
               </label>
               <div className="relative flex items-center">
                 <Lock
-                  className="w-4 h-4 text-[#746B83] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                  className="w-4 h-4 text-[#777287] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
                   aria-hidden="true"
                 />
                 <input
@@ -136,7 +188,7 @@ export function LoginView({
                 <button
                   type="button"
                   onClick={() => setShowPassword((prev) => !prev)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1.5 text-[#746B83] hover:text-[#543B7A] rounded-md transition-colors cursor-pointer"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1.5 text-[#777287] hover:text-[#4E3978] rounded-md transition-colors cursor-pointer"
                   aria-label={showPassword ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}
                   title={showPassword ? 'ซ่อนรหัสผ่าน' : 'แสดงรหัสผ่าน'}
                 >
@@ -157,51 +209,45 @@ export function LoginView({
 
           {/* DEMO-Only Quick Role Switcher (Never rendered in REAL mode) */}
           {dataMode === 'DEMO' && (
-            <div className="pt-4 border-t border-[#E6DFF0] space-y-2.5">
-              <div className="text-[12.5px] font-semibold text-[#746B83]">
+            <div className="pt-4 border-t border-[#E8E4EF] space-y-2.5">
+              <div className="text-[12.5px] font-semibold text-[#777287]">
                 บัญชีทดสอบตามระดับสิทธิ์ (แสดงเฉพาะโหมด DEMO):
               </div>
-              <div className="grid grid-cols-1 gap-2">
+              <div className="his-surface divide-y divide-[#E8E4EF] overflow-hidden">
                 <button
                   type="button"
                   onClick={() => fillQuickTestAccount('admin', 'Admin@SamAtt2026')}
-                  className="text-left px-3.5 py-2.5 text-[13px] border border-[#E6DFF0] rounded-xl bg-[#F8F7FC] hover:bg-[#F2EDFA] hover:border-[#8E70C9] flex items-center justify-between transition-colors cursor-pointer"
+                  className="w-full text-left px-3.5 py-2.5 text-[13px] bg-white hover:bg-[#F1ECFA]/60 flex items-center justify-between transition-colors cursor-pointer"
                 >
                   <div>
-                    <div className="font-semibold text-[#543B7A]">ผู้ดูแลระบบ (ADMIN)</div>
-                    <div className="text-[12px] text-[#746B83]">จัดการทุกเมนู เครื่องสแกน และผู้ใช้งาน</div>
+                    <div className="font-semibold text-[#4E3978]">ผู้ดูแลระบบ (ADMIN)</div>
+                    <div className="text-[12px] text-[#777287]">จัดการทุกเมนู เครื่องสแกน และผู้ใช้งาน</div>
                   </div>
-                  <span className="font-mono text-[12px] text-[#543B7A] font-medium">
-                    admin
-                  </span>
+                  <span className="font-mono text-[12px] text-[#8066B5] font-semibold">admin</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => fillQuickTestAccount('hrstaff', 'Staff@SamAtt2026')}
-                  className="text-left px-3.5 py-2.5 text-[13px] border border-[#E6DFF0] rounded-xl bg-[#F8F7FC] hover:bg-[#F2EDFA] hover:border-[#8E70C9] flex items-center justify-between transition-colors cursor-pointer"
+                  className="w-full text-left px-3.5 py-2.5 text-[13px] bg-white hover:bg-[#F1ECFA]/60 flex items-center justify-between transition-colors cursor-pointer"
                 >
                   <div>
                     <div className="font-semibold text-[#5879BC]">เจ้าหน้าที่งานบุคคล (HR)</div>
-                    <div className="text-[12px] text-[#746B83]">ตารางเวร ตรวจสอบเวลา และรายงาน</div>
+                    <div className="text-[12px] text-[#777287]">ตารางเวร ตรวจสอบเวลา และรายงาน</div>
                   </div>
-                  <span className="font-mono text-[12px] text-[#5879BC] font-medium">
-                    hrstaff
-                  </span>
+                  <span className="font-mono text-[12px] text-[#5879BC] font-semibold">hrstaff</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => fillQuickTestAccount('user1003', 'User@SamAtt2026')}
-                  className="text-left px-3.5 py-2.5 text-[13px] border border-[#E6DFF0] rounded-xl bg-[#F8F7FC] hover:bg-[#F2EDFA] hover:border-[#8E70C9] flex items-center justify-between transition-colors cursor-pointer"
+                  className="w-full text-left px-3.5 py-2.5 text-[13px] bg-white hover:bg-[#F1ECFA]/60 flex items-center justify-between transition-colors cursor-pointer"
                 >
                   <div>
-                    <div className="font-semibold text-[#262238]">บุคลากรทั่วไป (Own-Only)</div>
-                    <div className="text-[12px] text-[#746B83]">ตรวจสอบเวลาและตารางเวรของตนเอง</div>
+                    <div className="font-semibold text-[#292638]">บุคลากรทั่วไป (Own-Only)</div>
+                    <div className="text-[12px] text-[#777287]">ตรวจสอบเวลาและตารางเวรของตนเอง</div>
                   </div>
-                  <span className="font-mono text-[12px] text-[#746B83] font-medium">
-                    user1003
-                  </span>
+                  <span className="font-mono text-[12px] text-[#777287] font-semibold">user1003</span>
                 </button>
               </div>
             </div>

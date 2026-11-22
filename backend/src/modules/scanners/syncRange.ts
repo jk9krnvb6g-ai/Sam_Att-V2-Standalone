@@ -4,18 +4,20 @@
  * ไฟล์: backend/src/modules/scanners/syncRange.ts
  * ============================================================================
  * หน้าที่หลัก:
- * - รองรับ 3 โหมดการดึงข้อมูล:
- *   1. TODAY        : ดึงเฉพาะข้อมูลสแกนของวันนี้ (00:00:00 - 23:59:59 เขตเวลา Asia/Bangkok)
- *   2. CUSTOM_RANGE : ดึงตามช่วงวันที่และเวลาที่ผู้ใช้ระบุ (รองรับข้ามวันและข้ามเดือน)
- *   3. ALL          : ดึงข้อมูลทั้งหมดในช่วงสูงสุดที่ระบบและโปรแกรมอ่านเครื่องสแกนรองรับ
- * - ตรวจสอบความถูกต้องของวันที่และเวลาแบบเข้มงวด (ปฏิเสธวันที่ไม่มีอยู่จริง, รูปแบบผิด,
- *   เวลาเริ่มต้นมากกว่าเวลาสิ้นสุด หรือช่วงวันเกินขีดจำกัดสูงสุดของระบบ)
- * - คำนวณจำนวนวันย้อนหลัง (`--days`) ที่ต้องส่งให้ `ScannerSyncCli.exe` อย่างปลอดภัย
- *   และระบุกลไกการคัดกรองจริง (`BACKEND_POST_READ_FILTER` vs `NO_POST_READ_FILTER`) อย่างโปร่งใส
+ * - รองรับ 4 โหมดการดึงข้อมูล:
+ *   1. TODAY           : ดึงเฉพาะข้อมูลสแกนของวันนี้ (00:00:00 - 23:59:59 เขตเวลา Asia/Bangkok)
+ *   2. CUSTOM_RANGE    : ดึงตามช่วงวันที่และเวลาที่ผู้ใช้ระบุ (รองรับข้ามวันและข้ามเดือน)
+ *   3. MONTHLY         : ดึงข้อมูลแบบรายเดือน (YYYY-MM) ตามปฏิทินเขตเวลา Asia/Bangkok
+ *   4. FULL_HISTORICAL : ดึงข้อมูลทั้งหมดที่เครื่องรองรับ (ADMIN ONLY, รองรับ alias ALL / ALL_SUPPORTED)
+ * - บังคับสิทธิ์ตาม Role ฝั่ง Server โดยอ้างอิงเวลาปัจจุบันของ Server ในเขตเวลา Asia/Bangkok:
+ *   - ADMIN             : ดึงได้ทุกโหมดรวมถึง FULL_HISTORICAL และรายเดือนย้อนหลัง
+ *   - RESPONSIBLE_STAFF : ห้ามสั่ง FULL_HISTORICAL และจำกัดเฉพาะเดือนปัจจุบัน + เดือนก่อนหน้า 1 เดือนปฏิทิน
+ * - คำนวณ `--days` สำหรับ ScannerSyncCli.exe และระบุข้อจำกัด EXE อย่างโปร่งใส
  */
 import { getCurrentBangkokDateParts } from '../../utils/crypto.ts';
 
-export type ScannerSyncMode = 'TODAY' | 'CUSTOM_RANGE' | 'ALL';
+export type ScannerSyncMode = 'TODAY' | 'CUSTOM_RANGE' | 'MONTHLY' | 'FULL_HISTORICAL' | 'ALL';
+export type CanonicalImportType = 'TODAY' | 'CUSTOM_RANGE' | 'MONTHLY' | 'FULL_HISTORICAL';
 
 export type ScannerFilterStrategy =
   | 'BACKEND_POST_READ_FILTER'
@@ -24,6 +26,7 @@ export type ScannerFilterStrategy =
 
 export interface ScannerSyncRangeInput {
   syncMode?: string | null;
+  yearMonth?: string | null;
   dateFrom?: string | null;
   timeFrom?: string | null;
   dateTo?: string | null;
@@ -32,6 +35,8 @@ export interface ScannerSyncRangeInput {
 
 export interface ResolvedScannerSyncRange {
   syncMode: ScannerSyncMode;
+  canonicalImportType: CanonicalImportType;
+  yearMonth: string | null;
   timezone: 'Asia/Bangkok';
   filterFromBkk: string | null;
   filterToBkk: string | null;
@@ -44,6 +49,15 @@ export interface ResolvedScannerSyncRange {
   filterStrategy: ScannerFilterStrategy;
   exeSupportsNativeDateTimeRange: false;
   filterModeNotice: string;
+  exeLimitationWarning: string | null;
+}
+
+export interface ResponsibleStaffMonthWindow {
+  serverTodayBkkYmd: string;
+  currentYearMonth: string;
+  previousYearMonth: string;
+  earliestAllowedYmd: string;
+  allowedYearMonths: [string, string];
 }
 
 export class ScannerSyncRangeError extends Error {
@@ -79,8 +93,125 @@ export function isValidYmdDate(ymd: string): boolean {
 }
 
 /**
+ * แปลงและตรวจสอบเดือนปฏิทิน YYYY-MM (รองรับปีอธิกสุรทินและเดือน 28/29/30/31 วันอย่างแม่นยำ)
+ */
+export function parseYearMonthBounds(rawYearMonth: string): {
+  year: number;
+  month: number;
+  yearMonth: string;
+  dateFrom: string;
+  dateTo: string;
+  daysInMonth: number;
+} | null {
+  const trimmed = String(rawYearMonth || '').trim();
+  const match = /^(\d{4})-(\d{2})$/.exec(trimmed);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (year < 2000 || year > 2100 || month < 1 || month > 12) return null;
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  const ym = `${year}-${String(month).padStart(2, '0')}`;
+  return {
+    year,
+    month,
+    yearMonth: ym,
+    dateFrom: `${ym}-01`,
+    dateTo: `${ym}-${String(daysInMonth).padStart(2, '0')}`,
+    daysInMonth,
+  };
+}
+
+/**
+ * คำนวณกรอบเดือนปฏิทินที่สิทธิ์ RESPONSIBLE_STAFF ได้รับอนุญาตโดยอ้างอิงเวลาปัจจุบันของ Server (Asia/Bangkok):
+ * เฉพาะ "เดือนปัจจุบัน" และ "เดือนก่อนหน้า 1 เดือนปฏิทิน" (ไม่ใช่ rolling 60 วัน)
+ * รองรับรอยต่อปี เช่น ม.ค. 2027 -> อนุญาต 2027-01 และ 2026-12 (เริ่มตั้งแต่ 2026-12-01)
+ */
+export function getResponsibleStaffMonthWindow(referenceDate?: Date): ResponsibleStaffMonthWindow {
+  const bkk = getCurrentBangkokDateParts(referenceDate || new Date());
+  const [currentYear, currentMonth] = bkk.currentYearMonth.split('-').map(Number);
+  const currentYearMonth = `${currentYear}-${String(currentMonth).padStart(2, '0')}`;
+  const prevYear = currentMonth === 1 ? currentYear - 1 : currentYear;
+  const prevMonth = currentMonth === 1 ? 12 : currentMonth - 1;
+  const previousYearMonth = `${prevYear}-${String(prevMonth).padStart(2, '0')}`;
+  const earliestAllowedYmd = `${previousYearMonth}-01`;
+
+  return {
+    serverTodayBkkYmd: bkk.todayYmd,
+    currentYearMonth,
+    previousYearMonth,
+    earliestAllowedYmd,
+    allowedYearMonths: [previousYearMonth, currentYearMonth],
+  };
+}
+
+/**
+ * บังคับตรวจสิทธิ์ตาม Role และกรอบเดือนปฏิทินฝั่ง Server (Asia/Bangkok)
+ * ใช้ร่วมกันทั้งการดึงข้อมูลจากเครื่องสแกน (TODAY / CUSTOM_RANGE / MONTHLY / FULL_HISTORICAL),
+ * การ Reprocess Attendance และการ Resolve Unmatched Raw Scans เพื่อป้องกันการ Bypass
+ */
+export function assertRoleAuthorizedForDateRange(params: {
+  role: string;
+  syncMode?: string | null;
+  yearMonth?: string | null;
+  dateFrom?: string | null;
+  dateTo?: string | null;
+  referenceDate?: Date;
+}): ResponsibleStaffMonthWindow {
+  const role = String(params.role || '').trim().toUpperCase();
+  const window = getResponsibleStaffMonthWindow(params.referenceDate);
+
+  if (role === 'ADMIN') {
+    return window;
+  }
+
+  if (role !== 'RESPONSIBLE_STAFF') {
+    throw new ScannerSyncRangeError(
+      'FORBIDDEN',
+      'ไม่มีสิทธิ์ดำเนินการกับช่วงข้อมูลนี้',
+      403
+    );
+  }
+
+  const normalizedMode = String(params.syncMode || '').trim().toUpperCase();
+  if (
+    normalizedMode === 'ALL' ||
+    normalizedMode === 'ALL_SUPPORTED' ||
+    normalizedMode === 'FULL_HISTORICAL'
+  ) {
+    throw new ScannerSyncRangeError(
+      'FULL_HISTORICAL_ADMIN_ONLY',
+      'การดึงข้อมูลทั้งหมดย้อนหลัง (Full Historical Import) อนุญาตเฉพาะผู้ดูแลระบบ (ADMIN) เท่านั้น สิทธิ์เจ้าหน้าที่ผู้รับผิดชอบสามารถดึงข้อมูลรายวันหรือรายเดือนได้เฉพาะเดือนปัจจุบันและเดือนก่อนหน้า 1 เดือน',
+      403
+    );
+  }
+
+  if (normalizedMode === 'MONTHLY') {
+    const ym = String(params.yearMonth || '').trim();
+    if (!window.allowedYearMonths.includes(ym)) {
+      throw new ScannerSyncRangeError(
+        'STAFF_MONTHLY_WINDOW_FORBIDDEN',
+        `สิทธิ์เจ้าหน้าที่ผู้รับผิดชอบสามารถดึงข้อมูลรายเดือนได้เฉพาะเดือนปัจจุบัน (${window.currentYearMonth}) และเดือนก่อนหน้า 1 เดือน (${window.previousYearMonth}) ตามเวลาประเทศไทยเท่านั้น`,
+        403
+      );
+    }
+    return window;
+  }
+
+  const dateFrom = String(params.dateFrom || '').trim();
+  if (dateFrom && isValidYmdDate(dateFrom) && dateFrom < window.earliestAllowedYmd) {
+    throw new ScannerSyncRangeError(
+      'STAFF_DATE_WINDOW_FORBIDDEN',
+      `สิทธิ์เจ้าหน้าที่ผู้รับผิดชอบไม่สามารถดำเนินการกับข้อมูลย้อนหลังเกินเดือนก่อนหน้า 1 เดือนปฏิทินได้ (อนุญาตตั้งแต่ ${window.earliestAllowedYmd} เป็นต้นไป ตามเวลาประเทศไทย)`,
+      403
+    );
+  }
+
+  return window;
+}
+
+/**
  * แปลงและตรวจสอบเวลา HH:mm หรือ HH:mm:ss
- * คืนค่า { normalized: 'HH:mm:ss', minuteKey: 'HH:mm' }
+ * คืนค่า { normalized: 'HH:mm:ss', compareBase: 'HH:mm:ss' }
  */
 export function parseTimeOfDay(
   rawTime: string,
@@ -147,20 +278,33 @@ export function validateAndNormalizeScannerSyncRange(
   const hasExplicitRangeFields = Boolean(
     input?.dateFrom || input?.dateTo || input?.timeFrom || input?.timeTo
   );
+  const hasYearMonth = Boolean(String(input?.yearMonth || '').trim());
 
   const rawMode = String(input?.syncMode || '').trim().toUpperCase();
   let syncMode: ScannerSyncMode;
 
   if (!rawMode) {
-    syncMode = hasExplicitRangeFields ? 'CUSTOM_RANGE' : 'ALL';
-  } else if (rawMode === 'TODAY' || rawMode === 'CUSTOM_RANGE' || rawMode === 'ALL') {
+    if (hasYearMonth) {
+      syncMode = 'MONTHLY';
+    } else if (hasExplicitRangeFields) {
+      syncMode = 'CUSTOM_RANGE';
+    } else {
+      syncMode = 'ALL';
+    }
+  } else if (
+    rawMode === 'TODAY' ||
+    rawMode === 'CUSTOM_RANGE' ||
+    rawMode === 'MONTHLY' ||
+    rawMode === 'FULL_HISTORICAL' ||
+    rawMode === 'ALL'
+  ) {
     syncMode = rawMode;
   } else if (rawMode === 'ALL_SUPPORTED') {
     syncMode = 'ALL';
   } else {
     throw new ScannerSyncRangeError(
       'INVALID_SYNC_MODE',
-      `โหมดการดึงข้อมูลไม่ถูกต้อง (${rawMode}) รองรับเฉพาะ TODAY, CUSTOM_RANGE หรือ ALL`
+      `โหมดการดึงข้อมูลไม่ถูกต้อง (${rawMode}) รองรับเฉพาะ TODAY, CUSTOM_RANGE, MONTHLY, FULL_HISTORICAL หรือ ALL`
     );
   }
 
@@ -174,6 +318,8 @@ export function validateAndNormalizeScannerSyncRange(
 
     return {
       syncMode: 'TODAY',
+      canonicalImportType: 'TODAY',
+      yearMonth: null,
       timezone: 'Asia/Bangkok',
       filterFromBkk,
       filterToBkk,
@@ -186,22 +332,75 @@ export function validateAndNormalizeScannerSyncRange(
       filterStrategy: 'BACKEND_POST_READ_FILTER',
       exeSupportsNativeDateTimeRange: false,
       filterModeNotice,
+      exeLimitationWarning: null,
     };
   }
 
-  if (syncMode === 'ALL') {
-    // สำหรับรอบซิงก์อัตโนมัติยังคงใช้ SCANNER_SYNC_DAYS เดิมเพื่อความเร็ว
-    // สำหรับการเลือก "ดึงข้อมูลทั้งหมดที่เครื่องรองรับ" ด้วยตนเอง จะดึงครอบคลุมสูงสุดตามขีดจำกัดที่ระบบรองรับ
-    const exeDaysArg = options.isScheduledSync ? defaultExeSyncDays : maxRangeDays;
+  if (syncMode === 'MONTHLY') {
+    const rawYm = String(input?.yearMonth || '').trim();
+    const bounds = parseYearMonthBounds(rawYm);
+    if (!bounds) {
+      throw new ScannerSyncRangeError(
+        'INVALID_YEAR_MONTH',
+        `รูปแบบเดือนที่เลือกไม่ถูกต้อง (${rawYm || 'ว่าง'}) กรุณาระบุเป็น YYYY-MM เช่น 2026-11`
+      );
+    }
+
+    const filterFromBkk = `${bounds.dateFrom} 00:00:00`;
+    const filterToBkk = `${bounds.dateTo} 23:59:59`;
+    const daysBackFromToday = Math.max(1, diffCalendarDaysYmd(bounds.dateFrom, bkk.todayYmd) + 1);
+    const exeDaysArg = Math.max(1, Math.min(365, Math.max(daysBackFromToday, bounds.daysInMonth)));
+    const exeLimitationWarning =
+      options.isScannerSyncCli && daysBackFromToday > 365
+        ? `โปรแกรม ScannerSyncCli.exe เดิมรองรับพารามิเตอร์ --days สูงสุด 365 วัน (เดือนที่เลือกย้อนหลัง ${daysBackFromToday} วัน) ข้อมูลที่เก่ากว่า 365 วันหรือถูกลบจากหน่วยความจำเครื่องสแกนอาจไม่สามารถดึงกลับมาได้`
+        : options.isScannerSyncCli && daysBackFromToday > maxRangeDays
+          ? `เดือนที่เลือกย้อนหลัง ${daysBackFromToday} วัน ระบบจะส่ง --days ${exeDaysArg} ให้ ScannerSyncCli.exe และคัดกรองเฉพาะเดือน ${bounds.yearMonth} ทั้งนี้ข้อมูลที่ดึงได้ขึ้นกับความจุหน่วยความจำของเครื่องสแกนแต่ละเครื่อง`
+          : null;
+
+    const filterModeNotice = options.isScannerSyncCli
+      ? `ดึงข้อมูลรายเดือน ${bounds.yearMonth} (${filterFromBkk} ถึง ${filterToBkk} เวลาประเทศไทย) โดยส่ง --days ${exeDaysArg} ให้ ScannerSyncCli.exe แล้วคัดกรองเฉพาะรายการในเดือนที่เลือกบน Backend พร้อมกันข้อมูลซ้ำอัตโนมัติ`
+      : `ดึงข้อมูลรายเดือน ${bounds.yearMonth} (${filterFromBkk} ถึง ${filterToBkk} เวลาประเทศไทย) โดยคัดกรองเฉพาะรายการในเดือนที่เลือกบน Backend พร้อมกันข้อมูลซ้ำอัตโนมัติ`;
+
+    return {
+      syncMode: 'MONTHLY',
+      canonicalImportType: 'MONTHLY',
+      yearMonth: bounds.yearMonth,
+      timezone: 'Asia/Bangkok',
+      filterFromBkk,
+      filterToBkk,
+      dateFrom: bounds.dateFrom,
+      timeFrom: '00:00:00',
+      dateTo: bounds.dateTo,
+      timeTo: '23:59:59',
+      spanDays: bounds.daysInMonth,
+      exeDaysArg,
+      filterStrategy: 'BACKEND_POST_READ_FILTER',
+      exeSupportsNativeDateTimeRange: false,
+      filterModeNotice,
+      exeLimitationWarning,
+    };
+  }
+
+  if (syncMode === 'ALL' || syncMode === 'FULL_HISTORICAL') {
+    const exeDaysArg = options.isScheduledSync
+      ? defaultExeSyncDays
+      : syncMode === 'FULL_HISTORICAL'
+        ? Math.max(maxRangeDays, 365)
+        : maxRangeDays;
     const filterStrategy: ScannerFilterStrategy = options.isScannerSyncCli
       ? 'EXE_DAYS_WINDOW_NO_POST_FILTER'
       : 'ALL_DEVICE_EVENTS_NO_POST_FILTER';
+    const exeLimitationWarning = options.isScannerSyncCli
+      ? `ข้อจำกัดจริงของ ScannerSyncCli.exe เดิม: รองรับเฉพาะพารามิเตอร์ --days สูงสุด ${exeDaysArg} วันย้อนหลัง และจำนวนข้อมูลที่ได้จริงขึ้นกับความจุหน่วยความจำของเครื่องสแกนแต่ละเครื่อง (ไม่แก้ไขไฟล์ EXE เดิม)`
+      : 'จำนวนข้อมูลย้อนหลังที่ได้จริงขึ้นกับความจุหน่วยความจำของเครื่องสแกนแต่ละเครื่องและไฟล์โปรแกรมอ่านเครื่องสแกนเดิม';
     const filterModeNotice = options.isScannerSyncCli
       ? `ดึงข้อมูลทั้งหมดที่โปรแกรม ScannerSyncCli.exe รองรับภายในกรอบสูงสุด ${exeDaysArg} วันย้อนหลัง (--days ${exeDaysArg}) โดยไม่ตัดช่วงเวลาย่อย และตรวจสอบรายการซ้ำอัตโนมัติ`
       : 'ดึงข้อมูลทั้งหมดที่โปรแกรมอ่านเครื่องสแกนส่งกลับมาโดยไม่ตัดช่วงเวลา และตรวจสอบรายการซ้ำอัตโนมัติ';
 
     return {
-      syncMode: 'ALL',
+      syncMode,
+      canonicalImportType: 'FULL_HISTORICAL',
+      yearMonth: null,
       timezone: 'Asia/Bangkok',
       filterFromBkk: null,
       filterToBkk: null,
@@ -214,6 +413,7 @@ export function validateAndNormalizeScannerSyncRange(
       filterStrategy,
       exeSupportsNativeDateTimeRange: false,
       filterModeNotice,
+      exeLimitationWarning,
     };
   }
 
@@ -290,6 +490,8 @@ export function validateAndNormalizeScannerSyncRange(
 
   return {
     syncMode: 'CUSTOM_RANGE',
+    canonicalImportType: 'CUSTOM_RANGE',
+    yearMonth: null,
     timezone: 'Asia/Bangkok',
     filterFromBkk,
     filterToBkk,
@@ -302,6 +504,7 @@ export function validateAndNormalizeScannerSyncRange(
     filterStrategy: 'BACKEND_POST_READ_FILTER',
     exeSupportsNativeDateTimeRange: false,
     filterModeNotice,
+    exeLimitationWarning: null,
   };
 }
 
