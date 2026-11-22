@@ -184,7 +184,27 @@ export function PersonnelView({
         body: JSON.stringify({ effectiveDate: bkkToday }),
       });
       const newlyMatched = Number(res.autoMappingResolution?.newlyMatched || 0);
-      const summaryMsg = `ซิงก์ข้อมูลจากฐานข้อมูล HOSOffice สำเร็จ: อ่าน ${res.recordsFetched} รายการ · อัปเดต ${res.recordsUpserted} รายการ · พบปัญหารหัสสแกน ${res.mappingConflictsFound} รายการ${newlyMatched > 0 ? ` · จับคู่สแกนค้างอัตโนมัติเพิ่ม ${newlyMatched} รายการ` : ''}`;
+      const deactivatedCount = Number(res.deactivatedCount || 0);
+      const reactivatedCount = Number(res.reactivatedCount || 0);
+      const unverifiedMissingCount = Number(res.unverifiedMissingCount || 0);
+      const summaryParts = [
+        `ซิงก์ข้อมูลจากฐานข้อมูล HOSOffice (สถานะปกติ HR_STATUS_ID = '01') สำเร็จ: อ่าน ${res.recordsFetched} รายการ`,
+        `อัปเดต ${res.recordsUpserted} รายการ`,
+        `พบปัญหารหัสสแกน ${res.mappingConflictsFound} รายการ`,
+      ];
+      if (deactivatedCount > 0) {
+        summaryParts.push(`ปรับสถานะไม่ปฏิบัติงาน (ยืนยันต้นทางแล้ว) ${deactivatedCount} คน`);
+      }
+      if (reactivatedCount > 0) {
+        summaryParts.push(`คืนสถานะปฏิบัติงาน ${reactivatedCount} คน`);
+      }
+      if (unverifiedMissingCount > 0) {
+        summaryParts.push(`คงสถานะเดิม (ยังไม่พบข้อมูลยืนยันต้นทาง) ${unverifiedMissingCount} คน`);
+      }
+      if (newlyMatched > 0) {
+        summaryParts.push(`จับคู่สแกนค้างอัตโนมัติเพิ่ม ${newlyMatched} รายการ`);
+      }
+      const summaryMsg = summaryParts.join(' · ');
       setProgressPercent(100);
       setProgressStatus('SUCCESS');
       setProgressStep('ซิงก์ข้อมูลบุคลากรสำเร็จ');
@@ -606,7 +626,14 @@ export function PersonnelView({
                   pagedItems.map((p) => (
                     <tr key={p.person_id}>
                       <td>
-                        <div className="font-semibold text-[14px] text-[#292638]">{p.full_name}</div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-semibold text-[14px] text-[#292638]">{p.full_name}</span>
+                          {Number(p.is_active) === 0 && (
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-[#F3F2F7] text-[#666079] border border-[#DDD8E8]">
+                              ไม่ปฏิบัติงาน (HR_STATUS ≠ 01)
+                            </span>
+                          )}
+                        </div>
                         <div className="text-[12px] font-mono text-[#777287] mt-0.5">
                           รหัสบุคลากร: {p.person_id}
                         </div>

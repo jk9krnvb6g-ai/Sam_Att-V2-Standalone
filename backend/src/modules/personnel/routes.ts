@@ -28,6 +28,8 @@ import {
   ScannerSyncRangeError,
 } from '../scanners/syncRange.ts';
 
+export const ACTIVE_HR_STATUS_ID = '01';
+
 export interface HosOfficeHrPersonRow {
   PERSON_ID: string;
   FINGLE_ID: string | null;
@@ -41,24 +43,48 @@ export interface HosOfficeHrPersonRow {
   PERSONNEL_TYPE_CODE: string;
   PERSONNEL_TYPE_NAME: string;
   IS_ACTIVE: number;
+  HR_STATUS_ID?: string | null;
+}
+
+export interface HosOfficeVerifiedStatusRecord {
+  personId: string;
+  foundInSource: boolean;
+  hrStatusId: string | null;
+  isActiveInSource: boolean;
+}
+
+export interface HosOfficeFetchResult {
+  activeRows: HosOfficeHrPersonRow[];
+  verifiedStatuses: Map<string, HosOfficeVerifiedStatusRecord>;
+  sourceVerificationExecuted: boolean;
+  sourceVerificationWarning: string | null;
+  activeSqlExecuted: string;
 }
 
 // Test Double hooks strictly for automated integration tests (never enabled automatically in production)
 let testDoubleHosOfficeRows: HosOfficeHrPersonRow[] | null = null;
 let testDoubleForceOffline = false;
+let testDoubleFailStatusVerification = false;
 let testDoubleSchemaColumns: string[] | null = null;
 
-export function setHosOfficeTestDouble(rows: HosOfficeHrPersonRow[] | null, forceOffline = false): void {
+export function setHosOfficeTestDouble(
+  rows: HosOfficeHrPersonRow[] | null,
+  forceOffline = false,
+  options?: { failStatusVerification?: boolean }
+): void {
   testDoubleHosOfficeRows = rows;
   testDoubleForceOffline = forceOffline;
+  testDoubleFailStatusVerification = Boolean(options?.failStatusVerification);
 }
 
 export function setHosOfficeSchemaColumnsForTests(columns: string[] | null): void {
   testDoubleSchemaColumns = columns;
 }
 
+const PERSON_ID_COLUMN_CANDIDATES = ['PERSON_ID', 'ID', 'HR_PERSON_ID', 'PERSON_CODE', 'HR_CID'];
+
 const REQUIRED_HR_PERSON_COLUMN_GROUPS: Array<{ groupName: string; candidates: string[] }> = [
-  { groupName: 'PERSON_ID', candidates: ['PERSON_ID', 'ID', 'HR_PERSON_ID', 'PERSON_CODE', 'HR_CID'] },
+  { groupName: 'PERSON_ID', candidates: PERSON_ID_COLUMN_CANDIDATES },
   { groupName: 'FINGLE_ID', candidates: ['FINGLE_ID', 'FINGER_ID', 'SCAN_ID', 'ENROLL_NUMBER', 'BADGE_NUMBER'] },
   { groupName: 'FIRST_NAME', candidates: ['FIRST_NAME', 'HR_FNAME', 'FNAME'] },
   { groupName: 'LAST_NAME', candidates: ['LAST_NAME', 'HR_LNAME', 'LNAME'] },
@@ -80,6 +106,70 @@ export function validateHosOfficeHrPersonColumnsContract(availableColumns: strin
     valid: missingGroups.length === 0,
     missingGroups,
   };
+}
+
+export function resolveHosOfficeHrPersonMeta(availableColumns: string[]): {
+  personIdColumn: string | null;
+  hasHrStatusIdColumn: boolean;
+} {
+  const normalizedByUpper = new Map<string, string>();
+  for (const col of availableColumns) {
+    const trimmed = col.trim();
+    if (/^[A-Za-z0-9_]+$/.test(trimmed)) {
+      normalizedByUpper.set(trimmed.toUpperCase(), trimmed);
+    }
+  }
+  let personIdColumn: string | null = null;
+  for (const cand of PERSON_ID_COLUMN_CANDIDATES) {
+    const match = normalizedByUpper.get(cand);
+    if (match) {
+      personIdColumn = match;
+      break;
+    }
+  }
+  return {
+    personIdColumn,
+    hasHrStatusIdColumn: normalizedByUpper.has('HR_STATUS_ID'),
+  };
+}
+
+export function isActiveHrStatusId(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  return String(value).trim() === ACTIVE_HR_STATUS_ID;
+}
+
+export function normalizeHrStatusId(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = String(value).trim();
+  return trimmed === '' ? null : trimmed;
+}
+
+export function buildActiveHrPersonSelectSql(tableName: string): string {
+  const safeTable = String(tableName || '').replace(/[^a-zA-Z0-9_]/g, '');
+  if (!safeTable) {
+    throw new Error('INVALID_HOSOFFICE_TABLE_NAME');
+  }
+  return `SELECT * FROM ${safeTable} WHERE HR_STATUS_ID = '${ACTIVE_HR_STATUS_ID}'`;
+}
+
+export function buildVerifyHrStatusSelectSql(
+  tableName: string,
+  personIdColumn: string,
+  idCount: number
+): string {
+  const safeTable = String(tableName || '').replace(/[^a-zA-Z0-9_]/g, '');
+  const safePersonIdCol = String(personIdColumn || '').replace(/[^a-zA-Z0-9_]/g, '');
+  if (!safeTable) {
+    throw new Error('INVALID_HOSOFFICE_TABLE_NAME');
+  }
+  if (!safePersonIdCol || !PERSON_ID_COLUMN_CANDIDATES.includes(safePersonIdCol.toUpperCase())) {
+    throw new Error('INVALID_HOSOFFICE_PERSON_ID_COLUMN');
+  }
+  if (!Number.isInteger(idCount) || idCount <= 0) {
+    throw new Error('INVALID_STATUS_CHECK_BATCH_SIZE');
+  }
+  const placeholders = Array.from({ length: idCount }, () => '?').join(', ');
+  return `SELECT ${safePersonIdCol} AS PERSON_ID, HR_STATUS_ID FROM ${safeTable} WHERE ${safePersonIdCol} IN (${placeholders})`;
 }
 
 interface HosOfficeLookupDictionaries {
@@ -210,9 +300,25 @@ export function normalizeHosOfficeRow(
     personnelTypeName = `ประเภทบุคลากร (${personnelTypeName})`;
   }
 
-  const rawStatus = raw['IS_ACTIVE'] ?? raw['is_active'] ?? raw['HR_STATUS_ID'] ?? raw['hr_status_id'] ?? 1;
-  const statusStr = String(rawStatus).trim();
-  const isActive = statusStr === '1' || statusStr === '01' || statusStr.toUpperCase() === 'ACTIVE' || statusStr.toUpperCase() === 'TRUE' ? 1 : 0;
+  const hasHrStatusKey = 'HR_STATUS_ID' in raw || 'hr_status_id' in raw;
+  let hrStatusId: string | null;
+  let isActive: number;
+
+  if (hasHrStatusKey) {
+    hrStatusId = normalizeHrStatusId(raw['HR_STATUS_ID'] ?? raw['hr_status_id']);
+    isActive = isActiveHrStatusId(hrStatusId) ? 1 : 0;
+  } else {
+    const rawStatus = raw['IS_ACTIVE'] ?? raw['is_active'] ?? 1;
+    const statusStr = String(rawStatus).trim();
+    isActive =
+      statusStr === '1' ||
+      statusStr === '01' ||
+      statusStr.toUpperCase() === 'ACTIVE' ||
+      statusStr.toUpperCase() === 'TRUE'
+        ? 1
+        : 0;
+    hrStatusId = isActive === 1 ? ACTIVE_HR_STATUS_ID : null;
+  }
 
   return {
     PERSON_ID: personId,
@@ -227,6 +333,7 @@ export function normalizeHosOfficeRow(
     PERSONNEL_TYPE_CODE: personnelTypeCode,
     PERSONNEL_TYPE_NAME: personnelTypeName,
     IS_ACTIVE: isActive,
+    HR_STATUS_ID: hrStatusId,
   };
 }
 
@@ -257,13 +364,18 @@ async function loadOptionalLookupTable(
 }
 
 /**
- * Fetches hr_person rows from HOSOffice Read-Only MySQL database.
+ * Fetches active hr_person rows (WHERE HR_STATUS_ID = '01') from HOSOffice Read-Only MySQL database,
+ * and verifies source HR_STATUS_ID strictly Read-Only for any previously-synced active personnel
+ * missing from the '01' result set (so we NEVER guess Inactive without verifying the source row).
+ *
  * Fails closed with BLOCKED_BY_EXTERNAL_CONTRACT if:
  * 1. HOSOFFICE_DB_HOST / credentials are unconfigured ('CHANGE_ME')
  * 2. Running in automated test runtime without an explicit test double (prevents accidental connection to production HOSOffice DB)
- * 3. External table schema in HOSOffice does not satisfy required column contract (verified BEFORE touching internal tables)
+ * 3. External table schema in HOSOffice does not satisfy required column contract including HR_STATUS_ID (verified BEFORE touching internal tables)
  */
-async function fetchFromHosOfficeReadOnly(): Promise<HosOfficeHrPersonRow[]> {
+export async function fetchFromHosOfficeReadOnly(
+  existingActivePersonIds: string[] = []
+): Promise<HosOfficeFetchResult> {
   if (testDoubleForceOffline) {
     const err = new Error('HOSOffice MySQL Server Unreachable (Simulated Offline)');
     (err as Error & { code?: string }).code = 'HOSOFFICE_DB_UNAVAILABLE';
@@ -272,9 +384,14 @@ async function fetchFromHosOfficeReadOnly(): Promise<HosOfficeHrPersonRow[]> {
 
   if (testDoubleSchemaColumns !== null) {
     const contractCheck = validateHosOfficeHrPersonColumnsContract(testDoubleSchemaColumns);
-    if (!contractCheck.valid) {
+    const metaCheck = resolveHosOfficeHrPersonMeta(testDoubleSchemaColumns);
+    if (!contractCheck.valid || !metaCheck.hasHrStatusIdColumn || !metaCheck.personIdColumn) {
+      const missingDetails = [...contractCheck.missingGroups];
+      if (!metaCheck.hasHrStatusIdColumn) {
+        missingDetails.push('HR_STATUS_ID (จำเป็นสำหรับคัดกรองบุคลากรสถานะทำงานปกติ = 01)');
+      }
       const err = new Error(
-        `BLOCKED_BY_EXTERNAL_CONTRACT: โครงสร้างตาราง hr_person ของ HOSOffice ไม่ตรงตามสัญญาเชื่อมต่อ (ไม่พบคอลัมน์: ${contractCheck.missingGroups.join('; ')})`
+        `BLOCKED_BY_EXTERNAL_CONTRACT: โครงสร้างตาราง hr_person ของ HOSOffice ไม่ตรงตามสัญญาเชื่อมต่อ (ไม่พบคอลัมน์: ${missingDetails.join('; ')})`
       );
       (err as Error & { code?: string }).code = 'BLOCKED_BY_EXTERNAL_CONTRACT';
       throw err;
@@ -282,7 +399,73 @@ async function fetchFromHosOfficeReadOnly(): Promise<HosOfficeHrPersonRow[]> {
   }
 
   if (testDoubleHosOfficeRows !== null) {
-    return testDoubleHosOfficeRows;
+    const activeSqlExecuted = buildActiveHrPersonSelectSql('hr_person');
+    const sourceById = new Map<string, { row: HosOfficeHrPersonRow; hrStatusId: string | null }>();
+    const activeRows: HosOfficeHrPersonRow[] = [];
+
+    for (const row of testDoubleHosOfficeRows) {
+      const pid = String(row.PERSON_ID || '').trim();
+      if (!pid) continue;
+      const hasHrStatus = 'HR_STATUS_ID' in row;
+      const hrStatusId = hasHrStatus
+        ? normalizeHrStatusId(row.HR_STATUS_ID)
+        : Number(row.IS_ACTIVE) === 1
+          ? ACTIVE_HR_STATUS_ID
+          : null;
+      sourceById.set(pid, { row, hrStatusId });
+      if (isActiveHrStatusId(hrStatusId)) {
+        activeRows.push({
+          ...row,
+          PERSON_ID: pid,
+          IS_ACTIVE: 1,
+          HR_STATUS_ID: ACTIVE_HR_STATUS_ID,
+        });
+      }
+    }
+
+    const fetchedIdSet = new Set(activeRows.map((r) => r.PERSON_ID));
+    const missingIds = existingActivePersonIds
+      .map((id) => String(id).trim())
+      .filter((id) => Boolean(id) && !fetchedIdSet.has(id));
+
+    const verifiedStatuses = new Map<string, HosOfficeVerifiedStatusRecord>();
+    if (missingIds.length > 0 && testDoubleFailStatusVerification) {
+      return {
+        activeRows,
+        verifiedStatuses,
+        sourceVerificationExecuted: false,
+        sourceVerificationWarning:
+          'ไม่สามารถตรวจสอบสถานะ HR_STATUS_ID ต้นทางจาก HOSOffice ได้ ระบบจึงคงสถานะบุคลากรเดิมไว้โดยไม่ปรับเป็นไม่ปฏิบัติงาน',
+        activeSqlExecuted,
+      };
+    }
+
+    for (const pid of missingIds) {
+      const match = sourceById.get(pid);
+      if (match) {
+        verifiedStatuses.set(pid, {
+          personId: pid,
+          foundInSource: true,
+          hrStatusId: match.hrStatusId,
+          isActiveInSource: isActiveHrStatusId(match.hrStatusId),
+        });
+      } else {
+        verifiedStatuses.set(pid, {
+          personId: pid,
+          foundInSource: false,
+          hrStatusId: null,
+          isActiveInSource: false,
+        });
+      }
+    }
+
+    return {
+      activeRows,
+      verifiedStatuses,
+      sourceVerificationExecuted: true,
+      sourceVerificationWarning: null,
+      activeSqlExecuted,
+    };
   }
 
   const cfg = loadConfig();
@@ -339,9 +522,14 @@ async function fetchFromHosOfficeReadOnly(): Promise<HosOfficeHrPersonRow[]> {
     }
 
     const contractCheck = validateHosOfficeHrPersonColumnsContract(colList);
-    if (!contractCheck.valid) {
+    const hrPersonMeta = resolveHosOfficeHrPersonMeta(colList);
+    if (!contractCheck.valid || !hrPersonMeta.hasHrStatusIdColumn || !hrPersonMeta.personIdColumn) {
+      const missingDetails = [...contractCheck.missingGroups];
+      if (!hrPersonMeta.hasHrStatusIdColumn) {
+        missingDetails.push('HR_STATUS_ID (จำเป็นสำหรับคัดกรองบุคลากรสถานะทำงานปกติ = 01)');
+      }
       const err = new Error(
-        `BLOCKED_BY_EXTERNAL_CONTRACT: โครงสร้างตาราง ${table} ของ HOSOffice ไม่ครบตามสัญญาเชื่อมต่อ (ไม่พบคอลัมน์: ${contractCheck.missingGroups.join('; ')})`
+        `BLOCKED_BY_EXTERNAL_CONTRACT: โครงสร้างตาราง ${table} ของ HOSOffice ไม่ครบตามสัญญาเชื่อมต่อ (ไม่พบคอลัมน์: ${missingDetails.join('; ')})`
       );
       (err as Error & { code?: string }).code = 'BLOCKED_BY_EXTERNAL_CONTRACT';
       throw err;
@@ -364,9 +552,82 @@ async function fetchFromHosOfficeReadOnly(): Promise<HosOfficeHrPersonRow[]> {
       positions,
     };
 
-    const [rows] = await conn.query(`SELECT * FROM ${table}`);
+    // ดึงเฉพาะบุคลากรที่มีสถานะทำงานปกติจาก hosoffice.hr_person (WHERE HR_STATUS_ID = '01') แบบ Read-Only
+    const activeSqlExecuted = buildActiveHrPersonSelectSql(table);
+    const [rows] = await conn.query(activeSqlExecuted);
     const rawList = Array.isArray(rows) ? (rows as Record<string, unknown>[]) : [];
-    return rawList.map((r) => normalizeHosOfficeRow(r, lookups)).filter((r) => Boolean(r.PERSON_ID));
+    const activeRows = rawList
+      .map((r) => normalizeHosOfficeRow(r, lookups))
+      .filter((r) => Boolean(r.PERSON_ID) && isActiveHrStatusId(r.HR_STATUS_ID));
+
+    // ตรวจสอบสถานะต้นทางจริง (Read-Only) สำหรับบุคลากรที่เคยซิงก์ไว้แล้วแต่ไม่พบในผล Query HR_STATUS_ID = '01'
+    const fetchedIdSet = new Set(activeRows.map((r) => String(r.PERSON_ID).trim()));
+    const missingIds = Array.from(
+      new Set(
+        existingActivePersonIds
+          .map((id) => String(id).trim())
+          .filter((id) => Boolean(id) && !fetchedIdSet.has(id))
+      )
+    );
+
+    const verifiedStatuses = new Map<string, HosOfficeVerifiedStatusRecord>();
+    let sourceVerificationExecuted = true;
+    let sourceVerificationWarning: string | null = null;
+
+    if (missingIds.length > 0) {
+      try {
+        const CHUNK_SIZE = 200;
+        const foundStatusById = new Map<string, string | null>();
+        for (let i = 0; i < missingIds.length; i += CHUNK_SIZE) {
+          const chunk = missingIds.slice(i, i + CHUNK_SIZE);
+          const verifySql = buildVerifyHrStatusSelectSql(
+            table,
+            hrPersonMeta.personIdColumn,
+            chunk.length
+          );
+          const [statusRows] = await conn.execute(verifySql, chunk);
+          if (Array.isArray(statusRows)) {
+            for (const sr of statusRows as Record<string, unknown>[]) {
+              const pid = String(sr['PERSON_ID'] ?? sr['person_id'] ?? '').trim();
+              if (!pid) continue;
+              const statusVal = normalizeHrStatusId(sr['HR_STATUS_ID'] ?? sr['hr_status_id']);
+              foundStatusById.set(pid, statusVal);
+            }
+          }
+        }
+
+        for (const pid of missingIds) {
+          if (foundStatusById.has(pid)) {
+            const verifiedStatus = foundStatusById.get(pid) ?? null;
+            verifiedStatuses.set(pid, {
+              personId: pid,
+              foundInSource: true,
+              hrStatusId: verifiedStatus,
+              isActiveInSource: isActiveHrStatusId(verifiedStatus),
+            });
+          } else {
+            verifiedStatuses.set(pid, {
+              personId: pid,
+              foundInSource: false,
+              hrStatusId: null,
+              isActiveInSource: false,
+            });
+          }
+        }
+      } catch (verifyErr: unknown) {
+        // หากตรวจสอบสถานะต้นทางไม่สำเร็จ ห้ามคาดเดาหรือปรับบุคลากรเป็น Inactive
+        sourceVerificationExecuted = false;
+        sourceVerificationWarning = `ไม่สามารถตรวจสอบสถานะ HR_STATUS_ID ต้นทางจาก HOSOffice ได้ ระบบจึงคงสถานะบุคลากรเดิมไว้ (${verifyErr instanceof Error ? verifyErr.message : String(verifyErr)})`;
+      }
+    }
+
+    return {
+      activeRows,
+      verifiedStatuses,
+      sourceVerificationExecuted,
+      sourceVerificationWarning,
+      activeSqlExecuted,
+    };
   } catch (err: unknown) {
     const rawCode = (err as { code?: string })?.code || '';
     if (rawCode === 'ER_BAD_FIELD_ERROR' || rawCode === 'ER_NO_SUCH_TABLE' || rawCode === 'ER_TABLEACCESS_DENIED_ERROR') {
@@ -1147,17 +1408,25 @@ personnelRouter.post(
     }
 
     try {
-      const externalRows = await fetchFromHosOfficeReadOnly();
+      const existingActiveRows = await dbQuery<{ person_id: string }>(
+        'SELECT person_id FROM personnel WHERE is_active = 1'
+      );
+      const existingActivePersonIds = existingActiveRows
+        .map((r) => String(r.person_id).trim())
+        .filter(Boolean);
+
+      const fetchResult = await fetchFromHosOfficeReadOnly(existingActivePersonIds);
+      const externalRows = fetchResult.activeRows;
 
       if (trackedJobId) {
         updateCentralJobStep(trackedJobId, {
-          currentStep: `ดึงรายชื่อจาก HOSOffice สำเร็จ (${externalRows.length} รายการ) กำลังอัปเดตทะเบียนบุคลากร...`,
+          currentStep: `ดึงรายชื่อบุคลากรสถานะปกติ (HR_STATUS_ID = '01') จาก HOSOffice สำเร็จ (${externalRows.length} รายการ) กำลังอัปเดตทะเบียนบุคลากร...`,
           processedCount: 0,
           totalCount: externalRows.length,
         });
       }
 
-      // Detect duplicate FINGLE_ID across active personnel in the incoming batch
+      // Detect duplicate FINGLE_ID across active (HR_STATUS_ID = '01') personnel in the incoming batch
       const activeFingleCounts = new Map<string, string[]>();
       for (const row of externalRows) {
         const fid = row.FINGLE_ID ? String(row.FINGLE_ID).trim() : '';
@@ -1169,10 +1438,13 @@ personnelRouter.post(
       }
 
       let upsertedCount = 0;
+      let reactivatedCount = 0;
       let conflictsFound = 0;
+      const syncedActivePersonIds = new Set<string>();
 
       for (const row of externalRows) {
         const personId = String(row.PERSON_ID).trim();
+        syncedActivePersonIds.add(personId);
         const fingleId = row.FINGLE_ID ? String(row.FINGLE_ID).trim() : null;
         const fullName = `${row.TITLE_NAME || ''}${row.FIRST_NAME} ${row.LAST_NAME}`.trim();
 
@@ -1192,8 +1464,12 @@ personnelRouter.post(
           }
         }
 
-        const existing = await dbQuery<{ person_id: string; fingle_id: string | null }>(
-          'SELECT person_id, fingle_id FROM personnel WHERE person_id = ? LIMIT 1',
+        const existing = await dbQuery<{
+          person_id: string;
+          fingle_id: string | null;
+          is_active: number;
+        }>(
+          'SELECT person_id, fingle_id, is_active FROM personnel WHERE person_id = ? LIMIT 1',
           [personId]
         );
 
@@ -1217,12 +1493,15 @@ personnelRouter.post(
               row.WORK_GROUP_NAME || null,
               row.PERSONNEL_TYPE_CODE,
               row.PERSONNEL_TYPE_NAME,
-              Number(row.IS_ACTIVE) ? 1 : 0,
+              1,
               mappingStatus,
               issueDetail,
             ]
           );
         } else {
+          if (Number(existing[0].is_active) === 0) {
+            reactivatedCount++;
+          }
           await dbExecute(
             `UPDATE personnel
              SET fingle_id = ?, title_name = ?, first_name = ?, last_name = ?, full_name = ?,
@@ -1242,7 +1521,7 @@ personnelRouter.post(
               row.WORK_GROUP_NAME || null,
               row.PERSONNEL_TYPE_CODE,
               row.PERSONNEL_TYPE_NAME,
-              Number(row.IS_ACTIVE) ? 1 : 0,
+              1,
               mappingStatus,
               issueDetail,
               personId,
@@ -1298,6 +1577,45 @@ personnelRouter.post(
         }
       }
 
+      // ตรวจสอบบุคลากรที่เคยซิงก์ไว้แล้วแต่ไม่พบในผล Query HR_STATUS_ID = '01'
+      // กฎความปลอดภัย: ปรับ is_active = 0 เฉพาะเมื่อยืนยันสถานะต้นทางจริงจาก HOSOffice แล้วว่า HR_STATUS_ID != '01' เท่านั้น
+      // ห้ามถือว่าบุคลากรที่หายจากผล Query เป็น Inactive ทันที และห้ามลบ/แก้ไขประวัติ Raw Scan, Mapping, Attendance, Leave, Notes หรือ Push History
+      const missingPreviouslyActiveIds = existingActivePersonIds.filter(
+        (pid) => !syncedActivePersonIds.has(pid)
+      );
+      let deactivatedCount = 0;
+      const deactivatedPersonnel: Array<{ personId: string; verifiedHrStatusId: string | null }> = [];
+      const unverifiedMissingPersonIds: string[] = [];
+
+      if (missingPreviouslyActiveIds.length > 0) {
+        if (fetchResult.sourceVerificationExecuted) {
+          for (const pid of missingPreviouslyActiveIds) {
+            const verified = fetchResult.verifiedStatuses.get(pid);
+            if (verified && verified.foundInSource && !verified.isActiveInSource) {
+              await dbExecute(
+                `UPDATE personnel
+                 SET is_active = 0,
+                     last_synced_at = CURRENT_TIMESTAMP,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE person_id = ? AND is_active = 1`,
+                [pid]
+              );
+              deactivatedCount++;
+              deactivatedPersonnel.push({
+                personId: pid,
+                verifiedHrStatusId: verified.hrStatusId,
+              });
+            } else if (!verified || !verified.foundInSource) {
+              // ยังไม่พบข้อมูลยืนยันสถานะต้นทางจริง -> ห้ามปรับเป็น Inactive
+              unverifiedMissingPersonIds.push(pid);
+            }
+          }
+        } else {
+          // ตรวจสอบสถานะต้นทางไม่สำเร็จ -> คงสถานะเดิมทุกราย ห้ามเดาเป็น Inactive
+          unverifiedMissingPersonIds.push(...missingPreviouslyActiveIds);
+        }
+      }
+
       // ตรวจสอบและจับคู่ข้อมูลสแกนค้างที่อยู่ในช่วงวันที่มีผล (ไม่ย้อนหลังอัตโนมัติเกิน effective_from)
       let autoMappingResolution: {
         totalEvaluated: number;
@@ -1347,8 +1665,12 @@ personnelRouter.post(
           processedCount: upsertedCount,
           totalCount: externalRows.length,
           resultSummary: {
+            hrStatusFilter: ACTIVE_HR_STATUS_ID,
             recordsFetched: externalRows.length,
             recordsUpserted: upsertedCount,
+            reactivatedCount,
+            deactivatedCount,
+            unverifiedMissingCount: unverifiedMissingPersonIds.length,
             mappingConflictsFound: conflictsFound,
             effectiveDate,
             autoMappingResolution,
@@ -1365,8 +1687,15 @@ personnelRouter.post(
         targetType: 'HOSOFFICE_HR_PERSON',
         result: 'SUCCESS',
         detail: {
+          hrStatusFilter: ACTIVE_HR_STATUS_ID,
           recordsFetched: externalRows.length,
           upsertedCount,
+          reactivatedCount,
+          deactivatedCount,
+          deactivatedPersonnel,
+          unverifiedMissingCount: unverifiedMissingPersonIds.length,
+          sourceVerificationExecuted: fetchResult.sourceVerificationExecuted,
+          sourceVerificationWarning: fetchResult.sourceVerificationWarning,
           conflictsFound,
           effectiveDate,
         },
@@ -1375,8 +1704,16 @@ personnelRouter.post(
       res.json({
         status: 'SUCCESS',
         jobId: trackedJobId,
+        hrStatusFilter: ACTIVE_HR_STATUS_ID,
         recordsFetched: externalRows.length,
         recordsUpserted: upsertedCount,
+        reactivatedCount,
+        deactivatedCount,
+        deactivatedPersonnel,
+        unverifiedMissingCount: unverifiedMissingPersonIds.length,
+        unverifiedMissingPersonIds,
+        sourceVerificationExecuted: fetchResult.sourceVerificationExecuted,
+        sourceVerificationWarning: fetchResult.sourceVerificationWarning,
         mappingConflictsFound: conflictsFound,
         effectiveDate,
         autoMappingResolution,
