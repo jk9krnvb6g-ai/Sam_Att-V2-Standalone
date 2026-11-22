@@ -813,6 +813,13 @@ try {
       throw "MIGRATION_APPROVAL_REQUIRED: Database migration changes detected ($MigList). Automatic migration is forbidden. Please review and run with -ApproveMigrations."
     }
 
+    # Fail closed: approval is not equivalent to applying DDL. The current deployment
+    # workflow has no verified production database backup + migration execution step.
+    # Never deploy code requiring new schema until those steps are implemented and tested.
+    if ($PendingMigrations.Count -gt 0 -and $ApproveMigrations -and (-not $CheckOnly)) {
+      throw "MIGRATION_EXECUTION_NOT_CONFIGURED: Approval received, but database backup, migration execution and schema verification are not implemented in this deploy workflow. Deployment blocked to protect production data."
+    }
+
     if ($CheckOnly) {
       Write-StepResult -StepNo 2 -TotalSteps 7 -Label "GitHub Update" -Status "PASS"
       Write-Host ""
