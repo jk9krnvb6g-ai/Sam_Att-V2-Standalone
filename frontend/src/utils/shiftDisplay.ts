@@ -202,6 +202,14 @@ export interface EffectiveCellLike {
   }>;
   defaultRule?: {
     personnel_type_name?: string;
+    default_shift_id?: number | null;
+    default_shift_code?: string | null;
+    default_shift_name?: string | null;
+    default_shift_category?: string | null;
+    default_shift_start_time?: string | null;
+    default_shift_end_time?: string | null;
+    default_shift_grace_minutes?: number | null;
+    default_shift_is_cross_midnight?: number | null;
     default_start_time?: string;
     default_end_time?: string;
     default_grace_minutes?: number;
@@ -223,7 +231,7 @@ export function buildCompactMonthlyCellViewModel(
     const tooltipLines = [
       `วันที่ ${formattedThaiDate}`,
       'สถานะ: ไม่มีเวร (เจ้าหน้าที่ลบเวรวันนี้ออกแล้ว)',
-      'คลิกเพื่อเพิ่มเวรหรือคืนค่ากะเช้าเริ่มต้น',
+      'คลิกเพื่อเพิ่มเวรหรือคืนค่ากะเริ่มต้น',
     ];
     return {
       kind: 'EMPTY_DASH',
@@ -238,23 +246,61 @@ export function buildCompactMonthlyCellViewModel(
   }
 
   if (cellEff.mode === 'DEFAULT_FROM_TYPE' && cellEff.defaultRule) {
-    const startTime = cellEff.defaultRule.default_start_time || '08:00';
-    const endTime = cellEff.defaultRule.default_end_time || '16:00';
-    const grace = Number(cellEff.defaultRule.default_grace_minutes ?? 15);
-    const typeName = cellEff.defaultRule.personnel_type_name || 'ตามประเภทบุคลากร';
+    const rule = cellEff.defaultRule;
+    const startTime = String(rule.default_shift_start_time || rule.default_start_time || '').trim();
+    const endTime = String(rule.default_shift_end_time || rule.default_end_time || '').trim();
+    if (!startTime || !endTime) {
+      const tooltipLines = [
+        `วันที่ ${formattedThaiDate}`,
+        'สถานะ: ไม่พบกะที่กำหนด (ยังไม่ได้กำหนดกะเริ่มต้นของประเภทบุคลากรนี้)',
+        'คลิกเพื่อจัดเวรรายวัน หรือกำหนดกะเริ่มต้นในแท็บแม่แบบกะทำงาน',
+      ];
+      return {
+        kind: 'EMPTY_DASH',
+        isClearedByStaff: false,
+        totalShifts: 0,
+        visibleIcons: [],
+        overflowCount: 0,
+        tooltipLines,
+        tooltipText: tooltipLines.join('\n'),
+        ariaLabel: `${formattedThaiDate} ไม่พบกะที่กำหนด คลิกเพื่อจัดการ`,
+      };
+    }
+
+    const grace = Number(rule.default_shift_grace_minutes ?? rule.default_grace_minutes ?? 15);
+    const typeName = rule.personnel_type_name || 'ตามประเภทบุคลากร';
+    const isCross =
+      Number(rule.default_shift_is_cross_midnight ?? 0) === 1 || endTime <= startTime;
+    const linkedCode = String(rule.default_shift_code || '').trim();
+    const linkedName = rule.default_shift_name
+      ? cleanShiftDisplayName(rule.default_shift_name)
+      : '';
+    const displayName = linkedName
+      ? `${linkedName} (กะเริ่มต้น: ${typeName})`
+      : `กะเริ่มต้น (${typeName})`;
+    const iconKind = classifyShiftIconKind({
+      shiftCode: linkedCode,
+      shiftName: linkedName || displayName,
+      shiftCategory: rule.default_shift_category,
+      startTime,
+      endTime,
+      isCrossMidnight: isCross,
+    });
     const item: CompactShiftIconItem = {
-      id: 'default-morning',
-      iconKind: 'MORNING',
-      shiftCode: startTime === '07:30' ? 'MOR-0730' : 'MOR-0816',
-      cleanName: `กะเช้าเริ่มต้น (${typeName})`,
+      id: rule.default_shift_id ? `default-shift-${rule.default_shift_id}` : 'default-morning',
+      iconKind,
+      shiftCode: linkedCode || 'DEFAULT',
+      cleanName: displayName,
       timeRange: `${startTime}–${endTime}`,
-      isCrossMidnight: false,
+      isCrossMidnight: isCross,
       isDefault: true,
     };
     const tooltipLines = [
       `วันที่ ${formattedThaiDate}`,
-      `กะเช้าเริ่มต้น (${typeName}): ${startTime}–${endTime} น. (ผ่อนผัน ${grace} นาที)`,
-      'สถานะ: กะเริ่มต้นอัตโนมัติ · คลิกเพื่อเปลี่ยนกะ เพิ่มกะ หรือตั้งเป็นวันหยุด',
+      `${displayName}: ${startTime}–${endTime} น. (ผ่อนผัน ${grace} นาที)`,
+      linkedCode
+        ? `แม่แบบกะเริ่มต้น: ${linkedCode} · คลิกเพื่อเปลี่ยนกะ เพิ่มกะ หรือตั้งเป็นวันหยุด`
+        : 'สถานะ: กะเริ่มต้นอัตโนมัติ · คลิกเพื่อเปลี่ยนกะ เพิ่มกะ หรือตั้งเป็นวันหยุด',
     ];
     return {
       kind: 'DEFAULT',
@@ -264,7 +310,7 @@ export function buildCompactMonthlyCellViewModel(
       overflowCount: 0,
       tooltipLines,
       tooltipText: tooltipLines.join('\n'),
-      ariaLabel: `${formattedThaiDate} กะเช้าเริ่มต้น ${startTime} ถึง ${endTime} น.`,
+      ariaLabel: `${formattedThaiDate} ${displayName} ${startTime} ถึง ${endTime} น.`,
     };
   }
 

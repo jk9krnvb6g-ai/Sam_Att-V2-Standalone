@@ -67,6 +67,200 @@ export interface PersonnelTypeRuleRow {
   allow_overlapping_shifts: number;
   rule_version: string;
   updated_at?: string;
+  default_shift_id?: number | null;
+  default_shift_code?: string | null;
+  default_shift_name?: string | null;
+  default_shift_category?: string | null;
+  default_shift_start_time?: string | null;
+  default_shift_end_time?: string | null;
+  default_shift_grace_minutes?: number | null;
+  default_shift_cutoff_time?: string | null;
+  default_shift_is_cross_midnight?: number | null;
+  default_shift_is_active?: number | null;
+  default_assigned_by?: string | null;
+  default_assigned_reason?: string | null;
+  default_updated_at?: string | null;
+}
+
+export interface DefaultShiftBindingSummary {
+  personnelTypeCode: string;
+  personnelTypeName: string;
+  isRuleActive: boolean;
+  effectiveFrom: string;
+  defaultShiftId: number | null;
+  defaultShiftCode: string | null;
+  defaultShiftName: string | null;
+  defaultStartTime: string | null;
+  defaultEndTime: string | null;
+  defaultGraceMinutes: number | null;
+  defaultCutoffTime: string | null;
+  defaultIsCrossMidnight: number;
+  assignedBy: string | null;
+  assignedReason: string | null;
+  updatedAt: string | null;
+}
+
+function isUniqueConstraintError(err: unknown): boolean {
+  const e = err as { code?: string; errno?: number; message?: string } | null;
+  const code = String(e?.code || '').toUpperCase();
+  const msg = String(e?.message || '');
+  return (
+    code === 'ER_DUP_ENTRY' ||
+    e?.errno === 1062 ||
+    code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+    code === 'SQLITE_CONSTRAINT_PRIMARYKEY' ||
+    /UNIQUE\s+constraint\s+failed/i.test(msg) ||
+    /Duplicate\s+entry/i.test(msg)
+  );
+}
+
+const defaultShiftScopeLockChains = new Map<string, Promise<void>>();
+
+async function withDefaultShiftScopeLocks<T>(
+  scopeCodes: string[],
+  work: () => Promise<T>
+): Promise<T> {
+  const sortedUnique = Array.from(
+    new Set(scopeCodes.map((c) => String(c || '').trim().toUpperCase()).filter(Boolean))
+  ).sort();
+  if (sortedUnique.length === 0) {
+    return work();
+  }
+
+  const runRecursive = async (index: number): Promise<T> => {
+    if (index >= sortedUnique.length) {
+      return work();
+    }
+    const key = sortedUnique[index];
+    const previous = defaultShiftScopeLockChains.get(key) || Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => current);
+    defaultShiftScopeLockChains.set(key, tail);
+
+    await previous;
+    try {
+      return await runRecursive(index + 1);
+    } finally {
+      release();
+      if (defaultShiftScopeLockChains.get(key) === tail) {
+        defaultShiftScopeLockChains.delete(key);
+      }
+    }
+  };
+
+  return runRecursive(0);
+}
+
+export async function loadPersonnelTypeRulesWithDefaultShifts(
+  queryRunner: <T = Record<string, unknown>>(sql: string, params?: unknown[]) => Promise<T[]> = dbQuery
+): Promise<PersonnelTypeRuleRow[]> {
+  try {
+    const rows = await queryRunner<
+      PersonnelTypeRuleRow & { resolved_default_shift_id?: number | null }
+    >(
+      `SELECT r.*,
+              COALESCE(ds.shift_id, r.default_shift_id) AS resolved_default_shift_id,
+              s.shift_code AS default_shift_code,
+              s.shift_name AS default_shift_name,
+              s.shift_category AS default_shift_category,
+              s.start_time AS default_shift_start_time,
+              s.end_time AS default_shift_end_time,
+              s.grace_minutes AS default_shift_grace_minutes,
+              s.cutoff_time AS default_shift_cutoff_time,
+              s.is_cross_midnight AS default_shift_is_cross_midnight,
+              s.is_active AS default_shift_is_active,
+              ds.assigned_by AS default_assigned_by,
+              ds.assigned_reason AS default_assigned_reason,
+              ds.updated_at AS default_updated_at
+       FROM personnel_type_rules r
+       LEFT JOIN personnel_type_default_shifts ds ON ds.personnel_type_code = r.personnel_type_code
+       LEFT JOIN shifts s ON s.id = COALESCE(ds.shift_id, r.default_shift_id)
+       ORDER BY r.id ASC`
+    );
+    return rows.map((r) => ({
+      ...r,
+      effective_from: normalizeWorkDateString(r.effective_from || '2026-01-01'),
+      default_shift_id:
+        r.resolved_default_shift_id !== undefined && r.resolved_default_shift_id !== null
+          ? Number(r.resolved_default_shift_id)
+          : r.default_shift_id !== undefined && r.default_shift_id !== null
+            ? Number(r.default_shift_id)
+            : null,
+    }));
+  } catch {
+    // Fallback กรณีฐานข้อมูล Production ยังไม่ได้รัน Migration 004_default_shift_templates.sql
+    const rows = await queryRunner<PersonnelTypeRuleRow>(
+      'SELECT * FROM personnel_type_rules ORDER BY id ASC'
+    );
+    return rows.map((r) => ({
+      ...r,
+      effective_from: normalizeWorkDateString(r.effective_from || '2026-01-01'),
+      default_shift_id: null,
+    }));
+  }
+}
+
+export function resolveDefaultShiftSpecFromRule(rule: PersonnelTypeRuleRow | null | undefined): {
+  shiftId: number | null;
+  shiftCode: string;
+  shiftName: string;
+  shiftCategory: string;
+  startTime: string;
+  endTime: string;
+  graceMinutes: number;
+  cutoffTime: string;
+  isCrossMidnight: number;
+} | null {
+  if (!rule) return null;
+
+  if (
+    rule.default_shift_id != null &&
+    rule.default_shift_code &&
+    rule.default_shift_start_time &&
+    rule.default_shift_end_time &&
+    Number(rule.default_shift_is_active ?? 1) === 1
+  ) {
+    const startTime = String(rule.default_shift_start_time).trim();
+    const endTime = String(rule.default_shift_end_time).trim();
+    return {
+      shiftId: Number(rule.default_shift_id),
+      shiftCode: String(rule.default_shift_code).trim(),
+      shiftName: String(rule.default_shift_name || `กะเริ่มต้น (${rule.personnel_type_name})`).trim(),
+      shiftCategory: String(rule.default_shift_category || 'MORNING').trim(),
+      startTime,
+      endTime,
+      graceMinutes: Number(rule.default_shift_grace_minutes ?? rule.default_grace_minutes ?? 15),
+      cutoffTime: String(rule.default_shift_cutoff_time || rule.default_cutoff_time || '11:00').trim(),
+      isCrossMidnight:
+        rule.default_shift_is_cross_midnight !== undefined &&
+        rule.default_shift_is_cross_midnight !== null
+          ? Number(rule.default_shift_is_cross_midnight)
+          : endTime <= startTime
+            ? 1
+            : 0,
+    };
+  }
+
+  const startTime = String(rule.default_start_time || '').trim();
+  const endTime = String(rule.default_end_time || '').trim();
+  if (!/^\d{2}:\d{2}$/.test(startTime) || !/^\d{2}:\d{2}$/.test(endTime)) {
+    return null;
+  }
+
+  return {
+    shiftId: null,
+    shiftCode: startTime === '07:30' ? 'MOR-0730' : 'MOR-0816',
+    shiftName: `กะเช้าเริ่มต้น (${rule.personnel_type_name})`,
+    shiftCategory: 'MORNING',
+    startTime,
+    endTime,
+    graceMinutes: Number(rule.default_grace_minutes ?? 15),
+    cutoffTime: String(rule.default_cutoff_time || '11:00').trim(),
+    isCrossMidnight: endTime <= startTime ? 1 : 0,
+  };
 }
 
 export type DailyScheduleOverrideState =
@@ -276,20 +470,16 @@ export function resolveEffectiveDailyScheduleForPersonDate(params: {
     };
   }
 
-  // ลำดับความสำคัญที่ 4: หากยังไม่เคยกำหนดเวร หรือกดคืนค่ากะเริ่มต้น -> ใช้กะเช้าเริ่มต้นตามประเภทบุคลากร
-  if (!directRule || !isRuleActive) {
+  // ลำดับความสำคัญที่ 4: หากยังไม่เคยกำหนดเวร หรือกดคืนค่ากะเริ่มต้น -> ใช้กะเริ่มต้นตามประเภทบุคลากร
+  const defaultSpec = isRuleActive ? resolveDefaultShiftSpecFromRule(directRule) : null;
+  if (!directRule || !isRuleActive || !defaultSpec) {
     return {
       state: 'UNCONFIGURED_DEFAULT_RULE',
       effectiveShifts: [],
       defaultRule: directRule,
-      unconfiguredMessage: `ประเภทบุคลากร (${params.person.personnel_type_name || canonicalTypeCode}) ยังไม่ได้ตั้งค่ากะเริ่มต้นหรือยังไม่ถึงวันที่มีผลบังคับใช้`,
+      unconfiguredMessage: `ไม่พบกะที่กำหนดสำหรับประเภทบุคลากร (${params.person.personnel_type_name || canonicalTypeCode}) หรือยังไม่ถึงวันที่มีผลบังคับใช้`,
     };
   }
-
-  const startTime = directRule.default_start_time || '08:00';
-  const endTime = directRule.default_end_time || '16:00';
-  const graceMinutes = Number(directRule.default_grace_minutes ?? 15);
-  const cutoffTime = directRule.default_cutoff_time || '11:00';
 
   return {
     state:
@@ -300,14 +490,14 @@ export function resolveEffectiveDailyScheduleForPersonDate(params: {
       {
         isDefaultFromType: true,
         assignmentId: null,
-        shiftId: null,
-        shiftCode: startTime === '07:30' ? 'MOR-0730' : 'MOR-0816',
-        shiftName: `กะเช้าเริ่มต้น (${directRule.personnel_type_name})`,
-        startTime,
-        endTime,
-        graceMinutes,
-        cutoffTime,
-        isCrossMidnight: endTime <= startTime ? 1 : 0,
+        shiftId: defaultSpec.shiftId,
+        shiftCode: defaultSpec.shiftCode,
+        shiftName: defaultSpec.shiftName,
+        startTime: defaultSpec.startTime,
+        endTime: defaultSpec.endTime,
+        graceMinutes: defaultSpec.graceMinutes,
+        cutoffTime: defaultSpec.cutoffTime,
+        isCrossMidnight: defaultSpec.isCrossMidnight,
       },
     ],
     defaultRule: directRule,
@@ -633,40 +823,39 @@ export function evaluateDailyCellChange(params: {
   const isCleared = dailyOverride?.override_state === 'CLEARED_ALL_SHIFTS';
   const isCustomWithoutRows = dailyOverride?.override_state === 'CUSTOM_ASSIGNED';
 
-  if (
+  const defaultSpecForCell =
     existingSameDayShifts.length === 0 &&
     !isCleared &&
     !isCustomWithoutRows &&
     defaultRule &&
     Number(defaultRule.is_active) === 1 &&
     (!defaultRule.effective_from || workDate >= normalizeWorkDateString(defaultRule.effective_from))
-  ) {
-    const defStart = defaultRule.default_start_time || '08:00';
-    const defEnd = defaultRule.default_end_time || '16:00';
-    const defCode = defStart === '07:30' ? 'MOR-0730' : 'MOR-0816';
-    const defName = `กะเช้าเริ่มต้น (${defaultRule.personnel_type_name})`;
+      ? resolveDefaultShiftSpecFromRule(defaultRule)
+      : null;
+
+  if (defaultSpecForCell) {
     const defItem = toDailyCellShiftItem({
-      shiftId: null,
-      shiftCode: defCode,
-      shiftName: defName,
+      shiftId: defaultSpecForCell.shiftId,
+      shiftCode: defaultSpecForCell.shiftCode,
+      shiftName: defaultSpecForCell.shiftName,
       workDate,
-      startTime: defStart,
-      endTime: defEnd,
-      isCrossMidnight: 0,
-      graceMinutes: Number(defaultRule.default_grace_minutes ?? 15),
-      cutoffTime: defaultRule.default_cutoff_time || '11:00',
+      startTime: defaultSpecForCell.startTime,
+      endTime: defaultSpecForCell.endTime,
+      isCrossMidnight: defaultSpecForCell.isCrossMidnight,
+      graceMinutes: defaultSpecForCell.graceMinutes,
+      cutoffTime: defaultSpecForCell.cutoffTime,
       source: 'DEFAULT_IMPLICIT',
     });
     existingSameDayShifts.push(defItem);
     if (action === 'ADD_SHIFT') {
       defaultShiftToMaterialize = {
-        shiftCode: defCode,
-        shiftName: defName,
-        startTime: defStart,
-        endTime: defEnd,
-        graceMinutes: Number(defaultRule.default_grace_minutes ?? 15),
-        cutoffTime: defaultRule.default_cutoff_time || '11:00',
-        isCrossMidnight: 0,
+        shiftCode: defaultSpecForCell.shiftCode,
+        shiftName: defaultSpecForCell.shiftName,
+        startTime: defaultSpecForCell.startTime,
+        endTime: defaultSpecForCell.endTime,
+        graceMinutes: defaultSpecForCell.graceMinutes,
+        cutoffTime: defaultSpecForCell.cutoffTime,
+        isCrossMidnight: defaultSpecForCell.isCrossMidnight,
       };
     }
   }
@@ -997,58 +1186,67 @@ export function evaluateDailyCellSync(params: {
   const isCustomWithoutRows =
     dailyOverride?.override_state === 'CUSTOM_ASSIGNED' && existingEffectiveShifts.length === 0;
 
+  const syncDefaultSpec =
+    !isCleared &&
+    existingEffectiveShifts.length === 0 &&
+    !isCustomWithoutRows &&
+    defaultRule &&
+    Number(defaultRule.is_active) === 1 &&
+    (!defaultRule.effective_from || workDate >= normalizeWorkDateString(defaultRule.effective_from))
+      ? resolveDefaultShiftSpecFromRule(defaultRule)
+      : null;
+
   let effectiveState: DailyScheduleOverrideState = 'UNCONFIGURED_DEFAULT_RULE';
   if (isCleared) {
     effectiveState = 'CLEARED_ALL_SHIFTS';
   } else if (existingEffectiveShifts.length > 0) {
     effectiveState = 'CUSTOM_ASSIGNED';
-  } else if (
-    !isCustomWithoutRows &&
-    defaultRule &&
-    Number(defaultRule.is_active) === 1 &&
-    (!defaultRule.effective_from || workDate >= normalizeWorkDateString(defaultRule.effective_from))
-  ) {
+  } else if (syncDefaultSpec && defaultRule) {
     effectiveState =
       dailyOverride?.override_state === 'RESTORED_DEFAULT'
         ? 'RESTORED_DEFAULT'
         : 'DEFAULT_FROM_TYPE';
 
-    const defStart = defaultRule.default_start_time || '08:00';
-    const defEnd = defaultRule.default_end_time || '16:00';
-    const defCode = defStart === '07:30' ? 'MOR-0730' : 'MOR-0816';
-    const matchedDefTpl = matchShiftTemplateId(
-      { shiftCode: defCode, startTime: defStart, endTime: defEnd, isCrossMidnight: 0 },
-      availableTemplates
-    );
-    const defName = matchedDefTpl
-      ? matchedDefTpl.shift_name
-      : `กะเช้าเริ่มต้น (${defaultRule.personnel_type_name})`;
+    const matchedDefTpl =
+      (syncDefaultSpec.shiftId != null
+        ? availableTemplates.find((t) => Number(t.id) === Number(syncDefaultSpec.shiftId))
+        : null) ||
+      matchShiftTemplateId(
+        {
+          shiftCode: syncDefaultSpec.shiftCode,
+          startTime: syncDefaultSpec.startTime,
+          endTime: syncDefaultSpec.endTime,
+          isCrossMidnight: syncDefaultSpec.isCrossMidnight,
+        },
+        availableTemplates
+      );
+    const defName = matchedDefTpl ? matchedDefTpl.shift_name : syncDefaultSpec.shiftName;
     const previewItem = toDailyCellShiftItem({
-      shiftId: matchedDefTpl ? Number(matchedDefTpl.id) : null,
-      shiftCode: matchedDefTpl?.shift_code || defCode,
+      shiftId: matchedDefTpl ? Number(matchedDefTpl.id) : syncDefaultSpec.shiftId,
+      shiftCode: matchedDefTpl?.shift_code || syncDefaultSpec.shiftCode,
       shiftName: defName,
       workDate,
-      startTime: defStart,
-      endTime: defEnd,
-      isCrossMidnight: 0,
-      graceMinutes: Number(defaultRule.default_grace_minutes ?? 15),
-      cutoffTime: defaultRule.default_cutoff_time || '11:00',
+      startTime: syncDefaultSpec.startTime,
+      endTime: syncDefaultSpec.endTime,
+      isCrossMidnight: syncDefaultSpec.isCrossMidnight,
+      graceMinutes: syncDefaultSpec.graceMinutes,
+      cutoffTime: syncDefaultSpec.cutoffTime,
       source: 'DEFAULT_IMPLICIT',
     });
     existingEffectiveShifts.push({
       identityKey: `default:${defaultRule.personnel_type_code}`,
       assignmentId: null,
-      templateId: matchedDefTpl ? Number(matchedDefTpl.id) : null,
+      templateId: matchedDefTpl ? Number(matchedDefTpl.id) : syncDefaultSpec.shiftId,
       shiftCode: previewItem.shiftCode,
       shiftName: previewItem.shiftName,
-      shiftCategory: matchedDefTpl?.shift_category || 'MORNING',
+      shiftCategory: matchedDefTpl?.shift_category || syncDefaultSpec.shiftCategory,
       workDate,
-      startTime: defStart,
-      endTime: defEnd,
-      endDate: workDate,
-      isCrossMidnight: 0,
-      graceMinutes: Number(defaultRule.default_grace_minutes ?? 15),
-      cutoffTime: defaultRule.default_cutoff_time || '11:00',
+      startTime: syncDefaultSpec.startTime,
+      endTime: syncDefaultSpec.endTime,
+      endDate: previewItem.endDate,
+      isCrossMidnight: syncDefaultSpec.isCrossMidnight,
+      graceMinutes: syncDefaultSpec.graceMinutes,
+      cutoffTime: syncDefaultSpec.cutoffTime,
       source: 'DEFAULT_IMPLICIT',
       isSpecialAssignment: false,
       specialReason: null,
@@ -1173,28 +1371,28 @@ export function evaluateDailyCellSync(params: {
   // รวมกะเช้าเริ่มต้นของวันถัดไป (ถ้าวันถัดไปไม่มี Assignment เฉพาะ และไม่ได้ CLEARED_ALL_SHIFTS)
   const nextDayHasExplicit = adjacentPreviewItems.some((a) => a.workDate === nextDate);
   const nextDayCleared = nextDayOverride?.override_state === 'CLEARED_ALL_SHIFTS';
-  if (
+  const nextDayDefaultSpec =
     !nextDayHasExplicit &&
     !nextDayCleared &&
     nextDayDefaultRule &&
     Number(nextDayDefaultRule.is_active) === 1 &&
     (!nextDayDefaultRule.effective_from ||
       nextDate >= normalizeWorkDateString(nextDayDefaultRule.effective_from))
-  ) {
-    const ndStart = nextDayDefaultRule.default_start_time || '08:00';
-    const ndEnd = nextDayDefaultRule.default_end_time || '16:00';
-    const ndCode = ndStart === '07:30' ? 'MOR-0730' : 'MOR-0816';
+      ? resolveDefaultShiftSpecFromRule(nextDayDefaultRule)
+      : null;
+
+  if (nextDayDefaultSpec) {
     adjacentPreviewItems.push(
       toDailyCellShiftItem({
-        shiftId: null,
-        shiftCode: ndCode,
-        shiftName: `กะเช้าเริ่มต้น (${nextDayDefaultRule.personnel_type_name})`,
+        shiftId: nextDayDefaultSpec.shiftId,
+        shiftCode: nextDayDefaultSpec.shiftCode,
+        shiftName: nextDayDefaultSpec.shiftName,
         workDate: nextDate,
-        startTime: ndStart,
-        endTime: ndEnd,
-        isCrossMidnight: 0,
-        graceMinutes: Number(nextDayDefaultRule.default_grace_minutes ?? 15),
-        cutoffTime: nextDayDefaultRule.default_cutoff_time || '11:00',
+        startTime: nextDayDefaultSpec.startTime,
+        endTime: nextDayDefaultSpec.endTime,
+        isCrossMidnight: nextDayDefaultSpec.isCrossMidnight,
+        graceMinutes: nextDayDefaultSpec.graceMinutes,
+        cutoffTime: nextDayDefaultSpec.cutoffTime,
         source: 'DEFAULT_IMPLICIT',
       })
     );
@@ -1703,9 +1901,7 @@ shiftsRouter.get(
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
   async (_req, res, next) => {
     try {
-      const rules = await dbQuery<PersonnelTypeRuleRow>(
-        'SELECT * FROM personnel_type_rules ORDER BY id ASC'
-      );
+      const rules = await loadPersonnelTypeRulesWithDefaultShifts();
       const history = await dbQuery<Record<string, unknown>>(
         'SELECT * FROM personnel_type_rule_history ORDER BY id DESC LIMIT 50'
       );
@@ -1735,19 +1931,30 @@ shiftsRouter.post(
         .trim()
         .toUpperCase();
       const personnelTypeName = String(req.body?.personnelTypeName || '').trim();
-      const defaultStartTime = String(req.body?.defaultStartTime || '08:00').trim();
-      const defaultEndTime = String(req.body?.defaultEndTime || '16:00').trim();
+      const noDefaultShift = Boolean(req.body?.noDefaultShift);
+      const defaultStartTime = noDefaultShift
+        ? ''
+        : String(req.body?.defaultStartTime ?? '08:00').trim();
+      const defaultEndTime = noDefaultShift
+        ? ''
+        : String(req.body?.defaultEndTime ?? '16:00').trim();
       const defaultGraceMinutes = Number(req.body?.defaultGraceMinutes ?? 15);
-      const defaultCutoffTime = String(req.body?.defaultCutoffTime || '11:00').trim();
+      const defaultCutoffTime = noDefaultShift
+        ? ''
+        : String(req.body?.defaultCutoffTime ?? '11:00').trim();
       const effectiveFrom = normalizeWorkDateString(req.body?.effectiveFrom || '2026-01-01');
       const isActive = req.body?.isActive !== undefined ? (req.body.isActive ? 1 : 0) : 1;
+
+      const timesValid = noDefaultShift
+        ? true
+        : /^\d{2}:\d{2}$/.test(defaultStartTime) &&
+          /^\d{2}:\d{2}$/.test(defaultEndTime) &&
+          /^\d{2}:\d{2}$/.test(defaultCutoffTime);
 
       if (
         !personnelTypeCode ||
         !personnelTypeName ||
-        !/^\d{2}:\d{2}$/.test(defaultStartTime) ||
-        !/^\d{2}:\d{2}$/.test(defaultEndTime) ||
-        !/^\d{2}:\d{2}$/.test(defaultCutoffTime) ||
+        !timesValid ||
         !/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom) ||
         Number.isNaN(defaultGraceMinutes) ||
         defaultGraceMinutes < 0 ||
@@ -2092,22 +2299,101 @@ shiftsRouter.patch(
 // 2. แม่แบบกะทำงาน (Shift Templates — แยกจากประเภทบุคลากรอย่างชัดเจน)
 // ============================================================================
 
+function parseRequestedDefaultPersonnelTypeCodes(body: Record<string, unknown> | undefined): string[] {
+  const result: string[] = [];
+  if (Array.isArray(body?.defaultPersonnelTypeCodes)) {
+    for (const raw of body.defaultPersonnelTypeCodes) {
+      const code = String(raw || '').trim().toUpperCase();
+      if (code && !result.includes(code)) result.push(code);
+    }
+  }
+  if (typeof body?.defaultPersonnelTypeCode === 'string' && body.defaultPersonnelTypeCode.trim()) {
+    const code = body.defaultPersonnelTypeCode.trim().toUpperCase();
+    if (!result.includes(code)) result.push(code);
+  }
+  return result;
+}
+
 shiftsRouter.get(
   '/shifts',
   requireAuth,
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
   async (_req, res, next) => {
     try {
-      const items = await dbQuery('SELECT * FROM shifts ORDER BY id ASC');
-      const rules = await dbQuery<PersonnelTypeRuleRow>(
-        'SELECT * FROM personnel_type_rules ORDER BY id ASC'
-      );
+      const [rawShifts, rules] = await Promise.all([
+        dbQuery<ShiftRow>('SELECT * FROM shifts ORDER BY id ASC'),
+        loadPersonnelTypeRulesWithDefaultShifts(),
+      ]);
+
+      const defaultTypesByShiftId = new Map<
+        number,
+        Array<{
+          personnelTypeCode: string;
+          personnelTypeName: string;
+          effectiveFrom: string;
+          isRuleActive: boolean;
+          assignedBy: string | null;
+          assignedReason: string | null;
+          updatedAt: string | null;
+        }>
+      >();
+
+      const defaultBindings: DefaultShiftBindingSummary[] = rules.map((r) => {
+        const shiftId = r.default_shift_id != null ? Number(r.default_shift_id) : null;
+        const effectiveFrom = normalizeWorkDateString(r.effective_from || '2026-01-01');
+        const isRuleActive = Number(r.is_active ?? 1) === 1;
+        if (shiftId != null) {
+          const list = defaultTypesByShiftId.get(shiftId) || [];
+          list.push({
+            personnelTypeCode: r.personnel_type_code,
+            personnelTypeName: r.personnel_type_name,
+            effectiveFrom,
+            isRuleActive,
+            assignedBy: r.default_assigned_by || null,
+            assignedReason: r.default_assigned_reason || null,
+            updatedAt: r.default_updated_at ? String(r.default_updated_at) : null,
+          });
+          defaultTypesByShiftId.set(shiftId, list);
+        }
+        return {
+          personnelTypeCode: r.personnel_type_code,
+          personnelTypeName: r.personnel_type_name,
+          isRuleActive,
+          effectiveFrom,
+          defaultShiftId: shiftId,
+          defaultShiftCode: r.default_shift_code || null,
+          defaultShiftName: r.default_shift_name || null,
+          defaultStartTime: r.default_shift_start_time || (r.default_start_time || null),
+          defaultEndTime: r.default_shift_end_time || (r.default_end_time || null),
+          defaultGraceMinutes:
+            r.default_shift_grace_minutes !== undefined && r.default_shift_grace_minutes !== null
+              ? Number(r.default_shift_grace_minutes)
+              : Number(r.default_grace_minutes ?? 15),
+          defaultCutoffTime: r.default_shift_cutoff_time || (r.default_cutoff_time || null),
+          defaultIsCrossMidnight: Number(r.default_shift_is_cross_midnight ?? 0),
+          assignedBy: r.default_assigned_by || null,
+          assignedReason: r.default_assigned_reason || null,
+          updatedAt: r.default_updated_at ? String(r.default_updated_at) : null,
+        };
+      });
+
+      const items = rawShifts.map((s) => {
+        const defaultPersonnelTypes = defaultTypesByShiftId.get(Number(s.id)) || [];
+        return {
+          ...s,
+          is_default: defaultPersonnelTypes.length > 0 ? 1 : 0,
+          default_personnel_types: defaultPersonnelTypes,
+        };
+      });
+
       res.json({
         items,
         personnelTypeRules: rules.map((r) => ({
           ...r,
           effective_from: normalizeWorkDateString(r.effective_from || '2026-01-01'),
+          has_default_shift_template: r.default_shift_id != null,
         })),
+        defaultBindings,
       });
     } catch (err) {
       next(err);
@@ -2134,27 +2420,190 @@ shiftsRouter.post(
           : endTime <= startTime
             ? 1
             : 0;
+      const isDefault = Boolean(req.body?.isDefault);
+      const defaultPersonnelTypeCodes = isDefault
+        ? parseRequestedDefaultPersonnelTypeCodes(req.body)
+        : [];
+      const defaultReason = String(
+        req.body?.defaultReason || 'กำหนดเป็นกะเริ่มต้นขณะสร้างแม่แบบกะทำงาน'
+      ).trim();
 
       if (
         !shiftCode ||
         !shiftName ||
         !/^\d{2}:\d{2}$/.test(startTime) ||
         !/^\d{2}:\d{2}$/.test(endTime) ||
-        !/^\d{2}:\d{2}$/.test(cutoffTime)
+        !/^\d{2}:\d{2}$/.test(cutoffTime) ||
+        Number.isNaN(graceMinutes) ||
+        graceMinutes < 0 ||
+        graceMinutes > 180
       ) {
         res.status(400).json({
           error: 'VALIDATION_ERROR',
-          message: 'กรุณาระบุรหัสกะ ชื่อกะ เวลาเริ่ม-สิ้นสุด และเวลาตัดรอบสแกนในรูปแบบ HH:mm',
+          message: 'กรุณาระบุรหัสกะ ชื่อกะ เวลาเริ่ม-สิ้นสุด เวลาผ่อนผัน และเวลาตัดรอบสแกนในรูปแบบ HH:mm',
           requestId: req.requestId,
         });
         return;
       }
 
-      const existing = await dbQuery<{ id: number }>(
-        'SELECT id FROM shifts WHERE shift_code = ? LIMIT 1',
-        [shiftCode]
+      if (isDefault && defaultPersonnelTypeCodes.length === 0) {
+        res.status(400).json({
+          error: 'DEFAULT_SCOPE_REQUIRED',
+          message: 'กรุณาระบุขอบเขตประเภทบุคลากรอย่างน้อย 1 ประเภท เมื่อเลือกกำหนดเป็นกะเริ่มต้น',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      type CreateShiftTxOutcome =
+        | { status: 'DUPLICATE_SHIFT_CODE' }
+        | { status: 'PERSONNEL_TYPE_NOT_FOUND'; missingCode: string }
+        | {
+            status: 'DEFAULT_ALREADY_EXISTS';
+            conflicts: Array<{
+              personnelTypeCode: string;
+              personnelTypeName: string;
+              currentDefaultShiftId: number;
+              currentDefaultShiftCode: string;
+              currentDefaultShiftName: string;
+              currentStartTime: string;
+              currentEndTime: string;
+            }>;
+          }
+        | { status: 'CREATED'; shiftId: number };
+
+      const txOutcome: CreateShiftTxOutcome = await withDefaultShiftScopeLocks(
+        defaultPersonnelTypeCodes,
+        () =>
+          dbTransaction(async (tx: DbTransactionContext): Promise<CreateShiftTxOutcome> => {
+            const existing = await tx.query<{ id: number }>(
+              'SELECT id FROM shifts WHERE shift_code = ? LIMIT 1',
+              [shiftCode]
+            );
+            if (existing.length > 0) {
+              return { status: 'DUPLICATE_SHIFT_CODE' };
+            }
+
+            const conflicts: Array<{
+              personnelTypeCode: string;
+              personnelTypeName: string;
+              currentDefaultShiftId: number;
+              currentDefaultShiftCode: string;
+              currentDefaultShiftName: string;
+              currentStartTime: string;
+              currentEndTime: string;
+            }> = [];
+
+            const targetRuleRows = new Map<string, PersonnelTypeRuleRow>();
+            if (isDefault) {
+              const lockClause = loadConfig().dbEngine === 'mysql' ? ' FOR UPDATE' : '';
+              for (const scopeCode of defaultPersonnelTypeCodes) {
+                const ruleRows = await tx.query<PersonnelTypeRuleRow>(
+                  `SELECT * FROM personnel_type_rules WHERE personnel_type_code = ? LIMIT 1${lockClause}`,
+                  [scopeCode]
+                );
+                if (ruleRows.length === 0) {
+                  return { status: 'PERSONNEL_TYPE_NOT_FOUND', missingCode: scopeCode };
+                }
+                targetRuleRows.set(scopeCode, ruleRows[0]);
+
+                const existingDefault = await tx.query<{
+                  shift_id: number;
+                  shift_code: string;
+                  shift_name: string;
+                  start_time: string;
+                  end_time: string;
+                }>(
+                  `SELECT ds.shift_id, s.shift_code, s.shift_name, s.start_time, s.end_time
+                   FROM personnel_type_default_shifts ds
+                   INNER JOIN shifts s ON s.id = ds.shift_id
+                   WHERE ds.personnel_type_code = ?
+                   LIMIT 1${lockClause}`,
+                  [scopeCode]
+                );
+                if (existingDefault.length > 0) {
+                  conflicts.push({
+                    personnelTypeCode: scopeCode,
+                    personnelTypeName: ruleRows[0].personnel_type_name,
+                    currentDefaultShiftId: Number(existingDefault[0].shift_id),
+                    currentDefaultShiftCode: existingDefault[0].shift_code,
+                    currentDefaultShiftName: existingDefault[0].shift_name,
+                    currentStartTime: existingDefault[0].start_time,
+                    currentEndTime: existingDefault[0].end_time,
+                  });
+                }
+              }
+
+              if (conflicts.length > 0) {
+                return { status: 'DEFAULT_ALREADY_EXISTS', conflicts };
+              }
+            }
+
+            const result = await tx.execute(
+              `INSERT INTO shifts (
+                shift_code, shift_name, shift_category, start_time, end_time,
+                grace_minutes, cutoff_time, is_cross_midnight, is_active
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+              [
+                shiftCode,
+                shiftName,
+                shiftCategory,
+                startTime,
+                endTime,
+                graceMinutes,
+                cutoffTime,
+                isCrossMidnight,
+              ]
+            );
+            const newShiftId = Number(result.insertId);
+
+            if (isDefault) {
+              for (const scopeCode of defaultPersonnelTypeCodes) {
+                const rule = targetRuleRows.get(scopeCode)!;
+                await tx.execute(
+                  `INSERT INTO personnel_type_default_shifts (
+                    personnel_type_code, shift_id, assigned_by, assigned_reason
+                  ) VALUES (?, ?, ?, ?)`,
+                  [scopeCode, newShiftId, req.user!.username, defaultReason]
+                );
+                await tx.execute(
+                  `UPDATE personnel_type_rules
+                   SET default_shift_id = ?,
+                       default_start_time = ?,
+                       default_end_time = ?,
+                       default_grace_minutes = ?,
+                       default_cutoff_time = ?,
+                       is_active = 1,
+                       updated_at = CURRENT_TIMESTAMP
+                   WHERE personnel_type_code = ?`,
+                  [newShiftId, startTime, endTime, graceMinutes, cutoffTime, scopeCode]
+                );
+                await tx.execute(
+                  `INSERT INTO personnel_type_rule_history (
+                    rule_id, personnel_type_code, personnel_type_name, default_start_time, default_end_time,
+                    default_grace_minutes, default_cutoff_time, effective_from, is_active, action_type, changed_by, default_shift_id
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'DEFAULT_SHIFT_ASSIGNED', ?, ?)`,
+                  [
+                    rule.id,
+                    scopeCode,
+                    rule.personnel_type_name,
+                    startTime,
+                    endTime,
+                    graceMinutes,
+                    cutoffTime,
+                    normalizeWorkDateString(rule.effective_from || '2026-01-01'),
+                    req.user!.username,
+                    newShiftId,
+                  ]
+                );
+              }
+            }
+
+            return { status: 'CREATED', shiftId: newShiftId };
+          })
       );
-      if (existing.length > 0) {
+
+      if (txOutcome.status === 'DUPLICATE_SHIFT_CODE') {
         res.status(409).json({
           error: 'DUPLICATE_SHIFT_CODE',
           message: `รหัสกะ ${shiftCode} มีอยู่ในระบบแล้ว`,
@@ -2163,31 +2612,34 @@ shiftsRouter.post(
         return;
       }
 
-      const result = await dbExecute(
-        `INSERT INTO shifts (
-          shift_code, shift_name, shift_category, start_time, end_time,
-          grace_minutes, cutoff_time, is_cross_midnight, is_active
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)`,
-        [
-          shiftCode,
-          shiftName,
-          shiftCategory,
-          startTime,
-          endTime,
-          graceMinutes,
-          cutoffTime,
-          isCrossMidnight,
-        ]
-      );
+      if (txOutcome.status === 'PERSONNEL_TYPE_NOT_FOUND') {
+        res.status(404).json({
+          error: 'PERSONNEL_TYPE_NOT_FOUND',
+          message: `ไม่พบประเภทบุคลากรรหัส ${txOutcome.missingCode} ในระบบ`,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (txOutcome.status === 'DEFAULT_ALREADY_EXISTS') {
+        const first = txOutcome.conflicts[0];
+        res.status(409).json({
+          error: 'DEFAULT_SHIFT_ALREADY_EXISTS',
+          message: `ประเภทบุคลากร "${first.personnelTypeName}" มีกะเริ่มต้นใช้งานอยู่แล้วคือ "${first.currentDefaultShiftName}" (${first.currentDefaultShiftCode}) ไม่สามารถกำหนดซ้ำได้ หากต้องการเปลี่ยนกรุณาใช้คำสั่งเปลี่ยนกะเริ่มต้น`,
+          conflicts: txOutcome.conflicts,
+          requestId: req.requestId,
+        });
+        return;
+      }
 
       await writeAuditLog({
         requestId: req.requestId,
         actorUsername: req.user!.username,
         actorRole: req.user!.role,
         ipAddress: req.ip || '127.0.0.1',
-        action: 'SHIFT_CREATED',
+        action: isDefault ? 'SHIFT_CREATED_AS_DEFAULT' : 'SHIFT_CREATED',
         targetType: 'SHIFT',
-        targetId: String(result.insertId),
+        targetId: String(txOutcome.shiftId),
         result: 'SUCCESS',
         detail: {
           shiftCode,
@@ -2197,11 +2649,13 @@ shiftsRouter.post(
           graceMinutes,
           cutoffTime,
           isCrossMidnight,
+          isDefault,
+          defaultPersonnelTypeCodes,
         },
       });
 
       res.status(201).json({
-        id: result.insertId,
+        id: txOutcome.shiftId,
         shiftCode,
         shiftName,
         shiftCategory,
@@ -2210,8 +2664,19 @@ shiftsRouter.post(
         graceMinutes,
         cutoffTime,
         isCrossMidnight,
+        isDefault,
+        defaultPersonnelTypeCodes,
       });
     } catch (err) {
+      if (isUniqueConstraintError(err)) {
+        res.status(409).json({
+          error: 'DEFAULT_SHIFT_ALREADY_EXISTS',
+          message:
+            'ตรวจพบการกำหนดกะเริ่มต้นซ้ำในขอบเขตประเภทบุคลากรเดียวกัน (ป้องกันโดยข้อจำกัดฐานข้อมูล) กรุณารีเฟรชและใช้คำสั่งเปลี่ยนกะเริ่มต้นแทน',
+          requestId: req.requestId,
+        });
+        return;
+      }
       next(err);
     }
   }
@@ -2224,6 +2689,15 @@ shiftsRouter.put(
   async (req, res, next) => {
     try {
       const shiftId = Number(req.params.id);
+      if (!Number.isInteger(shiftId) || shiftId <= 0) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'รหัสอ้างอิงแม่แบบกะทำงานไม่ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
       const rows = await dbQuery<ShiftRow>('SELECT * FROM shifts WHERE id = ? LIMIT 1', [shiftId]);
       if (rows.length === 0) {
         res.status(404).json({
@@ -2259,11 +2733,22 @@ shiftsRouter.put(
             ? 1
             : 0;
 
+      const wantsAssignDefault = Boolean(req.body?.isDefault);
+      const requestedDefaultScopes = wantsAssignDefault
+        ? parseRequestedDefaultPersonnelTypeCodes(req.body)
+        : [];
+      const defaultReason = String(
+        req.body?.defaultReason || 'กำหนดเป็นกะเริ่มต้นระหว่างแก้ไขแม่แบบกะทำงาน'
+      ).trim();
+
       if (
         !shiftName ||
         !/^\d{2}:\d{2}$/.test(startTime) ||
         !/^\d{2}:\d{2}$/.test(endTime) ||
-        !/^\d{2}:\d{2}$/.test(cutoffTime)
+        !/^\d{2}:\d{2}$/.test(cutoffTime) ||
+        Number.isNaN(graceMinutes) ||
+        graceMinutes < 0 ||
+        graceMinutes > 180
       ) {
         res.status(400).json({
           error: 'VALIDATION_ERROR',
@@ -2273,31 +2758,241 @@ shiftsRouter.put(
         return;
       }
 
-      await dbExecute(
-        `UPDATE shifts
-         SET shift_name = ?, shift_category = ?, start_time = ?, end_time = ?,
-             grace_minutes = ?, cutoff_time = ?, is_cross_midnight = ?, is_active = ?,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`,
-        [
-          shiftName,
-          shiftCategory,
-          startTime,
-          endTime,
-          graceMinutes,
-          cutoffTime,
-          isCrossMidnight,
-          isActive,
-          shiftId,
-        ]
+      if (wantsAssignDefault && requestedDefaultScopes.length === 0) {
+        res.status(400).json({
+          error: 'DEFAULT_SCOPE_REQUIRED',
+          message: 'กรุณาระบุขอบเขตประเภทบุคลากรอย่างน้อย 1 ประเภท เมื่อเลือกกำหนดเป็นกะเริ่มต้น',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (wantsAssignDefault && isActive === 0) {
+        res.status(400).json({
+          error: 'SHIFT_INACTIVE',
+          message: 'ไม่สามารถกำหนดแม่แบบกะที่ปิดใช้งานให้เป็นกะเริ่มต้นได้',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      type UpdateShiftTxOutcome =
+        | { status: 'PERSONNEL_TYPE_NOT_FOUND'; missingCode: string }
+        | { status: 'DEFAULT_SHIFT_IN_USE'; boundTypes: string[] }
+        | {
+            status: 'DEFAULT_ALREADY_EXISTS';
+            conflicts: Array<{
+              personnelTypeCode: string;
+              personnelTypeName: string;
+              currentDefaultShiftId: number;
+              currentDefaultShiftCode: string;
+              currentDefaultShiftName: string;
+              currentStartTime: string;
+              currentEndTime: string;
+            }>;
+          }
+        | { status: 'UPDATED'; assignedScopes: string[]; syncedScopes: string[] };
+
+      const txOutcome: UpdateShiftTxOutcome = await withDefaultShiftScopeLocks(
+        requestedDefaultScopes,
+        () =>
+          dbTransaction(async (tx: DbTransactionContext): Promise<UpdateShiftTxOutcome> => {
+            const lockClause = loadConfig().dbEngine === 'mysql' ? ' FOR UPDATE' : '';
+
+            // ตรวจว่าแม่แบบกะนี้เป็นกะเริ่มต้นของประเภทบุคลากรใดอยู่บ้าง
+            const currentlyBoundRows = await tx.query<{
+              personnel_type_code: string;
+              personnel_type_name: string;
+            }>(
+              `SELECT ds.personnel_type_code, COALESCE(r.personnel_type_name, ds.personnel_type_code) AS personnel_type_name
+               FROM personnel_type_default_shifts ds
+               LEFT JOIN personnel_type_rules r ON r.personnel_type_code = ds.personnel_type_code
+               WHERE ds.shift_id = ?${lockClause}`,
+              [shiftId]
+            );
+
+            if (isActive === 0 && currentlyBoundRows.length > 0) {
+              return {
+                status: 'DEFAULT_SHIFT_IN_USE',
+                boundTypes: currentlyBoundRows.map((x) => x.personnel_type_name),
+              };
+            }
+
+            const newScopesToBind: Array<{ scopeCode: string; rule: PersonnelTypeRuleRow }> = [];
+            if (wantsAssignDefault) {
+              const conflicts: Array<{
+                personnelTypeCode: string;
+                personnelTypeName: string;
+                currentDefaultShiftId: number;
+                currentDefaultShiftCode: string;
+                currentDefaultShiftName: string;
+                currentStartTime: string;
+                currentEndTime: string;
+              }> = [];
+
+              for (const scopeCode of requestedDefaultScopes) {
+                const ruleRows = await tx.query<PersonnelTypeRuleRow>(
+                  `SELECT * FROM personnel_type_rules WHERE personnel_type_code = ? LIMIT 1${lockClause}`,
+                  [scopeCode]
+                );
+                if (ruleRows.length === 0) {
+                  return { status: 'PERSONNEL_TYPE_NOT_FOUND', missingCode: scopeCode };
+                }
+
+                const existingDefault = await tx.query<{
+                  shift_id: number;
+                  shift_code: string;
+                  shift_name: string;
+                  start_time: string;
+                  end_time: string;
+                }>(
+                  `SELECT ds.shift_id, s.shift_code, s.shift_name, s.start_time, s.end_time
+                   FROM personnel_type_default_shifts ds
+                   INNER JOIN shifts s ON s.id = ds.shift_id
+                   WHERE ds.personnel_type_code = ?
+                   LIMIT 1${lockClause}`,
+                  [scopeCode]
+                );
+
+                if (existingDefault.length > 0) {
+                  if (Number(existingDefault[0].shift_id) !== shiftId) {
+                    conflicts.push({
+                      personnelTypeCode: scopeCode,
+                      personnelTypeName: ruleRows[0].personnel_type_name,
+                      currentDefaultShiftId: Number(existingDefault[0].shift_id),
+                      currentDefaultShiftCode: existingDefault[0].shift_code,
+                      currentDefaultShiftName: existingDefault[0].shift_name,
+                      currentStartTime: existingDefault[0].start_time,
+                      currentEndTime: existingDefault[0].end_time,
+                    });
+                  }
+                } else {
+                  newScopesToBind.push({ scopeCode, rule: ruleRows[0] });
+                }
+              }
+
+              if (conflicts.length > 0) {
+                return { status: 'DEFAULT_ALREADY_EXISTS', conflicts };
+              }
+            }
+
+            await tx.execute(
+              `UPDATE shifts
+               SET shift_name = ?, shift_category = ?, start_time = ?, end_time = ?,
+                   grace_minutes = ?, cutoff_time = ?, is_cross_midnight = ?, is_active = ?,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = ?`,
+              [
+                shiftName,
+                shiftCategory,
+                startTime,
+                endTime,
+                graceMinutes,
+                cutoffTime,
+                isCrossMidnight,
+                isActive,
+                shiftId,
+              ]
+            );
+
+            // ผูกประเภทบุคลากรใหม่ที่ยังไม่มีกะเริ่มต้น
+            const assignedScopes: string[] = [];
+            for (const { scopeCode, rule } of newScopesToBind) {
+              await tx.execute(
+                `INSERT INTO personnel_type_default_shifts (
+                  personnel_type_code, shift_id, assigned_by, assigned_reason
+                ) VALUES (?, ?, ?, ?)`,
+                [scopeCode, shiftId, req.user!.username, defaultReason]
+              );
+              await tx.execute(
+                `UPDATE personnel_type_rules
+                 SET default_shift_id = ?,
+                     default_start_time = ?,
+                     default_end_time = ?,
+                     default_grace_minutes = ?,
+                     default_cutoff_time = ?,
+                     is_active = 1,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE personnel_type_code = ?`,
+                [shiftId, startTime, endTime, graceMinutes, cutoffTime, scopeCode]
+              );
+              await tx.execute(
+                `INSERT INTO personnel_type_rule_history (
+                  rule_id, personnel_type_code, personnel_type_name, default_start_time, default_end_time,
+                  default_grace_minutes, default_cutoff_time, effective_from, is_active, action_type, changed_by, default_shift_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, 'DEFAULT_SHIFT_ASSIGNED', ?, ?)`,
+                [
+                  rule.id,
+                  scopeCode,
+                  rule.personnel_type_name,
+                  startTime,
+                  endTime,
+                  graceMinutes,
+                  cutoffTime,
+                  normalizeWorkDateString(rule.effective_from || '2026-01-01'),
+                  req.user!.username,
+                  shiftId,
+                ]
+              );
+              assignedScopes.push(scopeCode);
+            }
+
+            // ซิงก์เวลาล่าสุดเข้าสู่ personnel_type_rules ของประเภทที่ใช้กะนี้เป็น Default อยู่เดิม (ไม่แก้ตารางเวรย้อนหลัง)
+            const syncedScopes: string[] = [];
+            for (const bound of currentlyBoundRows) {
+              await tx.execute(
+                `UPDATE personnel_type_rules
+                 SET default_start_time = ?,
+                     default_end_time = ?,
+                     default_grace_minutes = ?,
+                     default_cutoff_time = ?,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE personnel_type_code = ?`,
+                [startTime, endTime, graceMinutes, cutoffTime, bound.personnel_type_code]
+              );
+              syncedScopes.push(bound.personnel_type_code);
+            }
+
+            return { status: 'UPDATED', assignedScopes, syncedScopes };
+          })
       );
+
+      if (txOutcome.status === 'DEFAULT_SHIFT_IN_USE') {
+        res.status(409).json({
+          error: 'DEFAULT_SHIFT_IN_USE',
+          message: `ไม่สามารถปิดใช้งานแม่แบบกะนี้ได้ เนื่องจากกำลังใช้งานเป็นกะเริ่มต้นของ: ${txOutcome.boundTypes.join(', ')} กรุณาเปลี่ยนกะเริ่มต้นก่อน`,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (txOutcome.status === 'PERSONNEL_TYPE_NOT_FOUND') {
+        res.status(404).json({
+          error: 'PERSONNEL_TYPE_NOT_FOUND',
+          message: `ไม่พบประเภทบุคลากรรหัส ${txOutcome.missingCode} ในระบบ`,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (txOutcome.status === 'DEFAULT_ALREADY_EXISTS') {
+        const first = txOutcome.conflicts[0];
+        res.status(409).json({
+          error: 'DEFAULT_SHIFT_ALREADY_EXISTS',
+          message: `ประเภทบุคลากร "${first.personnelTypeName}" มีกะเริ่มต้นใช้งานอยู่แล้วคือ "${first.currentDefaultShiftName}" (${first.currentDefaultShiftCode}) ไม่สามารถกำหนดซ้ำได้ หากต้องการเปลี่ยนกรุณาใช้คำสั่งเปลี่ยนกะเริ่มต้น`,
+          conflicts: txOutcome.conflicts,
+          requestId: req.requestId,
+        });
+        return;
+      }
 
       await writeAuditLog({
         requestId: req.requestId,
         actorUsername: req.user!.username,
         actorRole: req.user!.role,
         ipAddress: req.ip || '127.0.0.1',
-        action: 'SHIFT_UPDATED',
+        action:
+          txOutcome.assignedScopes.length > 0 ? 'SHIFT_UPDATED_AND_SET_DEFAULT' : 'SHIFT_UPDATED',
         targetType: 'SHIFT',
         targetId: String(shiftId),
         result: 'SUCCESS',
@@ -2310,6 +3005,8 @@ shiftsRouter.put(
           cutoffTime,
           isCrossMidnight,
           isActive,
+          assignedDefaultScopes: txOutcome.assignedScopes,
+          syncedDefaultScopes: txOutcome.syncedScopes,
         },
       });
 
@@ -2325,6 +3022,390 @@ shiftsRouter.put(
         cutoffTime,
         isCrossMidnight,
         isActive,
+        assignedDefaultScopes: txOutcome.assignedScopes,
+      });
+    } catch (err) {
+      if (isUniqueConstraintError(err)) {
+        res.status(409).json({
+          error: 'DEFAULT_SHIFT_ALREADY_EXISTS',
+          message:
+            'ตรวจพบการกำหนดกะเริ่มต้นซ้ำในขอบเขตประเภทบุคลากรเดียวกัน (ป้องกันโดยข้อจำกัดฐานข้อมูล) กรุณารีเฟรชและใช้คำสั่งเปลี่ยนกะเริ่มต้นแทน',
+          requestId: req.requestId,
+        });
+        return;
+      }
+      next(err);
+    }
+  }
+);
+
+/**
+ * 2.1 คำสั่งเปลี่ยนหรือกำหนดกะเริ่มต้นอย่างชัดเจน (Explicit Change Default Shift)
+ * - ตรวจสิทธิ์เฉพาะ ADMIN / RESPONSIBLE_STAFF
+ * - ทำงานภายใต้ Database Transaction + Scope Lock
+ * - บันทึกประวัติใน personnel_type_rule_history และ audit_logs
+ * - ห้ามลบหรือแก้ไขตารางเวรย้อนหลัง (shift_assignments) หรือ Raw Scans โดยเด็ดขาด
+ */
+shiftsRouter.post(
+  '/shifts/:id/set-default',
+  requireAuth,
+  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
+  async (req, res, next) => {
+    try {
+      const shiftId = Number(req.params.id);
+      if (!Number.isInteger(shiftId) || shiftId <= 0) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'รหัสแม่แบบกะทำงานไม่ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const scopeCodes = parseRequestedDefaultPersonnelTypeCodes({
+        defaultPersonnelTypeCode: req.body?.personnelTypeCode || req.body?.defaultPersonnelTypeCode,
+        defaultPersonnelTypeCodes:
+          req.body?.personnelTypeCodes || req.body?.defaultPersonnelTypeCodes,
+      });
+      if (scopeCodes.length === 0) {
+        res.status(400).json({
+          error: 'DEFAULT_SCOPE_REQUIRED',
+          message: 'กรุณาระบุประเภทบุคลากรที่ต้องการเปลี่ยนกะเริ่มต้น',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const reason = String(
+        req.body?.reason || 'เปลี่ยนกะเริ่มต้นตามประเภทบุคลากรโดยผู้มีสิทธิ์'
+      ).trim();
+      const requestedEffectiveFrom = req.body?.effectiveFrom
+        ? normalizeWorkDateString(req.body.effectiveFrom)
+        : null;
+      if (requestedEffectiveFrom && !/^\d{4}-\d{2}-\d{2}$/.test(requestedEffectiveFrom)) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'รูปแบบวันที่มีผลบังคับใช้ต้องเป็น YYYY-MM-DD',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const shiftRows = await dbQuery<ShiftRow>('SELECT * FROM shifts WHERE id = ? LIMIT 1', [
+        shiftId,
+      ]);
+      if (shiftRows.length === 0) {
+        res.status(404).json({
+          error: 'SHIFT_NOT_FOUND',
+          message: 'ไม่พบแม่แบบกะทำงานที่เลือก',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const targetShift = shiftRows[0];
+      if (Number(targetShift.is_active) !== 1) {
+        res.status(400).json({
+          error: 'SHIFT_INACTIVE',
+          message: `แม่แบบกะ "${targetShift.shift_name}" ถูกปิดใช้งานอยู่ ไม่สามารถกำหนดเป็นกะเริ่มต้นได้`,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      type ChangeDefaultTxResult =
+        | { status: 'PERSONNEL_TYPE_NOT_FOUND'; missingCode: string }
+        | {
+            status: 'CHANGED';
+            changes: Array<{
+              personnelTypeCode: string;
+              personnelTypeName: string;
+              previousDefaultShiftId: number | null;
+              previousDefaultShiftCode: string | null;
+              previousDefaultShiftName: string | null;
+              newDefaultShiftId: number;
+              newDefaultShiftCode: string;
+              newDefaultShiftName: string;
+              effectiveFrom: string;
+            }>;
+          };
+
+      const txOutcome: ChangeDefaultTxResult = await withDefaultShiftScopeLocks(scopeCodes, () =>
+        dbTransaction(async (tx: DbTransactionContext): Promise<ChangeDefaultTxResult> => {
+          const lockClause = loadConfig().dbEngine === 'mysql' ? ' FOR UPDATE' : '';
+          const changes: Array<{
+            personnelTypeCode: string;
+            personnelTypeName: string;
+            previousDefaultShiftId: number | null;
+            previousDefaultShiftCode: string | null;
+            previousDefaultShiftName: string | null;
+            newDefaultShiftId: number;
+            newDefaultShiftCode: string;
+            newDefaultShiftName: string;
+            effectiveFrom: string;
+          }> = [];
+
+          for (const scopeCode of scopeCodes) {
+            const ruleRows = await tx.query<PersonnelTypeRuleRow>(
+              `SELECT * FROM personnel_type_rules WHERE personnel_type_code = ? LIMIT 1${lockClause}`,
+              [scopeCode]
+            );
+            if (ruleRows.length === 0) {
+              return { status: 'PERSONNEL_TYPE_NOT_FOUND', missingCode: scopeCode };
+            }
+            const rule = ruleRows[0];
+
+            const prevRows = await tx.query<{
+              id: number;
+              shift_id: number;
+              shift_code: string | null;
+              shift_name: string | null;
+            }>(
+              `SELECT ds.id, ds.shift_id, s.shift_code, s.shift_name
+               FROM personnel_type_default_shifts ds
+               LEFT JOIN shifts s ON s.id = ds.shift_id
+               WHERE ds.personnel_type_code = ?
+               LIMIT 1${lockClause}`,
+              [scopeCode]
+            );
+
+            const prev = prevRows[0] || null;
+            if (prev) {
+              await tx.execute(
+                `UPDATE personnel_type_default_shifts
+                 SET shift_id = ?, assigned_by = ?, assigned_reason = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE personnel_type_code = ?`,
+                [shiftId, req.user!.username, reason, scopeCode]
+              );
+            } else {
+              await tx.execute(
+                `INSERT INTO personnel_type_default_shifts (
+                  personnel_type_code, shift_id, assigned_by, assigned_reason
+                ) VALUES (?, ?, ?, ?)`,
+                [scopeCode, shiftId, req.user!.username, reason]
+              );
+            }
+
+            const nextEffectiveFrom =
+              requestedEffectiveFrom || normalizeWorkDateString(rule.effective_from || '2026-01-01');
+
+            await tx.execute(
+              `UPDATE personnel_type_rules
+               SET default_shift_id = ?,
+                   default_start_time = ?,
+                   default_end_time = ?,
+                   default_grace_minutes = ?,
+                   default_cutoff_time = ?,
+                   effective_from = ?,
+                   is_active = 1,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE personnel_type_code = ?`,
+              [
+                shiftId,
+                targetShift.start_time,
+                targetShift.end_time,
+                Number(targetShift.grace_minutes ?? 15),
+                targetShift.cutoff_time,
+                nextEffectiveFrom,
+                scopeCode,
+              ]
+            );
+
+            await tx.execute(
+              `INSERT INTO personnel_type_rule_history (
+                rule_id, personnel_type_code, personnel_type_name, default_start_time, default_end_time,
+                default_grace_minutes, default_cutoff_time, effective_from, is_active, action_type, changed_by, default_shift_id
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+              [
+                rule.id,
+                scopeCode,
+                rule.personnel_type_name,
+                targetShift.start_time,
+                targetShift.end_time,
+                Number(targetShift.grace_minutes ?? 15),
+                targetShift.cutoff_time,
+                nextEffectiveFrom,
+                prev ? 'DEFAULT_SHIFT_CHANGED' : 'DEFAULT_SHIFT_ASSIGNED',
+                req.user!.username,
+                shiftId,
+              ]
+            );
+
+            changes.push({
+              personnelTypeCode: scopeCode,
+              personnelTypeName: rule.personnel_type_name,
+              previousDefaultShiftId: prev ? Number(prev.shift_id) : null,
+              previousDefaultShiftCode: prev?.shift_code || null,
+              previousDefaultShiftName: prev?.shift_name || null,
+              newDefaultShiftId: shiftId,
+              newDefaultShiftCode: targetShift.shift_code,
+              newDefaultShiftName: targetShift.shift_name,
+              effectiveFrom: nextEffectiveFrom,
+            });
+          }
+
+          return { status: 'CHANGED', changes };
+        })
+      );
+
+      if (txOutcome.status === 'PERSONNEL_TYPE_NOT_FOUND') {
+        res.status(404).json({
+          error: 'PERSONNEL_TYPE_NOT_FOUND',
+          message: `ไม่พบประเภทบุคลากรรหัส ${txOutcome.missingCode} ในระบบ`,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const hadAnyPrevious = txOutcome.changes.some((c) => c.previousDefaultShiftId !== null);
+      await writeAuditLog({
+        requestId: req.requestId,
+        actorUsername: req.user!.username,
+        actorRole: req.user!.role,
+        ipAddress: req.ip || '127.0.0.1',
+        action: hadAnyPrevious ? 'DEFAULT_SHIFT_CHANGED' : 'DEFAULT_SHIFT_ASSIGNED',
+        targetType: 'SHIFT',
+        targetId: String(shiftId),
+        result: 'SUCCESS',
+        detail: {
+          reason,
+          changes: txOutcome.changes,
+          historicalAssignmentsPreserved: true,
+        },
+      });
+
+      res.json({
+        status: 'UPDATED',
+        message: `อัปเดตกะเริ่มต้นเป็น "${targetShift.shift_name}" เรียบร้อยแล้ว โดยไม่กระทบตารางเวรย้อนหลัง`,
+        changes: txOutcome.changes,
+        requestId: req.requestId,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * 2.2 ยกเลิกการกำหนดกะเริ่มต้นสำหรับประเภทบุคลากร (Clear Default Shift)
+ * - ตรวจสิทธิ์เฉพาะ ADMIN / RESPONSIBLE_STAFF
+ * - ล้างผูกกะเริ่มต้นออกเพื่อให้สามารถกำหนดใหม่ หรือแสดงสถานะ "ไม่พบกะที่กำหนด" เมื่อไม่มีตารางเวรเฉพาะวัน
+ * - ห้ามลบหรือแก้ไขตารางเวรย้อนหลัง (shift_assignments) หรือ Raw Scans
+ */
+shiftsRouter.delete(
+  '/shifts/default/:personnelTypeCode',
+  requireAuth,
+  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
+  async (req, res, next) => {
+    try {
+      const scopeCode = String(req.params.personnelTypeCode || '').trim().toUpperCase();
+      const reason = String(
+        req.body?.reason || 'ยกเลิกกะเริ่มต้นของประเภทบุคลากรโดยผู้มีสิทธิ์'
+      ).trim();
+
+      if (!scopeCode) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'กรุณาระบุรหัสประเภทบุคลากร',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const txOutcome = await withDefaultShiftScopeLocks([scopeCode], () =>
+        dbTransaction(async (tx: DbTransactionContext) => {
+          const ruleRows = await tx.query<PersonnelTypeRuleRow>(
+            'SELECT * FROM personnel_type_rules WHERE personnel_type_code = ? LIMIT 1',
+            [scopeCode]
+          );
+          if (ruleRows.length === 0) {
+            return { found: false as const };
+          }
+          const rule = ruleRows[0];
+          const prevRows = await tx.query<{
+            shift_id: number;
+            shift_code: string | null;
+            shift_name: string | null;
+          }>(
+            `SELECT ds.shift_id, s.shift_code, s.shift_name
+             FROM personnel_type_default_shifts ds
+             LEFT JOIN shifts s ON s.id = ds.shift_id
+             WHERE ds.personnel_type_code = ?
+             LIMIT 1`,
+            [scopeCode]
+          );
+
+          await tx.execute(
+            'DELETE FROM personnel_type_default_shifts WHERE personnel_type_code = ?',
+            [scopeCode]
+          );
+          await tx.execute(
+            `UPDATE personnel_type_rules
+             SET default_shift_id = NULL,
+                 default_start_time = '',
+                 default_end_time = '',
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE personnel_type_code = ?`,
+            [scopeCode]
+          );
+          await tx.execute(
+            `INSERT INTO personnel_type_rule_history (
+              rule_id, personnel_type_code, personnel_type_name, default_start_time, default_end_time,
+              default_grace_minutes, default_cutoff_time, effective_from, is_active, action_type, changed_by, default_shift_id
+            ) VALUES (?, ?, ?, '', '', ?, ?, ?, ?, 'DEFAULT_SHIFT_CLEARED', ?, NULL)`,
+            [
+              rule.id,
+              scopeCode,
+              rule.personnel_type_name,
+              Number(rule.default_grace_minutes ?? 15),
+              rule.default_cutoff_time || '11:00',
+              normalizeWorkDateString(rule.effective_from || '2026-01-01'),
+              Number(rule.is_active ?? 1),
+              req.user!.username,
+            ]
+          );
+
+          return {
+            found: true as const,
+            personnelTypeName: rule.personnel_type_name,
+            previous: prevRows[0] || null,
+          };
+        })
+      );
+
+      if (!txOutcome.found) {
+        res.status(404).json({
+          error: 'PERSONNEL_TYPE_NOT_FOUND',
+          message: `ไม่พบประเภทบุคลากรรหัส ${scopeCode} ในระบบ`,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      await writeAuditLog({
+        requestId: req.requestId,
+        actorUsername: req.user!.username,
+        actorRole: req.user!.role,
+        ipAddress: req.ip || '127.0.0.1',
+        action: 'DEFAULT_SHIFT_CLEARED',
+        targetType: 'PERSONNEL_TYPE_RULE',
+        targetId: scopeCode,
+        result: 'SUCCESS',
+        detail: {
+          personnelTypeCode: scopeCode,
+          personnelTypeName: txOutcome.personnelTypeName,
+          previousDefaultShift: txOutcome.previous,
+          reason,
+          historicalAssignmentsPreserved: true,
+        },
+      });
+
+      res.json({
+        status: 'CLEARED',
+        personnelTypeCode: scopeCode,
+        personnelTypeName: txOutcome.personnelTypeName,
+        message: `ยกเลิกกะเริ่มต้นของ "${txOutcome.personnelTypeName}" เรียบร้อยแล้ว โดยไม่กระทบตารางเวรย้อนหลัง`,
+        requestId: req.requestId,
       });
     } catch (err) {
       next(err);
@@ -2401,13 +3482,7 @@ shiftsRouter.get(
         work_date: normalizeWorkDateString(row.work_date),
       }));
 
-      const rawRules = await dbQuery<PersonnelTypeRuleRow>(
-        'SELECT * FROM personnel_type_rules ORDER BY id ASC'
-      );
-      const personnelTypeRules = rawRules.map((r) => ({
-        ...r,
-        effective_from: normalizeWorkDateString(r.effective_from || '2026-01-01'),
-      }));
+      const personnelTypeRules = await loadPersonnelTypeRulesWithDefaultShifts();
 
       const rawCancellationLogs = await dbQuery<Record<string, unknown>>(
         `SELECT scl.*, p.full_name, p.department_name
@@ -2521,7 +3596,7 @@ shiftsRouter.get(
           'SELECT * FROM shift_daily_overrides WHERE person_id = ? AND work_date IN (?, ?)',
           [personId, workDate, nextDate]
         ),
-        dbQuery<PersonnelTypeRuleRow>('SELECT * FROM personnel_type_rules ORDER BY id ASC'),
+        loadPersonnelTypeRulesWithDefaultShifts(),
       ]);
 
       const normalizedNearby = nearbyAssignments.map((a) => ({
@@ -2710,7 +3785,7 @@ shiftsRouter.post(
           'SELECT * FROM shift_daily_overrides WHERE person_id = ? AND work_date IN (?, ?)',
           [personId, workDate, nextDate]
         ),
-        dbQuery<PersonnelTypeRuleRow>('SELECT * FROM personnel_type_rules ORDER BY id ASC'),
+        loadPersonnelTypeRulesWithDefaultShifts(),
       ]);
 
       const validIdSet = new Set(availableTemplates.map((t) => Number(t.id)));
@@ -2897,9 +3972,7 @@ shiftsRouter.post(
             'SELECT * FROM shift_daily_overrides WHERE person_id = ? AND work_date IN (?, ?)',
             [personId, workDate, nextDate]
           );
-          const allRulesInTx = await tx.query<PersonnelTypeRuleRow>(
-            'SELECT * FROM personnel_type_rules ORDER BY id ASC'
-          );
+          const allRulesInTx = await loadPersonnelTypeRulesWithDefaultShifts(tx.query);
 
           const normalizedNearby = nearbyAssignments.map((a) => ({
             ...a,
@@ -3274,7 +4347,7 @@ shiftsRouter.post(
           'SELECT * FROM shift_daily_overrides WHERE person_id = ? AND work_date = ? LIMIT 1',
           [personId, workDate]
         ),
-        dbQuery<PersonnelTypeRuleRow>('SELECT * FROM personnel_type_rules ORDER BY id ASC'),
+        loadPersonnelTypeRulesWithDefaultShifts(),
       ]);
 
       const normalizedNearby = nearbyAssignments.map((a) => ({
@@ -3455,9 +4528,7 @@ shiftsRouter.post(
             'SELECT * FROM shift_daily_overrides WHERE person_id = ? AND work_date = ? LIMIT 1',
             [personId, workDate]
           );
-          const allRulesInTx = await tx.query<PersonnelTypeRuleRow>(
-            'SELECT * FROM personnel_type_rules ORDER BY id ASC'
-          );
+          const allRulesInTx = await loadPersonnelTypeRulesWithDefaultShifts(tx.query);
 
           const normalizedNearby = nearbyAssignments.map((a) => ({
             ...a,
@@ -3806,7 +4877,7 @@ shiftsRouter.post(
           'SELECT * FROM shift_daily_overrides WHERE person_id = ? AND work_date = ? LIMIT 1',
           [personId, workDate]
         ),
-        dbQuery<PersonnelTypeRuleRow>('SELECT * FROM personnel_type_rules ORDER BY id ASC'),
+        loadPersonnelTypeRulesWithDefaultShifts(),
       ]);
 
       const rulesByCode = new Map<string, PersonnelTypeRuleRow>();

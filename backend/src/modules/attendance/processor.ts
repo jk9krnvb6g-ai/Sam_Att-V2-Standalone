@@ -26,6 +26,7 @@ import {
   normalizeWorkDateString,
   resolveEffectiveDailyScheduleForPersonDate,
   computeAbsoluteIntervalMinutes,
+  loadPersonnelTypeRulesWithDefaultShifts,
   type DailyOverrideRow,
   type ExistingAssignmentRow,
   type PersonnelTypeRuleRow,
@@ -499,9 +500,7 @@ export async function computeAttendanceOutcomes(
     });
   }
 
-  const rawRules = await dbQuery<PersonnelTypeRuleRow>(
-    'SELECT * FROM personnel_type_rules ORDER BY id ASC'
-  );
+  const rawRules = await loadPersonnelTypeRulesWithDefaultShifts();
   const rulesByCode = new Map<string, PersonnelTypeRuleRow>();
   for (const r of rawRules) {
     rulesByCode.set(String(r.personnel_type_code || '').trim().toUpperCase(), {

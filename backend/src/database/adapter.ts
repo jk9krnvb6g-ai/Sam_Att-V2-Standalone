@@ -801,12 +801,28 @@ export async function inspectMigrationsDetailedReadOnly(options?: {
   }> = [];
 
   try {
-    appliedRows = await dbQuery<{
-      version: string;
-      filename: string;
-      checksum: string | null;
-      applied_at?: string | null;
-    }>('SELECT version, filename, checksum, applied_at FROM schema_migrations ORDER BY version ASC');
+    let hasMigrationsTable = false;
+    if (engine === 'mysql') {
+      const tbl = await dbQuery<{ cnt: number }>(
+        'SELECT COUNT(*) AS cnt FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?',
+        ['schema_migrations']
+      );
+      hasMigrationsTable = Number(tbl[0]?.cnt || 0) > 0;
+    } else {
+      const tbl = await dbQuery<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+      );
+      hasMigrationsTable = tbl.length > 0;
+    }
+
+    if (hasMigrationsTable) {
+      appliedRows = await dbQuery<{
+        version: string;
+        filename: string;
+        checksum: string | null;
+        applied_at?: string | null;
+      }>('SELECT version, filename, checksum, applied_at FROM schema_migrations ORDER BY version ASC');
+    }
   } catch {
     appliedRows = [];
   }
@@ -1531,6 +1547,53 @@ export async function ensureBaselineSystemCatalog(): Promise<void> {
     if (existingShift.length > 0 && hasThaiMojibake(existingShift[0].shift_name)) {
       await dbExecute('UPDATE shifts SET shift_name = ? WHERE shift_code = ?', [s.name, s.code]);
     }
+  }
+
+  // ผูกกะเริ่มต้น (Default Shift Template) ให้กับประเภทบุคลากรมาตรฐานเฉพาะกรณียังไม่เคยกำหนดไว้
+  // เพื่อไม่ให้เขียนทับการตั้งค่าที่ผู้ดูแลระบบกำหนดเอง และไม่แตะต้องตารางเวรย้อนหลัง
+  try {
+    const baselineDefaultBindings = [
+      { personnelTypeCode: 'CIVIL_SERVANT', shiftCode: 'MOR-0816' },
+      { personnelTypeCode: 'GOV_EMPLOYEE', shiftCode: 'MOR-0816' },
+      { personnelTypeCode: 'PUBLIC_HEALTH_EMP', shiftCode: 'MOR-0816' },
+      { personnelTypeCode: 'TEMP_EMPLOYEE', shiftCode: 'MOR-0816' },
+      { personnelTypeCode: 'PERMANENT_EMP', shiftCode: 'MOR-0730' },
+    ];
+    for (const bind of baselineDefaultBindings) {
+      const ruleRows = await dbQuery<{ id: number; default_shift_id: number | null; is_active: number }>(
+        'SELECT id, default_shift_id, is_active FROM personnel_type_rules WHERE personnel_type_code = ? LIMIT 1',
+        [bind.personnelTypeCode]
+      );
+      if (ruleRows.length === 0 || ruleRows[0].default_shift_id !== null) {
+        continue;
+      }
+      const existingBinding = await dbQuery<{ id: number }>(
+        'SELECT id FROM personnel_type_default_shifts WHERE personnel_type_code = ? LIMIT 1',
+        [bind.personnelTypeCode]
+      );
+      if (existingBinding.length > 0) {
+        continue;
+      }
+      const shiftRows = await dbQuery<{ id: number }>(
+        'SELECT id FROM shifts WHERE shift_code = ? AND is_active = 1 LIMIT 1',
+        [bind.shiftCode]
+      );
+      if (shiftRows.length === 0) {
+        continue;
+      }
+      await dbExecute(
+        `INSERT IGNORE INTO personnel_type_default_shifts (
+          personnel_type_code, shift_id, assigned_by, assigned_reason
+        ) VALUES (?, ?, 'system', 'ค่าเริ่มต้นมาตรฐานตามประเภทบุคลากร รพ.สามชุก')`,
+        [bind.personnelTypeCode, shiftRows[0].id]
+      );
+      await dbExecute(
+        'UPDATE personnel_type_rules SET default_shift_id = ? WHERE personnel_type_code = ? AND default_shift_id IS NULL',
+        [shiftRows[0].id, bind.personnelTypeCode]
+      );
+    }
+  } catch {
+    // ปลอดภัยกรณีฐานข้อมูลยังไม่รัน Migration 004_default_shift_templates.sql ในโหมด Production
   }
 
   const realHospitalScanners = [
