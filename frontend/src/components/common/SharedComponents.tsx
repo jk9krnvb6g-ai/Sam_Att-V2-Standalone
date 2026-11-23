@@ -560,6 +560,12 @@ export interface SharedModalProps {
   maxWidthClass?: string;
   children: React.ReactNode;
   footer?: React.ReactNode;
+  footerHint?: string;
+  hideDefaultCloseButton?: boolean;
+  hideFooter?: boolean;
+  disableEscapeClose?: boolean;
+  closeOnBackdrop?: boolean;
+  overlayClassName?: string;
 }
 
 export function SharedModal({
@@ -571,11 +577,20 @@ export function SharedModal({
   maxWidthClass = 'max-w-4xl',
   children,
   footer,
+  footerHint,
+  hideDefaultCloseButton = false,
+  hideFooter = false,
+  disableEscapeClose = false,
+  closeOnBackdrop = true,
+  overlayClassName = 'bg-black/45 backdrop-blur-[1px]',
 }: SharedModalProps) {
   useEffect(() => {
     if (!open) return;
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape' && !disableEscapeClose) {
+        e.preventDefault();
+        onClose();
+      }
     };
     const prevOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
@@ -584,20 +599,22 @@ export function SharedModal({
       document.body.style.overflow = prevOverflow;
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [open, onClose]);
+  }, [open, onClose, disableEscapeClose]);
 
   if (!open) return null;
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-[#292638]/40 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4"
-      onClick={onClose}
+      className={`fixed inset-0 z-50 ${overlayClassName} flex items-end sm:items-center justify-center p-0 sm:p-4`}
+      onClick={() => {
+        if (closeOnBackdrop) onClose();
+      }}
       role="dialog"
       aria-modal="true"
       aria-labelledby="shared-modal-title"
     >
       <div
-        className={`bg-white border border-[#E8E4EF] w-full ${maxWidthClass} max-h-[92vh] sm:max-h-[90vh] sm:rounded-xl rounded-t-2xl shadow-lg flex flex-col overflow-hidden`}
+        className={`bg-white border border-[#E8E4EF] w-full ${maxWidthClass} max-h-[92vh] sm:max-h-[90vh] sm:rounded-xl rounded-t-2xl shadow-xl flex flex-col overflow-hidden`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="px-4 sm:px-6 py-4 bg-[#F8F7FC] border-b border-[#E8E4EF] flex items-start justify-between gap-3 shrink-0">
@@ -616,7 +633,8 @@ export function SharedModal({
           <button
             type="button"
             onClick={onClose}
-            className="p-2 rounded-lg text-[#777287] hover:text-[#292638] hover:bg-[#E9DFF5] transition-colors shrink-0 cursor-pointer"
+            disabled={disableEscapeClose}
+            className="p-2 rounded-lg text-[#777287] hover:text-[#292638] hover:bg-[#E9DFF5] disabled:opacity-40 transition-colors shrink-0 cursor-pointer"
             title="ปิดหน้าต่าง (Esc)"
             aria-label="ปิดหน้าต่าง"
           >
@@ -626,21 +644,25 @@ export function SharedModal({
 
         <div className="p-4 sm:p-6 overflow-y-auto flex-1 space-y-5 text-[14px]">{children}</div>
 
-        <div className="px-4 sm:px-6 py-3.5 bg-[#F8F7FC] border-t border-[#E8E4EF] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 shrink-0">
-          <span className="hidden sm:inline text-[12.5px] text-[#777287]">
-            กดปุ่ม Esc หรือคลิกพื้นที่ด้านนอกเพื่อปิดหน้าต่าง
-          </span>
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 w-full sm:w-auto sm:ml-auto">
-            {footer}
-            <button
-              type="button"
-              onClick={onClose}
-              className="ent-btn-secondary w-full sm:w-auto"
-            >
-              ปิดหน้าต่าง
-            </button>
+        {!hideFooter && (
+          <div className="px-4 sm:px-6 py-3.5 bg-[#F8F7FC] border-t border-[#E8E4EF] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 shrink-0">
+            <span className="hidden sm:inline text-[12.5px] text-[#777287]">
+              {footerHint ?? 'กดปุ่ม Esc เพื่อปิดหน้าต่าง'}
+            </span>
+            <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center gap-2.5 w-full sm:w-auto sm:ml-auto">
+              {footer}
+              {!hideDefaultCloseButton && (
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="ent-btn-secondary w-full sm:w-auto"
+                >
+                  ปิดหน้าต่าง
+                </button>
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
@@ -1079,11 +1101,103 @@ export function ErrorToast({
   );
 }
 
+export interface FloatingToastData {
+  id: string;
+  variant: 'success' | 'error' | 'warning';
+  message: string;
+  detail?: string;
+  requestId?: string;
+}
+
+export function FloatingToastStack({
+  toasts,
+  onDismiss,
+}: {
+  toasts: FloatingToastData[];
+  onDismiss: (id: string) => void;
+}) {
+  if (!toasts || toasts.length === 0) return null;
+
+  return (
+    <div
+      className="fixed top-4 right-4 left-4 sm:left-auto z-[70] flex flex-col gap-2.5 sm:w-[390px] pointer-events-none"
+      aria-label="การแจ้งเตือนของระบบ"
+    >
+      {toasts.map((t) => {
+        const isSuccess = t.variant === 'success';
+        const isError = t.variant === 'error';
+        const borderClass = isSuccess
+          ? 'border-[#198568]/30 bg-white'
+          : isError
+            ? 'border-[#C74455]/35 bg-white'
+            : 'border-[#B87516]/35 bg-white';
+        const iconWrapClass = isSuccess
+          ? 'bg-[#EEF8F4] text-[#198568]'
+          : isError
+            ? 'bg-[#FDF2F4] text-[#C74455]'
+            : 'bg-[#FEF7EA] text-[#B87516]';
+        const titleClass = isSuccess
+          ? 'text-[#198568]'
+          : isError
+            ? 'text-[#C74455]'
+            : 'text-[#B87516]';
+
+        return (
+          <div
+            key={t.id}
+            role={isError ? 'alert' : 'status'}
+            aria-live={isError ? 'assertive' : 'polite'}
+            className={`pointer-events-auto rounded-xl border ${borderClass} shadow-lg px-4 py-3.5 flex items-start gap-3 transition-opacity duration-150`}
+          >
+            <div
+              className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 ${iconWrapClass}`}
+              aria-hidden="true"
+            >
+              {isSuccess ? (
+                <CheckCircle2 className="w-4.5 h-4.5" />
+              ) : isError ? (
+                <AlertCircle className="w-4.5 h-4.5" />
+              ) : (
+                <AlertTriangle className="w-4.5 h-4.5" />
+              )}
+            </div>
+            <div className="flex-1 min-w-0 space-y-0.5">
+              <div className={`text-[13.5px] font-bold leading-snug ${titleClass}`}>
+                {t.message}
+              </div>
+              {t.detail && (
+                <div className="text-[12.5px] text-[#777287] leading-relaxed break-words">
+                  {t.detail}
+                </div>
+              )}
+              {t.requestId && (
+                <div className="text-[11px] font-mono text-[#777287] pt-0.5">
+                  Ref: {t.requestId}
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => onDismiss(t.id)}
+              className="p-1 rounded-md text-[#777287] hover:text-[#292638] hover:bg-[#F1ECFA] transition-colors shrink-0 cursor-pointer"
+              aria-label="ปิดการแจ้งเตือน"
+              title="ปิด"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export function ConfirmDialog({
   open,
   title,
   description,
-  confirmLabel = 'ยืนยันการดำเนินการ',
+  confirmLabel = 'ยืนยัน',
+  cancelLabel = 'ยกเลิก',
   variant = 'primary',
   loading = false,
   onConfirm,
@@ -1113,20 +1227,33 @@ export function ConfirmDialog({
     <SharedModal
       open={open}
       onClose={loading ? () => {} : onCancel}
+      disableEscapeClose={loading}
+      closeOnBackdrop={!loading}
+      hideDefaultCloseButton
       title={title}
       subtitle={description}
-      kickerText="ยืนยันการดำเนินการ"
+      kickerText={variant === 'danger' || variant === 'warning' ? 'คำเตือนและการยืนยัน' : 'ยืนยันการดำเนินการ'}
       maxWidthClass="max-w-lg"
       footer={
-        <button
-          type="button"
-          disabled={loading}
-          onClick={onConfirm}
-          className={btnClass}
-        >
-          {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-          <span>{confirmLabel}</span>
-        </button>
+        <>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={onCancel}
+            className="ent-btn-secondary w-full sm:w-auto"
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={onConfirm}
+            className={`${btnClass} w-full sm:w-auto`}
+          >
+            {loading && <Loader2 className="w-4 h-4 animate-spin" />}
+            <span>{confirmLabel}</span>
+          </button>
+        </>
       }
     >
       {children || (

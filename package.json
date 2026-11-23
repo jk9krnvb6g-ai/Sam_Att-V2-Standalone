@@ -15,7 +15,7 @@
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx backend/src/database/cli-migrate.ts",
-    "test": "node --import tsx --test backend/tests/sam-att.test.ts backend/tests/attendance-matching.test.ts backend/tests/scanner-sync.test.ts backend/tests/historical-sync-mapping.test.ts backend/tests/hosoffice-personnel-sync.test.ts backend/tests/safe-deployment-migration.test.ts backend/tests/default-shift-templates.test.ts"
+    "test": "node --import tsx --test backend/tests/sam-att.test.ts backend/tests/attendance-matching.test.ts backend/tests/scanner-sync.test.ts backend/tests/historical-sync-mapping.test.ts backend/tests/hosoffice-personnel-sync.test.ts backend/tests/safe-deployment-migration.test.ts backend/tests/default-shift-templates.test.ts backend/tests/shift-template-modal-alert.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
