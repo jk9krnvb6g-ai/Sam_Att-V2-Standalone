@@ -23,6 +23,8 @@ import {
   CheckCircle2,
   AlertTriangle,
   Lock,
+  Loader2,
+  RotateCcw,
 } from 'lucide-react';
 import { apiRequest, ApiClientError, type UserRole } from '../services/api.ts';
 import { ErrorBanner, RoleLabel } from '../components/StatusText.tsx';
@@ -43,6 +45,7 @@ import {
   ProgressDialog,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
+import { useToast } from '../components/common/ToastContext.tsx';
 import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
 import type { NavViewKey } from '../components/layout/Sidebar.tsx';
 import { formatThaiDateTime } from '../utils/thaiFormat.ts';
@@ -95,6 +98,7 @@ export function AdminViews({
   userRole?: UserRole;
   onNavigate?: (view: NavViewKey) => void;
 }) {
+  const toast = useToast();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ code?: string; message: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -104,8 +108,13 @@ export function AdminViews({
   const [personnel, setPersonnel] = useState<any[]>([]);
   const [userSearch, setUserSearch] = useState('');
   const [userRoleFilter, setUserRoleFilter] = useState('');
+  const [userSortKey, setUserSortKey] = useState('id');
+  const [userSortDir, setUserSortDir] = useState<'ASC' | 'DESC'>('ASC');
+  const [userPage, setUserPage] = useState(1);
+  const [userPageSize, setUserPageSize] = useState<PageSizeOption>(10);
   const [createUserModalOpen, setCreateUserModalOpen] = useState(false);
   const [creatingUser, setCreatingUser] = useState(false);
+  const [createUserError, setCreateUserError] = useState<string | null>(null);
   const [newUsername, setNewUsername] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [newDisplayName, setNewDisplayName] = useState('');
@@ -213,18 +222,27 @@ export function AdminViews({
     setPage(1);
   }
 
+  function handleUserSort(key: string) {
+    if (userSortKey === key) {
+      setUserSortDir((prev) => (prev === 'ASC' ? 'DESC' : 'ASC'));
+    } else {
+      setUserSortKey(key);
+      setUserSortDir('ASC');
+    }
+    setUserPage(1);
+  }
+
   async function handleCreateUser(e: React.FormEvent) {
     e.preventDefault();
-    setError(null);
-    setNotice(null);
+    setCreateUserError(null);
     setCreatingUser(true);
     try {
       await apiRequest('/users', {
         method: 'POST',
         body: JSON.stringify({
-          username: newUsername,
+          username: newUsername.trim(),
           password: newPassword,
-          displayName: newDisplayName,
+          displayName: newDisplayName.trim(),
           role: newRole,
           approvedPersonId: newPersonId || null,
         }),
@@ -235,11 +253,14 @@ export function AdminViews({
       setNewRole('GENERAL_USER');
       setNewPersonId('');
       setCreateUserModalOpen(false);
-      setNotice('สร้างบัญชีผู้ใช้งานใหม่และผูกชื่อบุคลากรเรียบร้อยแล้ว');
+      toast.success('สร้างบัญชีผู้ใช้งานเรียบร้อยแล้ว', 'ผูกสิทธิ์การเข้าถึงและข้อมูลบุคลากรแล้ว');
       await loadData();
     } catch (err) {
       if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
+        setCreateUserError(err.message);
+        toast.error('ไม่สามารถสร้างบัญชีผู้ใช้งานได้', err.message, err.requestId);
+      } else {
+        setCreateUserError('ไม่สามารถเชื่อมต่อระบบเพื่อสร้างบัญชีผู้ใช้งานได้');
       }
     } finally {
       setCreatingUser(false);
@@ -278,16 +299,16 @@ export function AdminViews({
         });
       } else if (res.migrationApprovalRequired) {
         setDeployPipelineStage('AWAITING_MIGRATION_APPROVAL');
-        setNotice(
-          `ตรวจพบ Database Migration รออนุมัติ (${(res.pendingMigrations || []).join(', ')}) — กรุณาตรวจสอบผลกระทบและอนุมัติด้วยรหัสผ่านผู้ดูแลระบบ`
-        );
+        const msg = `ตรวจพบ Database Migration รออนุมัติ (${(res.pendingMigrations || []).join(', ')}) — กรุณาตรวจสอบผลกระทบและอนุมัติด้วยรหัสผ่านผู้ดูแลระบบ`;
+        setNotice(msg);
+        toast.warning('พบ Database Migration รออนุมัติ', msg);
       } else {
         setDeployPipelineStage('IDLE');
-        setNotice(
-          res.hasUpdates
-            ? 'พบการอัปเดตใหม่จาก GitHub (ไม่มี Database Migration ใหม่) พร้อมอัปเดตระบบอย่างปลอดภัย'
-            : 'ตรวจสอบระบบและสถานะ Migration เรียบร้อยแล้ว ไม่พบ Migration ค้างอยู่'
-        );
+        const msg = res.hasUpdates
+          ? 'พบการอัปเดตใหม่จาก GitHub (ไม่มี Database Migration ใหม่) พร้อมอัปเดตระบบอย่างปลอดภัย'
+          : 'ตรวจสอบระบบและสถานะ Migration เรียบร้อยแล้ว ไม่พบ Migration ค้างอยู่';
+        setNotice(msg);
+        toast.success('ตรวจสอบสถานะระบบแล้ว', msg);
       }
     } catch (err) {
       setDeployPipelineStage('FAILED');
@@ -382,6 +403,7 @@ export function AdminViews({
         requiresAdminDatabaseRestore: false,
       });
       setNotice('อัปเดตระบบ Sam_Att สำเร็จเรียบร้อยแล้ว');
+      toast.success('อัปเดตระบบ Sam_Att สำเร็จแล้ว', res.message);
       await loadData();
     } catch (err) {
       if (approvalPayload) {
@@ -474,7 +496,7 @@ export function AdminViews({
 
   const filteredUsers = useMemo(() => {
     const q = userSearch.trim().toLowerCase();
-    return users.filter((u) => {
+    const list = users.filter((u) => {
       if (userRoleFilter && u.role !== userRoleFilter) return false;
       if (!q) return true;
       return (
@@ -484,7 +506,18 @@ export function AdminViews({
         String(u.approved_person_id || '').toLowerCase().includes(q)
       );
     });
-  }, [users, userSearch, userRoleFilter]);
+    return [...list].sort((a, b) => {
+      if (userSortKey === 'id' || userSortKey === 'is_active') {
+        const diff = Number(a[userSortKey] ?? 0) - Number(b[userSortKey] ?? 0);
+        return userSortDir === 'ASC' ? diff : -diff;
+      }
+      const valA = String(a[userSortKey] || '');
+      const valB = String(b[userSortKey] || '');
+      return userSortDir === 'ASC'
+        ? valA.localeCompare(valB, 'th')
+        : valB.localeCompare(valA, 'th');
+    });
+  }, [users, userSearch, userRoleFilter, userSortKey, userSortDir]);
 
   const userStats = useMemo(() => {
     const adminHr = users.filter((u) => u.role === 'ADMIN' || u.role === 'RESPONSIBLE_STAFF').length;
@@ -550,12 +583,20 @@ export function AdminViews({
   // โหมด 'users': ผู้ใช้งานและสิทธิ์
   // =========================================================================
   if (mode === 'users') {
+    const numericUserSize =
+      userPageSize === 'ALL' ? Math.max(1, filteredUsers.length) : userPageSize;
+    const pagedUsers = filteredUsers.slice(
+      (userPage - 1) * numericUserSize,
+      userPage * numericUserSize
+    );
+    const hasUserFilter = Boolean(userSearch || userRoleFilter);
+
     return (
       <div className="space-y-6">
         <PageHeader
           category="ระบบและผู้ดูแล"
           title="ผู้ใช้งานและสิทธิ์การเข้าถึง"
-          subtitle="จัดการบัญชีผู้ใช้ทั้ง 3 ระดับ (ผู้ดูแลระบบ, เจ้าหน้าที่งานบุคคล, บุคลากรทั่วไป) และเชื่อมโยงบัญชีเข้ากับรหัสบุคลากรของโรงพยาบาล"
+          subtitle="จัดการบัญชีผู้ใช้ทั้ง 3 ระดับและเชื่อมโยงบัญชีเข้ากับรหัสบุคลากรของโรงพยาบาล"
           actions={
             <>
               <PageHelpAction
@@ -565,7 +606,10 @@ export function AdminViews({
               />
               <button
                 type="button"
-                onClick={() => setCreateUserModalOpen(true)}
+                onClick={() => {
+                  setCreateUserError(null);
+                  setCreateUserModalOpen(true);
+                }}
                 className="ent-btn-primary"
               >
                 <Plus className="w-4 h-4" aria-hidden="true" />
@@ -576,7 +620,6 @@ export function AdminViews({
         />
 
         <ErrorBanner error={error} onRetry={loadData} />
-        <NotificationBanner message={notice} onClose={() => setNotice(null)} />
 
         <MetricStrip
           items={[
@@ -618,7 +661,10 @@ export function AdminViews({
               type="text"
               aria-label="ค้นหาบัญชีผู้ใช้"
               value={userSearch}
-              onChange={(e) => setUserSearch(e.target.value)}
+              onChange={(e) => {
+                setUserSearch(e.target.value);
+                setUserPage(1);
+              }}
               placeholder="ค้นหา Username, ชื่อ-นามสกุล, รหัสบุคลากร..."
               className="ent-input pl-10 pr-4 w-full"
             />
@@ -626,7 +672,10 @@ export function AdminViews({
           <select
             aria-label="กรองตามระดับสิทธิ์"
             value={userRoleFilter}
-            onChange={(e) => setUserRoleFilter(e.target.value)}
+            onChange={(e) => {
+              setUserRoleFilter(e.target.value);
+              setUserPage(1);
+            }}
             className="ent-input w-full sm:w-64"
           >
             <option value="">ทุกระดับสิทธิ์ (3 ระดับ)</option>
@@ -634,6 +683,20 @@ export function AdminViews({
             <option value="RESPONSIBLE_STAFF">เจ้าหน้าที่งานบุคคล (HR)</option>
             <option value="GENERAL_USER">บุคลากรทั่วไป (User)</option>
           </select>
+          {hasUserFilter && (
+            <button
+              type="button"
+              onClick={() => {
+                setUserSearch('');
+                setUserRoleFilter('');
+                setUserPage(1);
+              }}
+              className="ent-btn-secondary w-full sm:w-auto"
+            >
+              <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>ล้างตัวกรอง</span>
+            </button>
+          )}
         </FilterBar>
 
         <div className="his-surface overflow-hidden">
@@ -648,23 +711,23 @@ export function AdminViews({
           ) : (
             <>
               <div className="md:hidden divide-y divide-[#E8E4EF]">
-                {filteredUsers.length === 0 ? (
+                {pagedUsers.length === 0 ? (
                   <div className="p-8 text-center text-[14px] text-[#777287]">
                     ไม่พบบัญชีผู้ใช้งานตามเงื่อนไขที่ค้นหา
                   </div>
                 ) : (
-                  filteredUsers.map((u) => (
+                  pagedUsers.map((u) => (
                     <div key={u.id} className="p-4 space-y-2.5 bg-white">
                       <div className="flex items-start justify-between gap-2">
                         <div>
                           <div className="font-bold text-[15px] text-[#292638]">{u.display_name}</div>
-                          <div className="font-mono text-[13px] font-semibold text-[#777287]">
+                          <div className="font-mono text-[13px] font-semibold text-[#777287] tabular-nums">
                             #{u.id} · {u.username}
                           </div>
                         </div>
                         <RoleLabel role={u.role} />
                       </div>
-                      <div className="p-3 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] text-[13px] space-y-1.5">
+                      <div className="pt-2 border-t border-[#F1ECFA] text-[13px] space-y-1.5">
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-[#777287]">บุคลากรที่เชื่อมโยง</span>
                           {u.approved_person_id ? (
@@ -677,7 +740,7 @@ export function AdminViews({
                         </div>
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-[#777287]">สถานะบัญชี</span>
-                          <StatusBadge tone={Number(u.is_active) === 1 ? 'success' : 'danger'} dot>
+                          <StatusBadge tone={Number(u.is_active) === 1 ? 'success' : 'danger'}>
                             {Number(u.is_active) === 1 ? 'ใช้งานปกติ' : 'ระงับการใช้งาน'}
                           </StatusBadge>
                         </div>
@@ -691,21 +754,51 @@ export function AdminViews({
                 <table className="his-table">
                   <thead>
                     <tr>
-                      <th>ชื่อบัญชีผู้ใช้งาน</th>
-                      <th>ชื่อ-นามสกุล</th>
-                      <th>ระดับสิทธิ์</th>
+                      <SortableHeader
+                        label="ชื่อบัญชีผู้ใช้งาน"
+                        sortKey="username"
+                        activeSortKey={userSortKey}
+                        sortDir={userSortDir}
+                        onSort={handleUserSort}
+                      />
+                      <SortableHeader
+                        label="ชื่อ-นามสกุล"
+                        sortKey="display_name"
+                        activeSortKey={userSortKey}
+                        sortDir={userSortDir}
+                        onSort={handleUserSort}
+                      />
+                      <SortableHeader
+                        label="ระดับสิทธิ์"
+                        sortKey="role"
+                        activeSortKey={userSortKey}
+                        sortDir={userSortDir}
+                        onSort={handleUserSort}
+                      />
                       <th>บุคลากรที่เชื่อมโยง</th>
-                      <th>สถานะบัญชี</th>
-                      <th>เข้าใช้งานล่าสุด</th>
+                      <SortableHeader
+                        label="สถานะบัญชี"
+                        sortKey="is_active"
+                        activeSortKey={userSortKey}
+                        sortDir={userSortDir}
+                        onSort={handleUserSort}
+                      />
+                      <SortableHeader
+                        label="เข้าใช้งานล่าสุด"
+                        sortKey="last_login_at"
+                        activeSortKey={userSortKey}
+                        sortDir={userSortDir}
+                        onSort={handleUserSort}
+                      />
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredUsers.length === 0 ? (
+                    {pagedUsers.length === 0 ? (
                       <TableEmptyState colSpan={6} title="ไม่พบบัญชีผู้ใช้งานตามเงื่อนไขที่ค้นหา" />
                     ) : (
-                      filteredUsers.map((u) => (
+                      pagedUsers.map((u) => (
                         <tr key={u.id}>
-                          <td className="font-mono font-bold text-[#292638]">
+                          <td className="font-mono font-bold text-[#292638] tabular-nums">
                             #{u.id} · {u.username}
                           </td>
                           <td className="font-semibold text-[#292638]">{u.display_name}</td>
@@ -725,7 +818,7 @@ export function AdminViews({
                             )}
                           </td>
                           <td>
-                            <StatusBadge tone={Number(u.is_active) === 1 ? 'success' : 'danger'} dot>
+                            <StatusBadge tone={Number(u.is_active) === 1 ? 'success' : 'danger'}>
                               {Number(u.is_active) === 1 ? 'ใช้งานปกติ' : 'ระงับการใช้งาน'}
                             </StatusBadge>
                           </td>
@@ -740,18 +833,39 @@ export function AdminViews({
               </div>
             </>
           )}
+
+          <TablePaginationBar
+            currentPage={userPage}
+            pageSize={userPageSize}
+            totalItems={filteredUsers.length}
+            onPageChange={setUserPage}
+            onPageSizeChange={setUserPageSize}
+          />
         </div>
 
         {/* Create User Modal split into Account Information & Authorization */}
         <SharedModal
           open={createUserModalOpen}
-          onClose={() => setCreateUserModalOpen(false)}
+          onClose={() => {
+            if (!creatingUser) {
+              setCreateUserError(null);
+              setCreateUserModalOpen(false);
+            }
+          }}
           kickerText="ระบบผู้ใช้งานและสิทธิ์การเข้าถึง"
           title="เพิ่มบัญชีผู้ใช้งานใหม่"
           subtitle="สำหรับบุคลากรทั่วไป ระบบจะใช้รหัสบุคลากรที่ผูกไว้นี้เพื่อจำกัดให้ดูได้เฉพาะข้อมูลเวลาของตนเองเท่านั้น"
           maxWidthClass="max-w-2xl"
         >
           <form onSubmit={handleCreateUser} className="space-y-6">
+            {createUserError && (
+              <div
+                role="alert"
+                className="p-3.5 rounded-xl bg-[#FDF2F4] border border-[#E5B8BF] text-[#8E2837] text-[13.5px] font-medium"
+              >
+                {createUserError}
+              </div>
+            )}
             {/* Section 1: Account Information */}
             <div className="space-y-4">
               <div className="text-[13.5px] font-bold text-[#4E3978] border-b border-[#E8E4EF] pb-1.5">
@@ -842,7 +956,11 @@ export function AdminViews({
             <div className="flex flex-col sm:flex-row justify-end gap-2.5 pt-3 border-t border-[#E8E4EF]">
               <button
                 type="button"
-                onClick={() => setCreateUserModalOpen(false)}
+                disabled={creatingUser}
+                onClick={() => {
+                  setCreateUserError(null);
+                  setCreateUserModalOpen(false);
+                }}
                 className="ent-btn-secondary w-full sm:w-auto"
               >
                 ยกเลิก
@@ -852,7 +970,11 @@ export function AdminViews({
                 disabled={creatingUser}
                 className="ent-btn-primary w-full sm:w-auto"
               >
-                <Plus className="w-4 h-4" aria-hidden="true" />
+                {creatingUser ? (
+                  <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <Plus className="w-4 h-4" aria-hidden="true" />
+                )}
                 <span>{creatingUser ? 'กำลังสร้างบัญชี...' : 'ยืนยันสร้างบัญชีผู้ใช้งาน'}</span>
               </button>
             </div>
@@ -868,13 +990,16 @@ export function AdminViews({
   if (mode === 'auditLogs') {
     const numericSize = pageSize === 'ALL' ? Math.max(1, filteredAndSortedLogs.length) : pageSize;
     const pagedLogs = filteredAndSortedLogs.slice((page - 1) * numericSize, page * numericSize);
+    const hasAuditFilter = Boolean(
+      logSearch || logDateFilter || logActorFilter || logActionFilter || logResultFilter
+    );
 
     return (
       <div className="space-y-6">
         <PageHeader
           category="ระบบและผู้ดูแล"
           title="ประวัติการใช้งานระบบ (Audit Logs)"
-          subtitle="บันทึกทุกกิจกรรมการเข้าสู่ระบบ การตรวจสอบเวลา การซิงก์ข้อมูล และการอัปเดตระบบแบบอ่านอย่างเดียว (พร้อมปิดบังรหัสผ่านอัตโนมัติ)"
+          subtitle="บันทึกกิจกรรมการเข้าสู่ระบบ การตรวจสอบเวลา การซิงก์ข้อมูล และการอัปเดตระบบแบบอ่านอย่างเดียว"
           actions={
             <PageHelpAction
               guideKey="systemLogs"
@@ -913,83 +1038,104 @@ export function AdminViews({
         />
 
         {/* Comprehensive Audit Filter Bar */}
-        <div className="his-surface p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-          <div className="relative">
-            <Search
-              className="w-4 h-4 text-[#777287] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
-              aria-hidden="true"
-            />
+        <div className="his-surface p-4 space-y-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+            <div className="relative">
+              <Search
+                className="w-4 h-4 text-[#777287] absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                aria-hidden="true"
+              />
+              <input
+                type="text"
+                aria-label="ค้นหาประวัติการใช้งาน"
+                value={logSearch}
+                onChange={(e) => {
+                  setLogSearch(e.target.value);
+                  setPage(1);
+                }}
+                placeholder="ค้นหาคำสำคัญ, รหัสอ้างอิง..."
+                className="ent-input pl-10 pr-4 w-full"
+              />
+            </div>
+
             <input
-              type="text"
-              aria-label="ค้นหาประวัติการใช้งาน"
-              value={logSearch}
+              type="date"
+              aria-label="กรองตามวันที่"
+              value={logDateFilter}
               onChange={(e) => {
-                setLogSearch(e.target.value);
+                setLogDateFilter(e.target.value);
                 setPage(1);
               }}
-              placeholder="ค้นหาคำสำคัญ, รหัสอ้างอิง..."
-              className="ent-input pl-10 pr-4 w-full"
+              className="ent-input font-mono w-full"
             />
+
+            <select
+              aria-label="กรองตามผู้ดำเนินการ"
+              value={logActorFilter}
+              onChange={(e) => {
+                setLogActorFilter(e.target.value);
+                setPage(1);
+              }}
+              className="ent-input w-full"
+            >
+              <option value="">ผู้ดำเนินการทั้งหมด</option>
+              {availableAuditActors.map((actor) => (
+                <option key={actor} value={actor}>
+                  {actor}
+                </option>
+              ))}
+            </select>
+
+            <select
+              aria-label="กรองตามประเภทกิจกรรม"
+              value={logActionFilter}
+              onChange={(e) => {
+                setLogActionFilter(e.target.value);
+                setPage(1);
+              }}
+              className="ent-input w-full"
+            >
+              <option value="">กิจกรรมทั้งหมด</option>
+              {availableAuditActions.map((act) => (
+                <option key={act} value={act}>
+                  {getAuditActionThaiLabel(act)}
+                </option>
+              ))}
+            </select>
+
+            <select
+              aria-label="กรองตามผลลัพธ์"
+              value={logResultFilter}
+              onChange={(e) => {
+                setLogResultFilter(e.target.value);
+                setPage(1);
+              }}
+              className="ent-input w-full"
+            >
+              <option value="">ทุกผลลัพธ์</option>
+              <option value="SUCCESS">สำเร็จ (SUCCESS)</option>
+              <option value="FAILED">ไม่สำเร็จ / ผิดพลาด</option>
+            </select>
           </div>
-
-          <input
-            type="date"
-            aria-label="กรองตามวันที่"
-            value={logDateFilter}
-            onChange={(e) => {
-              setLogDateFilter(e.target.value);
-              setPage(1);
-            }}
-            className="ent-input font-mono w-full"
-          />
-
-          <select
-            aria-label="กรองตามผู้ดำเนินการ"
-            value={logActorFilter}
-            onChange={(e) => {
-              setLogActorFilter(e.target.value);
-              setPage(1);
-            }}
-            className="ent-input w-full"
-          >
-            <option value="">ผู้ดำเนินการทั้งหมด</option>
-            {availableAuditActors.map((actor) => (
-              <option key={actor} value={actor}>
-                {actor}
-              </option>
-            ))}
-          </select>
-
-          <select
-            aria-label="กรองตามประเภทกิจกรรม"
-            value={logActionFilter}
-            onChange={(e) => {
-              setLogActionFilter(e.target.value);
-              setPage(1);
-            }}
-            className="ent-input w-full"
-          >
-            <option value="">กิจกรรมทั้งหมด</option>
-            {availableAuditActions.map((act) => (
-              <option key={act} value={act}>
-                {getAuditActionThaiLabel(act)}
-              </option>
-            ))}
-          </select>
-
-          <select
-            aria-label="กรองตามผลลัพธ์"
-            value={logResultFilter}
-            onChange={(e) => {
-              setLogResultFilter(e.target.value);
-              setPage(1);
-            }}
-            className="ent-input w-full"
-          >
-            <option value="">ทุกผลลัพธ์</option>
-            <option value="SUCCESS">สำเร็จ (SUCCESS)</option>
-            <option value="FAILED">ไม่สำเร็จ / ผิดพลาด</option>
-          </select>
+          {hasAuditFilter && (
+            <div className="flex justify-end pt-2 border-t border-[#F1ECFA]">
+              <button
+                type="button"
+                onClick={() => {
+                  setLogSearch('');
+                  setLogDateFilter('');
+                  setLogActorFilter('');
+                  setLogActionFilter('');
+                  setLogResultFilter('');
+                  setPage(1);
+                }}
+                className="ent-btn-secondary h-8 px-3 text-[12.5px]"
+              >
+                <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>ล้างตัวกรองทั้งหมด</span>
+              </button>
+            </div>
+          )}
         </div>
 
         <ErrorBanner error={error} onRetry={loadData} />
@@ -1017,18 +1163,18 @@ export function AdminViews({
                             {formatThaiDateTime(log.created_at)}
                           </div>
                         </div>
-                        <StatusBadge tone={log.result === 'SUCCESS' ? 'success' : 'danger'} dot>
+                        <StatusBadge tone={log.result === 'SUCCESS' ? 'success' : 'danger'}>
                           {log.result === 'SUCCESS' ? 'สำเร็จ' : log.result}
                         </StatusBadge>
                       </div>
-                      <div className="p-3 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] text-[13px] space-y-1 font-mono">
-                        <div className="flex items-center justify-between">
+                      <div className="pt-2 border-t border-[#F1ECFA] text-[13px] space-y-1 font-mono">
+                        <div className="flex items-center justify-between gap-2">
                           <span className="text-[#777287] font-sans">ผู้ดำเนินการ</span>
                           <span className="font-bold text-[#292638]">
                             {log.actor_username} ({log.actor_role})
                           </span>
                         </div>
-                        <div className="flex items-center justify-between">
+                        <div className="flex items-center justify-between gap-2">
                           <span className="text-[#777287] font-sans">เป้าหมาย</span>
                           <span className="text-[#292638]">
                             {log.target_type}:{log.target_id || '—'}
@@ -1112,7 +1258,7 @@ export function AdminViews({
                             {log.target_type}:{log.target_id || '—'}
                           </td>
                           <td>
-                            <StatusBadge tone={log.result === 'SUCCESS' ? 'success' : 'danger'} dot>
+                            <StatusBadge tone={log.result === 'SUCCESS' ? 'success' : 'danger'}>
                               {log.result === 'SUCCESS' ? 'สำเร็จ' : log.result}
                             </StatusBadge>
                           </td>
@@ -1204,7 +1350,7 @@ export function AdminViews({
       <PageHeader
         category="ระบบและผู้ดูแล"
         title="อัปเดตระบบ Sam_Att และอนุมัติ Database Migration"
-        subtitle="ตรวจสอบโค้ดและ Migration จาก GitHub · สำรองฐานข้อมูล MySQL samchuk_attendance_v2 นอก Git Repo ก่อน git pull · รัน Migration เมื่อ ADMIN อนุมัติด้วยรหัสผ่าน · รีสตาร์ทเฉพาะ Sam_Att บนพอร์ต 4101 โดยไม่กระทบ Procurement"
+        subtitle="ตรวจสอบโค้ดและ Migration จาก GitHub สำรองฐานข้อมูล MySQL นอก Git Repo ก่อนอัปเดต และรีสตาร์ทเฉพาะ Sam_Att บนพอร์ต 4101"
         actions={
           <>
             <PageHelpAction
@@ -1317,10 +1463,10 @@ export function AdminViews({
 
       {/* Pending Migration Gate Card */}
       {hasPendingMigrations && !hasChecksumMismatch && (
-        <div className="his-surface p-5 sm:p-6 border-l-4 border-l-[#D97706] space-y-4">
+        <div className="rounded-xl bg-[#FEF7EA]/55 border border-[#F2DCBA] p-5 sm:p-6 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
             <div className="space-y-1">
-              <div className="flex items-center gap-2 text-[#B45309] font-bold text-[15.5px]">
+              <div className="flex items-center gap-2 text-[#B87516] font-bold text-[15.5px]">
                 <AlertTriangle className="w-5 h-5 shrink-0" aria-hidden="true" />
                 <span>พบ Database Migration ที่ต้องได้รับการอนุมัติจากผู้ดูแลระบบ ({pendingMigrations.length} ไฟล์)</span>
               </div>
@@ -1340,14 +1486,14 @@ export function AdminViews({
             </button>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[13px]">
-            <div className="p-3.5 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-1">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 py-3.5 border-y border-[#F2DCBA] text-[13px]">
+            <div className="space-y-0.5">
               <div className="text-[#777287] font-medium">Commit เป้าหมายที่จะอนุมัติ (Approval Binding)</div>
               <div className="font-mono font-bold text-[#292638] break-all">
                 {currentCommitSha.slice(0, 10)} → {targetCommitSha.slice(0, 10)}
               </div>
             </div>
-            <div className="p-3.5 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-1">
+            <div className="space-y-0.5">
               <div className="text-[#777287] font-medium">การสำรองข้อมูลก่อนเริ่มเปลี่ยนแปลง</div>
               <div className="font-semibold text-[#292638]">
                 สำรอง MySQL <span className="font-mono">samchuk_attendance_v2</span> + โค้ดเดิมไว้นอก Git Repo ก่อน git pull ทุกครั้ง
@@ -1355,14 +1501,11 @@ export function AdminViews({
             </div>
           </div>
 
-          <div className="space-y-2.5">
+          <div className="rounded-xl bg-white border border-[#E8E4EF] divide-y divide-[#E8E4EF] overflow-hidden">
             {pendingMigrations.map((fname) => {
               const detail = pendingMigrationDetails.find((d: any) => d.filename === fname);
               return (
-                <div
-                  key={fname}
-                  className="p-4 rounded-xl bg-white border border-[#E8E4EF] space-y-2"
-                >
+                <div key={fname} className="p-4 space-y-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="font-mono font-bold text-[14px] text-[#4E3978]">{fname}</div>
                     <div className="flex items-center gap-2">
@@ -1394,7 +1537,7 @@ export function AdminViews({
                             {detail.columnsAdded.map((c: any) => (
                               <div
                                 key={`${c.table}.${c.column}`}
-                                className="px-2.5 py-1 rounded bg-[#F8F7FC] border border-[#E8E4EF] text-[#292638]"
+                                className="px-2.5 py-1 rounded bg-[#F8F7FC] text-[#292638]"
                               >
                                 {c.table}.{c.column} ({c.expectedType})
                               </div>
@@ -1443,7 +1586,6 @@ export function AdminViews({
                     ? 'warning'
                     : 'primary'
             }
-            dot
           >
             {deployPipelineStage === 'SUCCESS'
               ? 'สำเร็จ'
@@ -1496,24 +1638,24 @@ export function AdminViews({
         )}
 
         {lastDeployMeta && (
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-[13px] pt-2 border-t border-[#E8E4EF]">
-            <div className="p-3 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF]">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-[13px] pt-4 border-t border-[#E8E4EF]">
+            <div className="space-y-0.5">
               <div className="text-[#777287]">Exit Code จริงจากสคริปต์</div>
               <div
                 className={`font-mono font-bold ${
-                  lastDeployMeta.exitCode === 0 ? 'text-[#1F7A4D]' : 'text-[#C74455]'
+                  lastDeployMeta.exitCode === 0 ? 'text-[#198568]' : 'text-[#C74455]'
                 }`}
               >
                 {lastDeployMeta.exitCode}
               </div>
             </div>
-            <div className="p-3 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF]">
+            <div className="space-y-0.5 sm:border-l sm:border-[#E8E4EF] sm:pl-4">
               <div className="text-[#777287]">โฟลเดอร์สำรองข้อมูล (นอก Git Repo)</div>
               <div className="font-mono text-[12px] font-semibold text-[#292638] break-all">
                 {lastDeployMeta.backupDir || 'ยังไม่ได้สร้างในรอบนี้'}
               </div>
             </div>
-            <div className="p-3 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF]">
+            <div className="space-y-0.5 sm:border-l sm:border-[#E8E4EF] sm:pl-4">
               <div className="text-[#777287]">Migration ที่รันในรอบนี้</div>
               <div className="font-mono text-[12px] font-semibold text-[#292638]">
                 {lastDeployMeta.migrationsApplied?.length
@@ -1547,7 +1689,7 @@ export function AdminViews({
             </h3>
           </div>
           {migrationInfo?.schemaVerification && (
-            <StatusBadge tone={migrationInfo.schemaVerification.ok ? 'success' : 'danger'} dot>
+            <StatusBadge tone={migrationInfo.schemaVerification.ok ? 'success' : 'danger'}>
               {migrationInfo.schemaVerification.ok
                 ? 'โครงสร้างตารางและคอลัมน์ตรงตาม Schema'
                 : `พบข้อผิดพลาด Schema (${migrationInfo.schemaVerification.errors?.length || 0})`}
@@ -1641,7 +1783,7 @@ export function AdminViews({
                       {h.backup_archive_path || '—'}
                     </td>
                     <td>
-                      <StatusBadge tone={h.status === 'SUCCESS' ? 'success' : 'danger'} dot>
+                      <StatusBadge tone={h.status === 'SUCCESS' ? 'success' : 'danger'}>
                         {h.status === 'SUCCESS' ? 'สำเร็จ' : h.status}
                       </StatusBadge>
                     </td>

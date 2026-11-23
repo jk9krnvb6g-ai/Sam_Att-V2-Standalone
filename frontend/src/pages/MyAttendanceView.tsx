@@ -11,7 +11,7 @@
  *   3. ประวัติการสแกนลายนิ้วมือต้นฉบับของตนเอง
  */
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { PanelRightOpen, CalendarDays, List, ChevronLeft, ChevronRight } from 'lucide-react';
+import { PanelRightOpen, CalendarDays, List, ChevronLeft, ChevronRight, Search } from 'lucide-react';
 import { apiRequest, ApiClientError, type AuthUser } from '../services/api.ts';
 import {
   AttendanceStatusText,
@@ -76,8 +76,51 @@ export function MyAttendanceView({
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<PageSizeOption>(10);
 
+  const [shiftsSearch, setShiftsSearch] = useState('');
+  const [shiftsPage, setShiftsPage] = useState(1);
+  const [shiftsPageSize, setShiftsPageSize] = useState<PageSizeOption>(10);
+
+  const [rawSearch, setRawSearch] = useState('');
+  const [rawPage, setRawPage] = useState(1);
+  const [rawPageSize, setRawPageSize] = useState<PageSizeOption>(10);
+
   // Slide-Over Detail Drawer for inspecting a single shift & its raw scan trace
   const [selectedRowModal, setSelectedRowModal] = useState<any | null>(null);
+
+  const filteredShifts = useMemo(() => {
+    const q = shiftsSearch.trim().toLowerCase();
+    if (!q) return shiftsData;
+    return shiftsData.filter(
+      (s) =>
+        String(s.work_date || '').toLowerCase().includes(q) ||
+        String(s.snapshot_shift_code || '').toLowerCase().includes(q) ||
+        String(s.snapshot_shift_name || '').toLowerCase().includes(q)
+    );
+  }, [shiftsData, shiftsSearch]);
+
+  const pagedShifts = useMemo(() => {
+    if (shiftsPageSize === 'ALL') return filteredShifts;
+    const start = (shiftsPage - 1) * shiftsPageSize;
+    return filteredShifts.slice(start, start + shiftsPageSize);
+  }, [filteredShifts, shiftsPage, shiftsPageSize]);
+
+  const filteredRawScans = useMemo(() => {
+    const q = rawSearch.trim().toLowerCase();
+    if (!q) return rawScansData;
+    return rawScansData.filter(
+      (r) =>
+        String(r.canonical_bkk_time || '').toLowerCase().includes(q) ||
+        String(r.machine_no || '').toLowerCase().includes(q) ||
+        String(r.enroll_number || '').toLowerCase().includes(q) ||
+        String(r.used_shift_code || '').toLowerCase().includes(q)
+    );
+  }, [rawScansData, rawSearch]);
+
+  const pagedRawScans = useMemo(() => {
+    if (rawPageSize === 'ALL') return filteredRawScans;
+    const start = (rawPage - 1) * rawPageSize;
+    return filteredRawScans.slice(start, start + rawPageSize);
+  }, [filteredRawScans, rawPage, rawPageSize]);
 
   const resolvedRange = useMemo(
     () =>
@@ -318,7 +361,7 @@ export function MyAttendanceView({
                       />
                     </div>
 
-                    <div className="grid grid-cols-2 gap-2.5 p-3 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] text-[13px]">
+                    <div className="grid grid-cols-2 gap-3 pt-2.5 border-t border-[#E8E4EF] text-[13px]">
                       <div>
                         <div className="text-[#777287] text-[12px]">เวลาสแกนเข้า</div>
                         <div className="font-mono font-bold text-[#292638] mt-0.5 tabular-nums">
@@ -618,22 +661,41 @@ export function MyAttendanceView({
             </div>
           ) : (
             <>
+              <div className="px-4 sm:px-5 py-3 border-b border-[#E8E4EF] bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="relative flex-1 max-w-sm">
+                  <Search className="w-4 h-4 text-[#777287] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={shiftsSearch}
+                    onChange={(e) => {
+                      setShiftsSearch(e.target.value);
+                      setShiftsPage(1);
+                    }}
+                    placeholder="ค้นหาวันที่ รหัสกะ หรือชื่อกะ..."
+                    className="ent-input ent-input-with-icon w-full"
+                  />
+                </div>
+                <span className="text-[12.5px] text-[#777287] tabular-nums">
+                  พบ {filteredShifts.length} รายการ
+                </span>
+              </div>
+
               {/* Mobile Card View (< md) */}
               <div className="md:hidden divide-y divide-[#E8E4EF]">
-                {shiftsData.length === 0 ? (
+                {pagedShifts.length === 0 ? (
                   <div className="p-8 text-center text-[14px] text-[#777287]">
-                    ยังไม่มีตารางเวรที่มอบหมายให้คุณ
+                    {shiftsSearch ? 'ไม่พบตารางเวรที่ตรงกับคำค้นหา' : 'ยังไม่มีตารางเวรที่มอบหมายให้คุณ'}
                   </div>
                 ) : (
-                  shiftsData.map((s) => (
+                  pagedShifts.map((s) => (
                     <div key={s.id} className="p-4 space-y-2 bg-white">
                       <div className="flex items-center justify-between">
                         <span className="font-bold text-[15px] text-[#292638]">
                           {formatThaiDate(s.work_date)}
                         </span>
-                        <StatusBadge tone="primary">
-                          <span className="font-mono">{s.snapshot_shift_code}</span>
-                        </StatusBadge>
+                        <span className="font-mono text-[12.5px] font-bold text-[#4E3978]">
+                          {s.snapshot_shift_code}
+                        </span>
                       </div>
                       <div className="text-[14px] font-semibold text-[#292638]">
                         {s.snapshot_shift_name}
@@ -671,10 +733,17 @@ export function MyAttendanceView({
                     </tr>
                   </thead>
                   <tbody>
-                    {shiftsData.length === 0 ? (
-                      <TableEmptyState colSpan={6} title="ยังไม่มีตารางเวรที่มอบหมายให้คุณ" />
+                    {pagedShifts.length === 0 ? (
+                      <TableEmptyState
+                        colSpan={6}
+                        title={
+                          shiftsSearch
+                            ? 'ไม่พบตารางเวรที่ตรงกับคำค้นหา'
+                            : 'ยังไม่มีตารางเวรที่มอบหมายให้คุณ'
+                        }
+                      />
                     ) : (
-                      shiftsData.map((s) => (
+                      pagedShifts.map((s) => (
                         <tr key={s.id}>
                           <td>
                             <span className="font-semibold text-[#292638]">
@@ -703,19 +772,46 @@ export function MyAttendanceView({
                   </tbody>
                 </table>
               </div>
+
+              <TablePaginationBar
+                totalItems={filteredShifts.length}
+                currentPage={shiftsPage}
+                pageSize={shiftsPageSize}
+                onPageChange={setShiftsPage}
+                onPageSizeChange={setShiftsPageSize}
+              />
             </>
           )}
         </div>
       ) : (
         <div className="his-surface overflow-hidden">
+          <div className="px-4 sm:px-5 py-3 border-b border-[#E8E4EF] bg-[#F8F7FC] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div className="relative flex-1 max-w-sm">
+              <Search className="w-4 h-4 text-[#777287] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={rawSearch}
+                onChange={(e) => {
+                  setRawSearch(e.target.value);
+                  setRawPage(1);
+                }}
+                placeholder="ค้นหาเวลาสแกน หมายเลขเครื่อง หรือรหัสกะ..."
+                className="ent-input ent-input-with-icon w-full"
+              />
+            </div>
+            <span className="text-[12.5px] text-[#777287] tabular-nums">
+              พบ {filteredRawScans.length} รายการ
+            </span>
+          </div>
+
           {/* Mobile Card View (< md) */}
           <div className="md:hidden divide-y divide-[#E8E4EF]">
-            {rawScansData.length === 0 ? (
+            {pagedRawScans.length === 0 ? (
               <div className="p-8 text-center text-[14px] text-[#777287]">
-                ไม่พบข้อมูลสแกนต้นฉบับของคุณ
+                {rawSearch ? 'ไม่พบประวัติการสแกนที่ตรงกับคำค้นหา' : 'ไม่พบข้อมูลสแกนต้นฉบับของคุณ'}
               </div>
             ) : (
-              rawScansData.map((r) => (
+              pagedRawScans.map((r) => (
                 <div key={r.id} className="p-4 space-y-2 bg-white">
                   <div className="flex items-center justify-between">
                     <span className="font-bold text-[14.5px] text-[#292638]">
@@ -760,10 +856,17 @@ export function MyAttendanceView({
                 </tr>
               </thead>
               <tbody>
-                {rawScansData.length === 0 ? (
-                  <TableEmptyState colSpan={5} title="ไม่พบข้อมูลสแกนต้นฉบับของคุณ" />
+                {pagedRawScans.length === 0 ? (
+                  <TableEmptyState
+                    colSpan={5}
+                    title={
+                      rawSearch
+                        ? 'ไม่พบประวัติการสแกนที่ตรงกับคำค้นหา'
+                        : 'ไม่พบข้อมูลสแกนต้นฉบับของคุณ'
+                    }
+                  />
                 ) : (
-                  rawScansData.map((r) => (
+                  pagedRawScans.map((r) => (
                     <tr key={r.id}>
                       <td>
                         <div className="font-semibold text-[#292638]">
@@ -802,6 +905,14 @@ export function MyAttendanceView({
               </tbody>
             </table>
           </div>
+
+          <TablePaginationBar
+            totalItems={filteredRawScans.length}
+            currentPage={rawPage}
+            pageSize={rawPageSize}
+            onPageChange={setRawPage}
+            onPageSizeChange={setRawPageSize}
+          />
         </div>
       )}
 
@@ -823,15 +934,15 @@ export function MyAttendanceView({
       >
         {selectedRowModal && (
           <div className="space-y-5">
-            <div className="p-4 bg-[#F8F7FC] rounded-xl border border-[#E8E4EF] space-y-4">
-              <div>
+            <div className="divide-y divide-[#E8E4EF] border border-[#E8E4EF] rounded-xl bg-white overflow-hidden">
+              <div className="p-4">
                 <div className="text-[12px] text-[#777287]">เวลาเริ่ม–สิ้นสุดตามตารางเวร</div>
                 <div className="font-mono font-bold text-[#292638] text-[15px] mt-1 tabular-nums">
                   {selectedRowModal.row.scheduled_start} ถึง {selectedRowModal.row.scheduled_end}
                 </div>
               </div>
               {selectedRowModal.row.leave_type && (
-                <div>
+                <div className="p-4 bg-[#F8F7FC]">
                   <div className="text-[12px] text-[#777287]">ช่วงเวลาที่ใช้ประเมินจริง (หักช่วงลาครึ่งวัน)</div>
                   <div className="font-mono font-semibold text-[#4E3978] text-[13.5px] mt-0.5 tabular-nums">
                     {selectedRowModal.row.evaluated_start_time} ถึง {selectedRowModal.row.evaluated_end_time} (ลา{' '}
@@ -839,7 +950,7 @@ export function MyAttendanceView({
                   </div>
                 </div>
               )}
-              <div>
+              <div className="p-4">
                 <div className="text-[12px] text-[#777287]">สถานะการลงเวลา / นาทีสาย / ออกก่อนเวลา</div>
                 <div className="mt-1.5 flex flex-wrap items-center gap-2.5">
                   <AttendanceStatusText
@@ -859,8 +970,8 @@ export function MyAttendanceView({
                   )}
                 </div>
               </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-[#E8E4EF]">
-                <div className="p-3 rounded-lg bg-white border border-[#E8E4EF]">
+              <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-[#E8E4EF] bg-[#F8F7FC]">
+                <div className="p-4">
                   <div className="text-[12px] text-[#777287]">หลักฐานเวลาสแกนเข้า</div>
                   <div className="font-mono font-semibold text-[#292638] mt-1 tabular-nums">
                     {selectedRowModal.row.check_in_time || 'ไม่พบสแกนเข้า'}
@@ -869,7 +980,7 @@ export function MyAttendanceView({
                     รหัสอ้างอิงสแกน: #{selectedRowModal.row.check_in_raw_scan_id || '—'}
                   </div>
                 </div>
-                <div className="p-3 rounded-lg bg-white border border-[#E8E4EF]">
+                <div className="p-4">
                   <div className="text-[12px] text-[#777287]">หลักฐานเวลาสแกนออก</div>
                   <div className="font-mono font-semibold text-[#292638] mt-1 tabular-nums">
                     {selectedRowModal.row.check_out_time || 'ไม่พบสแกนออก'}

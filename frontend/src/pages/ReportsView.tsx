@@ -12,7 +12,6 @@ import {
   Send,
   FileText,
   Search,
-  ArrowUpDown,
   Lock,
   CheckCircle2,
   AlertTriangle,
@@ -21,6 +20,7 @@ import {
   Clock,
   Users,
   BarChart3,
+  Info,
 } from 'lucide-react';
 import { apiRequest, downloadLatenessCsv, ApiClientError, type UserRole } from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
@@ -33,13 +33,13 @@ import {
   SortableHeader,
   TablePaginationBar,
   SharedModal,
-  NotificationBanner,
   TableEmptyState,
   TableLoadingSkeleton,
   ConfirmDialog,
   ProgressDialog,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
+import { useToast } from '../components/common/ToastContext.tsx';
 import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
 import type { NavViewKey } from '../components/layout/Sidebar.tsx';
 import {
@@ -60,6 +60,7 @@ export function ReportsView({
   onNavigate?: (view: NavViewKey) => void;
 }) {
   const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
+  const toast = useToast();
 
   const [periodMode, setPeriodMode] = useState<PeriodMode>('MONTHLY');
   const [dailyDate, setDailyDate] = useState(initialBkk.todayYmd);
@@ -73,7 +74,6 @@ export function ReportsView({
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ code?: string; message: string } | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
 
   const [reportData, setReportData] = useState<any>(null);
   const [pushHistoryData, setPushHistoryData] = useState<any>(null);
@@ -94,6 +94,24 @@ export function ReportsView({
   const [sortDir, setSortDir] = useState<'ASC' | 'DESC'>('DESC');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<PageSizeOption>(10);
+
+  const [pushPage, setPushPage] = useState(1);
+  const [pushPageSize, setPushPageSize] = useState<PageSizeOption>(10);
+
+  function formatPushModeLabel(pushMode?: string): string {
+    const m = String(pushMode || '').toUpperCase();
+    if (m === 'LIVE' || m === 'DIRECT_PUSH') return 'ส่งข้อมูลจริง (Live)';
+    if (m === 'DRY_RUN' || m === 'PREVIEW') return 'จำลองตรวจข้อมูล (Dry-Run)';
+    return pushMode || '—';
+  }
+
+  function formatPushStatusLabel(status?: string): string {
+    const s = String(status || '').toUpperCase();
+    if (s === 'SUCCESS' || s === 'PUSHED') return 'ส่งสำเร็จ';
+    if (s === 'FAILED') return 'ไม่สำเร็จ';
+    if (s === 'PREVIEW' || s === 'DRY_RUN') return 'จำลองแล้ว';
+    return status || '—';
+  }
 
   const effectiveRange = useMemo(
     () =>
@@ -192,17 +210,17 @@ export function ReportsView({
         dateTo: effectiveRange.dateTo,
         personnelType: personnelType || undefined,
       });
-      setNotice('ดาวน์โหลดไฟล์รายงาน CSV เรียบร้อยแล้ว');
+      toast.showSuccess('ส่งออกไฟล์รายงาน CSV เรียบร้อยแล้ว');
     } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
+      const msg =
+        err instanceof ApiClientError ? err.message : 'ไม่สามารถส่งออกไฟล์รายงาน CSV ได้';
+      setError({ code: err instanceof ApiClientError ? err.code : undefined, message: msg });
+      toast.showError('ส่งออกรายงานไม่สำเร็จ', msg);
     }
   }
 
   async function handlePreviewHosOfficePush() {
     setError(null);
-    setNotice(null);
     setShowTechnicalError(false);
     try {
       const res = await apiRequest('/hosoffice/push/preview', {
@@ -213,21 +231,22 @@ export function ReportsView({
         }),
       });
       setPreviewBatch(res);
-      setNotice(
-        `จำลองการเตรียมข้อมูลส่งกลับ HOSOffice สำเร็จ: พร้อมส่ง ${res.validCount} รายการ · ไม่ผ่านเกณฑ์ ${res.invalidCount} รายการ (ยังไม่มีการเขียนลงฐานข้อมูล HOSOffice)`
+      toast.showSuccess(
+        'จำลองชุดข้อมูลส่งกลับ HOSOffice สำเร็จ',
+        `พร้อมส่ง ${res.validCount} รายการ · ไม่ผ่านเกณฑ์ ${res.invalidCount} รายการ (ยังไม่เขียนลง HOSOffice)`
       );
       await loadData();
     } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
+      const msg =
+        err instanceof ApiClientError ? err.message : 'ไม่สามารถจำลองชุดข้อมูลส่งกลับ HOSOffice ได้';
+      setError({ code: err instanceof ApiClientError ? err.code : undefined, message: msg });
+      toast.showError('จำลองข้อมูลไม่สำเร็จ', msg);
     }
   }
 
   async function handleConfirmLiveHosOfficePush() {
     setConfirmPushOpen(false);
     setError(null);
-    setNotice(null);
     setShowTechnicalError(false);
     setPushingLive(true);
     setPushProgressOpen(true);
@@ -254,7 +273,7 @@ export function ReportsView({
       setPushStatus('SUCCESS');
       setPushStepLabel('ส่งข้อมูลกลับ HOSOffice สำเร็จ');
       setPushSummary(summaryMsg);
-      setNotice(summaryMsg);
+      toast.showSuccess('ส่งข้อมูลกลับ HOSOffice สำเร็จ', summaryMsg);
       await loadData();
     } catch (err) {
       const errMsg =
@@ -270,6 +289,7 @@ export function ReportsView({
       } else {
         setError({ message: errMsg });
       }
+      toast.showError('ส่งข้อมูลกลับ HOSOffice ไม่สำเร็จ', errMsg);
       await loadData();
     } finally {
       setPushingLive(false);
@@ -442,8 +462,6 @@ export function ReportsView({
           </div>
         )}
 
-        <NotificationBanner message={notice} onClose={() => setNotice(null)} />
-
         {previewBatch && (
           <div className="space-y-5">
             <MetricStrip
@@ -476,46 +494,96 @@ export function ReportsView({
             />
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              <div className="his-surface p-5 space-y-3">
-                <SectionHeader
-                  title={`รายการที่พร้อมส่ง (${previewBatch.validCount} รายการ)`}
-                  actions={
-                    <button
-                      type="button"
-                      onClick={() => setInspectPayloadModal(previewBatch)}
-                      className="text-[13px] font-semibold text-[#8066B5] hover:text-[#4E3978] hover:underline inline-flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <FileText className="w-4 h-4" aria-hidden="true" />
-                      <span>ดู Payload เต็มจอ</span>
-                    </button>
-                  }
-                />
-                <pre className="p-4 bg-[#292638] text-[#F8F7FC] rounded-xl text-[12.5px] font-mono overflow-x-auto max-h-72">
-                  {JSON.stringify(previewBatch.validItems, null, 2)}
-                </pre>
-              </div>
-
-              <div className="his-surface p-5 space-y-3">
-                <SectionHeader
-                  title={`รายการที่ไม่พร้อมส่งและเหตุผล (${previewBatch.invalidCount} รายการ)`}
-                />
-                {previewBatch.invalidItems?.length === 0 ? (
-                  <div className="p-5 rounded-xl bg-[#EEF8F4] border border-[#198568]/20 text-[13.5px] text-[#198568] font-medium">
-                    ข้อมูลทุกรายการผ่านเกณฑ์ความสมบูรณ์ พร้อมสำหรับการส่งกลับ HOSOffice
+              <div className="his-surface overflow-hidden flex flex-col">
+                <div className="px-5 py-4 border-b border-[#E8E4EF] flex items-center justify-between gap-3">
+                  <SectionHeader
+                    title={`รายการที่พร้อมส่ง (${previewBatch.validCount} รายการ)`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setInspectPayloadModal(previewBatch)}
+                    className="ent-btn-secondary h-8 px-3 text-[12.5px] shrink-0"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-[#8066B5]" aria-hidden="true" />
+                    <span>ดู JSON Payload</span>
+                  </button>
+                </div>
+                {!previewBatch.validItems || previewBatch.validItems.length === 0 ? (
+                  <div className="p-6 text-center text-[13.5px] text-[#777287]">
+                    ไม่มีรายการที่พร้อมส่งในช่วงวันที่ที่เลือก
                   </div>
                 ) : (
-                  <div className="divide-y divide-[#E8E4EF] text-[13.5px] max-h-72 overflow-y-auto">
-                    {previewBatch.invalidItems?.map((inv: any) => (
-                      <div key={inv.attendanceId} className="py-3">
-                        <div className="font-semibold text-[#292638]">
-                          เวร #{inv.attendanceId} · {inv.fullName} ({inv.personId}) —{' '}
-                          {formatThaiDate(inv.workDate)}
-                        </div>
-                        <div className="text-[#C74455] text-[13px] mt-0.5">{inv.reason}</div>
+                  <div className="overflow-x-auto max-h-72">
+                    <table className="his-table text-[13px]">
+                      <thead>
+                        <tr>
+                          <th>วันที่</th>
+                          <th>บุคลากร</th>
+                          <th>เข้า–ออก</th>
+                          <th className="text-right">สถานะ</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {previewBatch.validItems.slice(0, 50).map((item: any, idx: number) => (
+                          <tr key={item.attendanceId || item.personId || idx}>
+                            <td className="font-mono tabular-nums whitespace-nowrap">
+                              {formatThaiDate(item.workDate || item.work_date)}
+                            </td>
+                            <td>
+                              <div className="font-semibold text-[#292638]">
+                                {item.fullName || item.full_name || item.personId || item.person_id}
+                              </div>
+                              <div className="text-[11.5px] font-mono text-[#777287]">
+                                {item.personId || item.person_id}
+                              </div>
+                            </td>
+                            <td className="font-mono tabular-nums whitespace-nowrap text-[#777287]">
+                              {String(item.checkInTime || item.check_in_time || '—').slice(11, 16) || '—'} –{' '}
+                              {String(item.checkOutTime || item.check_out_time || '—').slice(11, 16) || '—'}
+                            </td>
+                            <td className="text-right whitespace-nowrap">
+                              <StatusBadge tone="success" compact>
+                                {item.status || 'พร้อมส่ง'}
+                              </StatusBadge>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {previewBatch.validItems.length > 50 && (
+                      <div className="px-4 py-2 text-[12px] text-[#777287] bg-[#F8F7FC] border-t border-[#E8E4EF]">
+                        แสดง 50 รายการแรกจากทั้งหมด {previewBatch.validItems.length} รายการ (กดปุ่ม &ldquo;ดู JSON Payload&rdquo; เพื่อดูทั้งหมด)
                       </div>
-                    ))}
+                    )}
                   </div>
                 )}
+              </div>
+
+              <div className="his-surface overflow-hidden flex flex-col">
+                <div className="px-5 py-4 border-b border-[#E8E4EF]">
+                  <SectionHeader
+                    title={`รายการที่ไม่พร้อมส่งและเหตุผล (${previewBatch.invalidCount} รายการ)`}
+                  />
+                </div>
+                <div className="p-5 flex-1">
+                  {previewBatch.invalidItems?.length === 0 ? (
+                    <div className="p-4 rounded-xl bg-[#EEF8F4] border border-[#198568]/20 text-[13.5px] text-[#198568] font-medium">
+                      ข้อมูลทุกรายการผ่านเกณฑ์ความสมบูรณ์ พร้อมสำหรับการส่งกลับ HOSOffice
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-[#E8E4EF] text-[13.5px] max-h-72 overflow-y-auto -my-2">
+                      {previewBatch.invalidItems?.map((inv: any) => (
+                        <div key={inv.attendanceId} className="py-3">
+                          <div className="font-semibold text-[#292638]">
+                            เวร #{inv.attendanceId} · {inv.fullName} ({inv.personId}) —{' '}
+                            {formatThaiDate(inv.workDate)}
+                          </div>
+                          <div className="text-[#C74455] text-[13px] mt-0.5">{inv.reason}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
@@ -529,56 +597,73 @@ export function ReportsView({
           {loading ? (
             <TableLoadingSkeleton rows={4} cols={6} />
           ) : (
-            <div className="overflow-x-auto">
-              <table className="his-table">
-                <thead>
-                  <tr>
-                    <th>รหัสอ้างอิงชุดข้อมูล</th>
-                    <th>โหมดการทำงาน</th>
-                    <th>ช่วงวันที่ข้อมูล</th>
-                    <th className="text-right">ทั้งหมด / ผ่าน / ไม่ผ่าน</th>
-                    <th>สถานะ</th>
-                    <th>ผู้ดำเนินการ · วันเวลา</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {!pushHistoryData?.items || pushHistoryData.items.length === 0 ? (
-                    <TableEmptyState colSpan={6} title="ยังไม่มีประวัติการสร้างชุดข้อมูลส่งกลับ HOSOffice" />
-                  ) : (
-                    pushHistoryData.items.map((p: any) => (
-                      <tr key={p.id}>
-                        <td className="font-mono font-semibold text-[#292638]">{p.idempotency_key}</td>
-                        <td className="font-mono text-[#777287]">{p.push_mode}</td>
-                        <td className="font-mono tabular-nums">
-                          {formatThaiDate(p.date_from)} ถึง {formatThaiDate(p.date_to)}
-                        </td>
-                        <td className="text-right font-mono tabular-nums">
-                          {p.total_records} /{' '}
-                          <span className="text-[#198568] font-bold">{p.valid_records}</span> /{' '}
-                          <span className="text-[#C74455] font-bold">{p.invalid_records}</span>
-                        </td>
-                        <td>
-                          <StatusBadge
-                            tone={
-                              p.status === 'SUCCESS' || p.status === 'PUSHED'
-                                ? 'success'
-                                : p.status === 'FAILED'
-                                  ? 'danger'
-                                  : 'brand'
-                            }
-                            label={p.status}
-                            compact
-                          />
-                        </td>
-                        <td className="font-mono tabular-nums text-[#777287]">
-                          {p.initiated_by} · {formatThaiDateTime(p.created_at)}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <>
+              <div className="overflow-x-auto">
+                <table className="his-table">
+                  <thead>
+                    <tr>
+                      <th>รหัสอ้างอิงชุดข้อมูล</th>
+                      <th>โหมดการทำงาน</th>
+                      <th>ช่วงวันที่ข้อมูล</th>
+                      <th className="text-right">ทั้งหมด / ผ่าน / ไม่ผ่าน</th>
+                      <th>สถานะ</th>
+                      <th>ผู้ดำเนินการ · วันเวลา</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {!pushHistoryData?.items || pushHistoryData.items.length === 0 ? (
+                      <TableEmptyState colSpan={6} title="ยังไม่มีประวัติการสร้างชุดข้อมูลส่งกลับ HOSOffice" />
+                    ) : (
+                      (pushPageSize === 'ALL'
+                        ? pushHistoryData.items
+                        : pushHistoryData.items.slice(
+                            (pushPage - 1) * pushPageSize,
+                            pushPage * pushPageSize
+                          )
+                      ).map((p: any) => (
+                        <tr key={p.id}>
+                          <td className="font-mono font-semibold text-[#292638]">{p.idempotency_key}</td>
+                          <td className="text-[#292638] font-medium whitespace-nowrap">
+                            {formatPushModeLabel(p.push_mode)}
+                          </td>
+                          <td className="font-mono tabular-nums whitespace-nowrap">
+                            {formatThaiDate(p.date_from)} ถึง {formatThaiDate(p.date_to)}
+                          </td>
+                          <td className="text-right font-mono tabular-nums whitespace-nowrap">
+                            {p.total_records} /{' '}
+                            <span className="text-[#198568] font-bold">{p.valid_records}</span> /{' '}
+                            <span className="text-[#C74455] font-bold">{p.invalid_records}</span>
+                          </td>
+                          <td>
+                            <StatusBadge
+                              tone={
+                                p.status === 'SUCCESS' || p.status === 'PUSHED'
+                                  ? 'success'
+                                  : p.status === 'FAILED'
+                                    ? 'danger'
+                                    : 'brand'
+                              }
+                              label={formatPushStatusLabel(p.status)}
+                              compact
+                            />
+                          </td>
+                          <td className="font-mono tabular-nums text-[#777287] whitespace-nowrap">
+                            {p.initiated_by} · {formatThaiDateTime(p.created_at)}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <TablePaginationBar
+                totalItems={pushHistoryData?.items?.length || 0}
+                currentPage={pushPage}
+                pageSize={pushPageSize}
+                onPageChange={setPushPage}
+                onPageSizeChange={setPushPageSize}
+              />
+            </>
           )}
         </div>
 
@@ -749,65 +834,62 @@ export function ReportsView({
                 ))}
               </select>
             )}
-
-            <button
-              type="button"
-              onClick={() => setSortDir((d) => (d === 'DESC' ? 'ASC' : 'DESC'))}
-              className="ent-btn-secondary w-full sm:w-auto"
-              title="สลับลำดับการจัดเรียง"
-            >
-              <ArrowUpDown className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
-              <span>{sortDir === 'DESC' ? 'เรียง: มาก → น้อย' : 'เรียง: น้อย → มาก'}</span>
-            </button>
           </>
         }
       />
 
       <ErrorBanner error={error} onRetry={loadData} />
-      <NotificationBanner message={notice} onClose={() => setNotice(null)} />
 
-      {/* Unified Single-Elevation KPI Strip */}
+      {/* Unified Single-Elevation KPI Strip + Explicit Calculation Formula */}
       {kpi && (
-        <MetricStrip
-          columns={4}
-          items={[
-            {
-              id: 'late-people',
-              label: 'บุคลากรที่มาสาย (ไม่ซ้ำคน)',
-              value: kpi.latePeople,
-              unit: 'คน',
-              sublabel: `เฉลี่ย ${kpi.avgLateMinutesPerLatePerson} นาที/คน`,
-              tone: 'warning',
-              icon: <Users className="w-4 h-4 text-[#B87516]" />,
-            },
-            {
-              id: 'late-occ',
-              label: 'จำนวนครั้งที่มาสายรวม',
-              value: kpi.lateOccurrences,
-              unit: 'ครั้ง',
-              sublabel: `จากเวรปฏิบัติงานทั้งหมด ${kpi.totalShifts} เวร`,
-              tone: 'default',
-              icon: <Clock className="w-4 h-4 text-[#8066B5]" />,
-            },
-            {
-              id: 'late-mins',
-              label: 'นาทีสายสะสมรวมทั้งองค์กร',
-              value: kpi.totalLateMinutes,
-              unit: 'นาที',
-              sublabel: 'คำนวณหลังหักเวลาผ่อนผันตามกะแล้ว',
-              tone: 'default',
-              icon: <BarChart3 className="w-4 h-4 text-[#8066B5]" />,
-            },
-            {
-              id: 'late-avg',
-              label: 'ค่าเฉลี่ยนาทีสายต่อครั้ง',
-              value: kpi.avgLateMinutesPerOccurrence,
-              unit: 'นาที/ครั้ง',
-              sublabel: 'นาทีสายรวม ÷ จำนวนครั้งที่สาย',
-              tone: 'brand',
-            },
-          ]}
-        />
+        <div className="space-y-2.5">
+          <MetricStrip
+            columns={4}
+            items={[
+              {
+                id: 'late-people',
+                label: 'จำนวนคนที่มาสาย (ไม่ซ้ำคน)',
+                value: kpi.latePeople,
+                unit: 'คน',
+                sublabel: `เฉลี่ย ${kpi.avgLateMinutesPerLatePerson} นาที/คน`,
+                tone: 'warning',
+                icon: <Users className="w-4 h-4 text-[#B87516]" />,
+              },
+              {
+                id: 'late-occ',
+                label: 'จำนวนครั้งที่มาสายรวม',
+                value: kpi.lateOccurrences,
+                unit: 'ครั้ง',
+                sublabel: `จากเวรปฏิบัติงานทั้งหมด ${kpi.totalShifts} เวร`,
+                tone: 'default',
+                icon: <Clock className="w-4 h-4 text-[#8066B5]" />,
+              },
+              {
+                id: 'late-mins',
+                label: 'นาทีสายสะสมรวม',
+                value: kpi.totalLateMinutes,
+                unit: 'นาที',
+                sublabel: 'นับหลังหักเวลาผ่อนผันของแต่ละกะ',
+                tone: 'default',
+                icon: <BarChart3 className="w-4 h-4 text-[#8066B5]" />,
+              },
+              {
+                id: 'late-avg',
+                label: 'ค่าเฉลี่ยนาทีสายต่อครั้ง',
+                value: kpi.avgLateMinutesPerOccurrence,
+                unit: 'นาที/ครั้ง',
+                sublabel: 'นาทีสายรวม ÷ จำนวนครั้งที่สาย',
+                tone: 'brand',
+              },
+            ]}
+          />
+          <div className="flex items-start sm:items-center gap-2 px-3.5 py-2 rounded-lg bg-[#F1ECFA]/60 border border-[#E8E4EF] text-[12.5px] text-[#4E3978]">
+            <Info className="w-4 h-4 text-[#8066B5] shrink-0 mt-0.5 sm:mt-0" aria-hidden="true" />
+            <span>
+              <strong>วิธีคำนวณค่าเฉลี่ย:</strong> เฉลี่ยต่อครั้ง = นาทีสายรวม ({kpi.totalLateMinutes}) ÷ จำนวนครั้งที่มาสาย ({kpi.lateOccurrences}) · เฉลี่ยต่อคน = นาทีสายรวม ({kpi.totalLateMinutes}) ÷ จำนวนคนที่มาสายไม่ซ้ำคน ({kpi.latePeople})
+            </span>
+          </div>
+        </div>
       )}
 
       {deptBreakdown.length > 0 && (

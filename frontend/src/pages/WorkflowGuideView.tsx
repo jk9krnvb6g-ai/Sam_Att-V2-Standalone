@@ -356,7 +356,7 @@ export function WorkflowGuideView({
 
           <div className="p-5 sm:p-6 lg:p-7 grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-8">
             <div className="lg:col-span-2">
-              <ol className="relative space-y-5">
+              <ol className="relative divide-y divide-[#F1ECFA]">
                 {selectedCategory.steps.map((step, idx) => {
                   const isLast = idx === selectedCategory.steps.length - 1;
                   const meta = DEPENDENCY_TYPE_META[step.dependencyType];
@@ -366,32 +366,33 @@ export function WorkflowGuideView({
                   const isHighlighted = highlightedStepId === step.id;
 
                   return (
-                    <li key={step.id} className="relative pl-12 sm:pl-14">
+                    <li
+                      key={step.id}
+                      className={`relative pl-12 sm:pl-14 py-5 first:pt-1 last:pb-1 transition-colors ${
+                        isHighlighted ? 'bg-[#F8F7FC] -mx-3 px-3 pl-15 sm:pl-17 rounded-xl' : ''
+                      }`}
+                    >
                       {!isLast && (
                         <span
                           aria-hidden="true"
-                          className="absolute left-[18px] sm:left-[20px] top-10 bottom-[-24px] w-[2px] bg-[#E9DFF5]"
+                          className={`absolute top-11 bottom-0 w-[2px] bg-[#E9DFF5] ${
+                            isHighlighted ? 'left-[30px] sm:left-[32px]' : 'left-[18px] sm:left-[20px]'
+                          }`}
                         />
                       )}
 
                       <span
                         aria-hidden="true"
-                        className={`absolute left-0 top-1 w-9 h-9 sm:w-10 sm:h-10 rounded-full font-mono text-[14px] font-bold flex items-center justify-center tabular-nums border-2 ${
+                        className={`absolute top-5 first:top-1 w-9 h-9 sm:w-10 sm:h-10 rounded-full font-mono text-[14px] font-bold flex items-center justify-center tabular-nums border-2 ${
                           isHighlighted
-                            ? 'bg-[#8066B5] text-white border-[#8066B5]'
-                            : 'bg-[#E9DFF5] text-[#4E3978] border-white ring-1 ring-[#E8E4EF]'
+                            ? 'left-3 bg-[#8066B5] text-white border-[#8066B5]'
+                            : 'left-0 bg-[#E9DFF5] text-[#4E3978] border-white ring-1 ring-[#E8E4EF]'
                         }`}
                       >
                         {step.stepNumber}
                       </span>
 
-                      <div
-                        className={`rounded-xl border p-4 sm:p-5 space-y-3.5 transition-colors ${
-                          isHighlighted
-                            ? 'bg-[#F8F7FC] border-[#8066B5]'
-                            : 'bg-white border-[#E8E4EF]'
-                        }`}
-                      >
+                      <div className="space-y-3.5">
                         <div className="space-y-1.5">
                           <div className="flex flex-wrap items-center gap-2 text-[12.5px]">
                             <span className={`font-bold ${meta.textColor}`}>{meta.label}</span>
@@ -399,7 +400,6 @@ export function WorkflowGuideView({
                             <span className="text-[#777287]">{step.frequencyHint}</span>
                             <StatusBadge
                               tone={step.readinessStatus === 'READY' ? 'success' : 'warning'}
-                              dot
                             >
                               {step.readinessLabel}
                             </StatusBadge>
@@ -413,7 +413,7 @@ export function WorkflowGuideView({
                           </p>
                         </div>
 
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-3 border-t border-[#F1ECFA] text-[13px]">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2.5 text-[13px]">
                           <div>
                             <div className="font-semibold text-[#4E3978]">
                               บทบาทผู้ใช้งานที่เกี่ยวข้อง
@@ -438,7 +438,7 @@ export function WorkflowGuideView({
                           </div>
                         </div>
 
-                        <div className="pt-2 border-t border-[#F1ECFA]">
+                        <div>
                           <button
                             type="button"
                             aria-expanded={isChecklistOpen}
@@ -464,7 +464,7 @@ export function WorkflowGuideView({
                           </button>
 
                           {isChecklistOpen && (
-                            <ol className="mt-2.5 space-y-1.5 pl-4 list-decimal text-[13px] text-[#292638] bg-[#F8F7FC] border border-[#E8E4EF] rounded-xl p-3.5">
+                            <ol className="mt-2.5 space-y-1.5 pl-5 list-decimal text-[13px] text-[#292638] bg-[#F8F7FC] rounded-lg p-3.5">
                               {linkedGuide.steps.map((sub, sIdx) => (
                                 <li key={sIdx} className="leading-relaxed">
                                   <span className="font-semibold">{sub.title}:</span>{' '}
@@ -475,7 +475,7 @@ export function WorkflowGuideView({
                           )}
                         </div>
 
-                        <div className="pt-2 flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2.5">
+                        <div className="pt-1 flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2.5">
                           {canAccess ? (
                             <button
                               type="button"
@@ -486,7 +486,7 @@ export function WorkflowGuideView({
                               <ArrowRight className="w-4 h-4 shrink-0" aria-hidden="true" />
                             </button>
                           ) : (
-                            <div className="px-3.5 py-2 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] text-[13px] text-[#777287] inline-flex items-center gap-2">
+                            <div className="px-3.5 py-2 rounded-lg bg-[#F8F7FC] text-[13px] text-[#777287] inline-flex items-center gap-2">
                               <Lock className="w-4 h-4 shrink-0" aria-hidden="true" />
                               <span>จำกัดสิทธิ์เฉพาะ {step.roleLabel}</span>
                             </div>
@@ -508,8 +508,8 @@ export function WorkflowGuideView({
               </ol>
             </div>
 
-            <aside className="space-y-4">
-              <div className="rounded-xl bg-[#FEF7EA] border border-[#F2DCBA] p-4 sm:p-5 space-y-3">
+            <aside className="space-y-4 lg:border-l lg:border-[#E8E4EF] lg:pl-7">
+              <div className="rounded-xl bg-[#FEF7EA]/75 border border-[#F2DCBA] p-4 sm:p-5 space-y-3">
                 <div className="flex items-center gap-2 text-[#B87516]">
                   <AlertTriangle className="w-5 h-5 shrink-0" aria-hidden="true" />
                   <h3 className="text-[15px] font-bold">จุดที่ต้องระวังในสายงานนี้</h3>
@@ -521,7 +521,7 @@ export function WorkflowGuideView({
                 </ul>
               </div>
 
-              <div className="rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] p-4 sm:p-5 space-y-2">
+              <div className="pt-3 border-t border-[#E8E4EF] space-y-2">
                 <div className="flex items-center gap-2 text-[#4E3978]">
                   <Info className="w-4 h-4 text-[#8066B5] shrink-0" aria-hidden="true" />
                   <h3 className="text-[14.5px] font-bold">วิธีใช้งานร่วมกับคู่มือประจำหน้า</h3>

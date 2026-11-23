@@ -3,26 +3,23 @@
  * หน้าต่าง Modal Popup สำหรับเพิ่มและแก้ไขแม่แบบกะทำงาน (Unified Shift Template Modal)
  * ไฟล์: frontend/src/components/shifts/ShiftTemplateModal.tsx
  * ============================================================================
- * รองรับทั้งโหมดสร้างแม่แบบกะใหม่ (Create) และแก้ไขแม่แบบกะเดิม (Edit) ใน Modal เดียวกัน:
+ * หน้าที่เฉพาะของฟอร์มแม่แบบกะทำงาน:
+ * - จัดการ 7 ข้อมูลหลัก: ชื่อแม่แบบกะ, รหัสกะ, หมวดหมู่กะ, เวลาเริ่มงาน, เวลาเลิกงาน,
+ *   เวลาผ่อนผันการมาสาย, เวลาตัดรอบสแกน (และสถานะเปิดใช้งานในโหมดแก้ไข)
+ * - ไม่มี Checkbox หรือ Toggle สำหรับกำหนด Default Shift ในหน้านี้
+ *   (การกำหนดกะเริ่มต้นจัดการจุดเดียวในตาราง "กะเริ่มต้นตามประเภทบุคลากร")
  * - ความกว้างเหมาะสม 780px บน Desktop และปรับสัดส่วน Responsive บนมือถือ
- * - ปิดด้วยปุ่ม X, ปุ่มยกเลิก, คลิกพื้นหลัง หรือปุ่ม ESC พร้อมเตือนยืนยันเมื่อมีข้อมูลค้างยังไม่บันทึก
- * - ป้องกันการกดบันทึกซ้ำ (Disable ปุ่มและล็อกระหว่างกำลังส่งคำขอไปยัง API)
- * - ตรวจสอบ Required Fields และรูปแบบเวลา พร้อมข้อความผิดพลาดระดับฟิลด์ชัดเจน
- * - หากบันทึกล้มเหลว Modal จะไม่ปิดและคงค่าที่ผู้ใช้กรอกไว้ทั้งหมด
- * - รักษากฎ Default Shift Governance ครบถ้วนทั้งฝั่ง Create และ Edit
+ * - รองรับปิดด้วยปุ่ม X, ยกเลิก, คลิกพื้นหลัง หรือ ESC พร้อมยืนยันเมื่อมีข้อมูลค้าง
+ * - ล็อกปุ่มระหว่างบันทึก ป้องกันการกดซ้ำ และคงข้อมูลไว้ครบถ้วนหากบันทึกล้มเหลว
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle,
-  ArrowRightLeft,
   Clock,
+  Info,
   Loader2,
-  Lock,
   Moon,
   Plus,
   Save,
-  ShieldCheck,
-  Star,
   Sun,
 } from 'lucide-react';
 import { apiRequest, ApiClientError } from '../../services/api.ts';
@@ -38,7 +35,6 @@ import {
   isShiftTemplateFormDirty,
   mapShiftTemplateApiErrorToFields,
   validateShiftTemplateForm,
-  type ActiveDefaultBindingInfo,
   type ShiftTemplateFieldErrors,
   type ShiftTemplateFieldKey,
   type ShiftTemplateFormValues,
@@ -49,17 +45,13 @@ export interface ShiftTemplateModalProps {
   open: boolean;
   mode: ShiftTemplateModalMode;
   initialShift: any | null;
-  personnelTypeRules: any[];
-  defaultBindingByTypeCode: Map<string, ActiveDefaultBindingInfo>;
   onClose: () => void;
   onSaved: (summary: {
     mode: ShiftTemplateModalMode;
     shiftName: string;
     shiftCode: string;
-    isDefaultBound: boolean;
   }) => void;
   onErrorToast: (err: { message: string; detail?: string; requestId?: string }) => void;
-  onRequestChangeDefault: (options: { scopeCode?: string; shiftId?: number }) => void;
 }
 
 const INPUT_BASE_CLASS =
@@ -77,12 +69,9 @@ export function ShiftTemplateModal({
   open,
   mode,
   initialShift,
-  personnelTypeRules,
-  defaultBindingByTypeCode,
   onClose,
   onSaved,
   onErrorToast,
-  onRequestChangeDefault,
 }: ShiftTemplateModalProps) {
   const [initialValues, setInitialValues] = useState<ShiftTemplateFormValues>(() =>
     createInitialShiftTemplateFormValues(mode, initialShift)
@@ -98,19 +87,13 @@ export function ShiftTemplateModal({
   } | null>(null);
   const [saving, setSaving] = useState(false);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
-  const [pendingSwitchDefaultAction, setPendingSwitchDefaultAction] = useState<{
-    scopeCode?: string;
-    shiftId?: number;
-  } | null>(null);
 
   const submittingRef = useRef(false);
   const nameInputRef = useRef<HTMLInputElement | null>(null);
 
-  // รีเซ็ตค่าฟอร์มเฉพาะตอนเปิดหน้าต่างใหม่หรือสลับโหมด/แม่แบบกะเป้าหมาย
   useEffect(() => {
     if (!open) {
       setDiscardConfirmOpen(false);
-      setPendingSwitchDefaultAction(null);
       return;
     }
     const nextInit = createInitialShiftTemplateFormValues(mode, initialShift);
@@ -119,7 +102,6 @@ export function ShiftTemplateModal({
     setFieldErrors({});
     setSubmitError(null);
     setDiscardConfirmOpen(false);
-    setPendingSwitchDefaultAction(null);
 
     const focusTimer = window.setTimeout(() => {
       nameInputRef.current?.focus();
@@ -137,24 +119,16 @@ export function ShiftTemplateModal({
     return values.endTime <= values.startTime;
   }, [values.startTime, values.endTime]);
 
-  const selectedCreateScopeNorm = String(values.createDefaultScopeCode || '')
-    .trim()
-    .toUpperCase();
-  const selectedCreateScopeExistingDefault = selectedCreateScopeNorm
-    ? defaultBindingByTypeCode.get(selectedCreateScopeNorm) || null
-    : null;
-
-  const existingBoundCodesInEdit = useMemo(() => {
+  const referencedPersonnelTypes = useMemo(() => {
     if (mode !== 'edit' || !initialShift || !Array.isArray(initialShift.default_personnel_types)) {
-      return [] as string[];
+      return [] as Array<{ code: string; name: string }>;
     }
     return initialShift.default_personnel_types
-      .map((d: any) =>
-        String(d.personnelTypeCode || d.personnel_type_code || '')
-          .trim()
-          .toUpperCase()
-      )
-      .filter(Boolean);
+      .map((d: any) => ({
+        code: String(d.personnelTypeCode || d.personnel_type_code || '').trim().toUpperCase(),
+        name: String(d.personnelTypeName || d.personnel_type_name || d.personnelTypeCode || '').trim(),
+      }))
+      .filter((d: { code: string; name: string }) => Boolean(d.code));
   }, [mode, initialShift]);
 
   function updateField<K extends keyof ShiftTemplateFormValues>(
@@ -175,68 +149,25 @@ export function ShiftTemplateModal({
     }
   }
 
-  function toggleEditDefaultScope(code: string) {
-    const norm = String(code || '').trim().toUpperCase();
-    setValues((prev) => {
-      const exists = prev.editSelectedDefaultScopes.includes(norm);
-      return {
-        ...prev,
-        editSelectedDefaultScopes: exists
-          ? prev.editSelectedDefaultScopes.filter((c) => c !== norm)
-          : [...prev.editSelectedDefaultScopes, norm],
-      };
-    });
-    if (fieldErrors.defaultShift) {
-      setFieldErrors((prev) => {
-        const copy = { ...prev };
-        delete copy.defaultShift;
-        return copy;
-      });
-    }
-  }
-
   function handleRequestClose() {
     if (saving || submittingRef.current) return;
     if (isDirty) {
-      setPendingSwitchDefaultAction(null);
       setDiscardConfirmOpen(true);
       return;
     }
     onClose();
-  }
-
-  function handleRequestSwitchToChangeDefault(options: { scopeCode?: string; shiftId?: number }) {
-    if (saving || submittingRef.current) return;
-    if (isDirty) {
-      setPendingSwitchDefaultAction(options);
-      setDiscardConfirmOpen(true);
-      return;
-    }
-    onClose();
-    onRequestChangeDefault(options);
   }
 
   function handleConfirmDiscard() {
-    const nextAction = pendingSwitchDefaultAction;
     setDiscardConfirmOpen(false);
-    setPendingSwitchDefaultAction(null);
     onClose();
-    if (nextAction) {
-      onRequestChangeDefault(nextAction);
-    }
   }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (saving || submittingRef.current) return;
 
-    const validation = validateShiftTemplateForm(
-      values,
-      mode,
-      defaultBindingByTypeCode,
-      mode === 'edit' ? Number(initialShift?.id) : null
-    );
-
+    const validation = validateShiftTemplateForm(values, mode);
     if (!validation.valid) {
       setFieldErrors(validation.fieldErrors);
       setSubmitError({
@@ -257,9 +188,6 @@ export function ShiftTemplateModal({
 
     try {
       if (mode === 'create') {
-        const bindDefault = Boolean(
-          values.createIsDefault && selectedCreateScopeNorm && !selectedCreateScopeExistingDefault
-        );
         await apiRequest('/shifts', {
           method: 'POST',
           body: JSON.stringify({
@@ -270,24 +198,17 @@ export function ShiftTemplateModal({
             endTime: values.endTime,
             graceMinutes: Number(values.graceMinutes),
             cutoffTime: values.cutoffTime,
-            isDefault: bindDefault,
-            defaultPersonnelTypeCodes: bindDefault ? [selectedCreateScopeNorm] : [],
-            defaultReason: values.defaultReason.trim() || undefined,
           }),
         });
         onSaved({
           mode: 'create',
           shiftName: cleanedName,
           shiftCode: trimmedCode,
-          isDefaultBound: bindDefault,
         });
       } else {
         if (!initialShift?.id) {
           throw new Error('ไม่พบรหัสแม่แบบกะที่ต้องการแก้ไข');
         }
-        const newlyAddedScopes = values.editSelectedDefaultScopes.filter(
-          (code) => !existingBoundCodesInEdit.includes(code)
-        );
         await apiRequest(`/shifts/${initialShift.id}`, {
           method: 'PUT',
           body: JSON.stringify({
@@ -299,16 +220,12 @@ export function ShiftTemplateModal({
             graceMinutes: Number(values.graceMinutes),
             cutoffTime: values.cutoffTime,
             isActive: values.isActive,
-            isDefault: newlyAddedScopes.length > 0,
-            defaultPersonnelTypeCodes: newlyAddedScopes,
-            defaultReason: values.defaultReason.trim() || undefined,
           }),
         });
         onSaved({
           mode: 'edit',
           shiftName: cleanedName,
           shiftCode: trimmedCode,
-          isDefaultBound: newlyAddedScopes.length > 0,
         });
       }
     } catch (err) {
@@ -426,7 +343,7 @@ export function ShiftTemplateModal({
           {/* แถบสรุปประเภทเวลาและคำแนะนำด้านบน */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] px-3.5 py-2.5">
             <p className="text-[12.5px] text-[#5D576E] leading-relaxed">
-              ระบุชื่อกะโดยไม่ต้องพิมพ์วงเล็บเวลาต่อท้าย ระบบจะแสดงเวลาเริ่ม–เลิกงานให้อัตโนมัติ
+              แม่แบบกะทำงานหนึ่งรายการสามารถนำไปใช้จัดเวรหรือกำหนดเป็นกะเริ่มต้นได้กับบุคลากรหลายประเภท
             </p>
             <span
               className={`inline-flex items-center gap-1.5 text-[12px] font-semibold px-2.5 py-1 rounded-md border shrink-0 self-start sm:self-center ${
@@ -449,7 +366,7 @@ export function ShiftTemplateModal({
           {/* แถบแจ้งเตือนข้อผิดพลาดระดับฟอร์ม / API */}
           {submitError && <ErrorBanner error={submitError} />}
 
-          {/* ส่วนที่ 1: ข้อมูลพื้นฐานของแม่แบบกะทำงาน */}
+          {/* ข้อมูลแม่แบบกะทำงานและช่วงเวลาปฏิบัติงาน (7 ฟิลด์หลัก) */}
           <div className="space-y-4">
             <div className="text-[13px] font-bold text-[#4E3978] flex items-center gap-1.5">
               <Clock className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
@@ -457,7 +374,7 @@ export function ShiftTemplateModal({
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* ชื่อแม่แบบกะทำงาน */}
+              {/* 1. ชื่อแม่แบบกะทำงาน */}
               <div className="sm:col-span-2">
                 <label
                   htmlFor="stm-shift-name"
@@ -484,7 +401,7 @@ export function ShiftTemplateModal({
                 )}
               </div>
 
-              {/* รหัสกะ */}
+              {/* 2. รหัสกะ */}
               <div>
                 <label
                   htmlFor="stm-shift-code"
@@ -521,7 +438,7 @@ export function ShiftTemplateModal({
                 )}
               </div>
 
-              {/* หมวดหมู่กะ */}
+              {/* 3. หมวดหมู่กะ */}
               <div>
                 <label
                   htmlFor="stm-shift-category"
@@ -551,7 +468,7 @@ export function ShiftTemplateModal({
                 )}
               </div>
 
-              {/* เวลาเริ่มงาน */}
+              {/* 4. เวลาเริ่มงาน */}
               <div>
                 <label
                   htmlFor="stm-start-time"
@@ -575,7 +492,7 @@ export function ShiftTemplateModal({
                 )}
               </div>
 
-              {/* เวลาเลิกงาน */}
+              {/* 5. เวลาเลิกงาน */}
               <div>
                 <label
                   htmlFor="stm-end-time"
@@ -599,7 +516,7 @@ export function ShiftTemplateModal({
                 )}
               </div>
 
-              {/* เวลาผ่อนผันการมาสาย */}
+              {/* 6. เวลาผ่อนผันการมาสาย */}
               <div>
                 <label
                   htmlFor="stm-grace-minutes"
@@ -633,7 +550,7 @@ export function ShiftTemplateModal({
                 )}
               </div>
 
-              {/* เวลาตัดรอบสแกน */}
+              {/* 7. เวลาตัดรอบสแกน */}
               <div>
                 <label
                   htmlFor="stm-cutoff-time"
@@ -661,7 +578,7 @@ export function ShiftTemplateModal({
 
           {/* สถานะเปิดใช้งาน (แสดงเฉพาะโหมดแก้ไข) */}
           {mode === 'edit' && (
-            <div className="space-y-1">
+            <div className="space-y-2.5">
               <label
                 className={`flex items-start gap-2.5 p-3 rounded-lg border transition-colors ${
                   fieldErrors.isActive
@@ -678,9 +595,13 @@ export function ShiftTemplateModal({
                 />
                 <div className="text-[13px] leading-snug">
                   <span className="font-semibold text-[#292638]">เปิดใช้งานแม่แบบกะนี้</span>
-                  {Number(initialShift?.is_default ?? 0) === 1 && !values.isActive && (
+                  {referencedPersonnelTypes.length > 0 && !values.isActive && (
                     <p className="text-[12px] text-amber-800 font-medium mt-0.5">
-                      หมายเหตุ: แม่แบบนี้ถูกใช้เป็นกะเริ่มต้นอยู่ ระบบจะไม่อนุญาตให้ปิดใช้งานจนกว่าจะเปลี่ยนหรือยกเลิกกะเริ่มต้นก่อน
+                      หมายเหตุ: แม่แบบนี้ถูกใช้เป็นกะเริ่มต้นของ{' '}
+                      {referencedPersonnelTypes
+                        .map((r: { code: string; name: string }) => r.name)
+                        .join(', ')}{' '}
+                      กรุณาเปลี่ยนกะเริ่มต้นของประเภทบุคลากรดังกล่าวก่อนปิดใช้งาน
                     </p>
                   )}
                 </div>
@@ -693,313 +614,43 @@ export function ShiftTemplateModal({
             </div>
           )}
 
-          {/* ส่วนที่ 2: การใช้งานเป็นกะเริ่มต้น (Default Shift Governance) */}
-          <div
-            className={`rounded-xl border p-4 space-y-3.5 ${
-              fieldErrors.defaultShift
-                ? 'border-[#C74455] bg-[#FFFBFB]'
-                : 'border-[#D8D1E6] bg-[#F8F7FC]'
-            }`}
-          >
-            <div>
-              <h3 className="text-[14px] font-bold text-[#292638] flex items-center gap-1.5">
-                <Star className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
-                <span>การใช้งานเป็นกะเริ่มต้น (Default Shift)</span>
-              </h3>
-              <p className="text-[12px] text-[#777287] mt-0.5 leading-relaxed">
-                {mode === 'create'
-                  ? 'กะเริ่มต้นจะถูกใช้โดยอัตโนมัติสำหรับบุคลากรในประเภทที่กำหนดในวันที่ไม่ได้จัดเวรรายวัน (มีได้เพียง 1 กะเริ่มต้นต่อ 1 ประเภทบุคลากร)'
-                  : 'สามารถกำหนดเป็นกะเริ่มต้นได้เฉพาะประเภทบุคลากรที่ยังไม่มีกะเริ่มต้น หากประเภทใดมีกะเริ่มต้นอื่นอยู่แล้ว ระบบจะป้องกันการกำหนดซ้ำและแสดงชื่อกะเริ่มต้นปัจจุบัน'}
-              </p>
+          {/* ข้อมูลอ้างอิงการกำหนดกะเริ่มต้น (อ่านอย่างเดียว ไม่มีการตั้งค่าซ้ำซ้อน) */}
+          <div className="rounded-lg border border-[#E8E4EF] bg-[#FAF9FD] px-3.5 py-2.5 flex items-start gap-2.5 text-[12.5px] text-[#5D576E]">
+            <Info className="w-4 h-4 text-[#8066B5] shrink-0 mt-0.5" aria-hidden="true" />
+            <div className="leading-relaxed">
+              {mode === 'edit' && referencedPersonnelTypes.length > 0 ? (
+                <span>
+                  แม่แบบกะนี้กำลังถูกใช้เป็นกะเริ่มต้นของ:{' '}
+                  <strong className="text-[#292638]">
+                    {referencedPersonnelTypes
+                      .map((r: { code: string; name: string }) => r.name)
+                      .join(', ')}
+                  </strong>{' '}
+                  · หากต้องการเปลี่ยนกะเริ่มต้น ให้แก้ไขที่หัวข้อ{' '}
+                  <strong className="text-[#4E3978]">“กะเริ่มต้นตามประเภทบุคลากร”</strong>
+                </span>
+              ) : (
+                <span>
+                  การกำหนดกะเริ่มต้นและวันทำงานจะตั้งค่าจุดเดียวที่หัวข้อ{' '}
+                  <strong className="text-[#4E3978]">“กะเริ่มต้นตามประเภทบุคลากร”</strong>{' '}
+                  เพื่อป้องกันการตั้งค่าซ้ำซ้อน
+                </span>
+              )}
             </div>
-
-            {mode === 'create' ? (
-              <>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5 items-start">
-                  <div>
-                    <label
-                      htmlFor="stm-create-default-scope"
-                      className="block text-[12.5px] font-semibold text-[#292638] mb-1.5"
-                    >
-                      ขอบเขตประเภทบุคลากรสำหรับกำหนดกะเริ่มต้น
-                    </label>
-                    <select
-                      id="stm-create-default-scope"
-                      disabled={saving}
-                      value={values.createDefaultScopeCode}
-                      onChange={(e) => {
-                        const nextCode = e.target.value;
-                        const existing = defaultBindingByTypeCode.get(
-                          String(nextCode || '').trim().toUpperCase()
-                        );
-                        setValues((prev) => ({
-                          ...prev,
-                          createDefaultScopeCode: nextCode,
-                          createIsDefault: !nextCode || existing ? false : prev.createIsDefault,
-                        }));
-                        if (fieldErrors.defaultShift) {
-                          setFieldErrors((prev) => {
-                            const copy = { ...prev };
-                            delete copy.defaultShift;
-                            return copy;
-                          });
-                        }
-                      }}
-                      className="w-full h-10 px-3 rounded-lg border border-[#D8D1E6] bg-white text-[13px] text-[#292638] focus:outline-none focus:border-[#8066B5]"
-                    >
-                      <option value="">
-                        -- ไม่ผูกเป็นกะเริ่มต้น (สร้างเป็นแม่แบบกะทั่วไป) --
-                      </option>
-                      {personnelTypeRules.map((rule) => {
-                        const code = String(rule.personnel_type_code || '').trim().toUpperCase();
-                        const binding = defaultBindingByTypeCode.get(code);
-                        return (
-                          <option key={code} value={code}>
-                            {rule.personnel_type_name} ({code}) —{' '}
-                            {binding
-                              ? `มีกะเริ่มต้นแล้ว: ${cleanShiftDisplayName(binding.shiftName)} (${binding.startTime}–${binding.endTime})`
-                              : 'ยังไม่มีกะเริ่มต้น'}
-                          </option>
-                        );
-                      })}
-                    </select>
-                  </div>
-
-                  <div className="pt-0.5 md:pt-6">
-                    <label
-                      className={`flex items-start gap-2.5 p-3 rounded-lg border transition-colors ${
-                        !selectedCreateScopeNorm || Boolean(selectedCreateScopeExistingDefault)
-                          ? 'border-[#E8E4EF] bg-white/75 text-[#777287] cursor-not-allowed'
-                          : values.createIsDefault
-                            ? 'border-[#8066B5] bg-[#F1ECFA]/60 text-[#292638] cursor-pointer'
-                            : 'border-[#D8D1E6] bg-white text-[#292638] cursor-pointer hover:border-[#8066B5]'
-                      }`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={
-                          Boolean(values.createIsDefault) &&
-                          Boolean(selectedCreateScopeNorm) &&
-                          !selectedCreateScopeExistingDefault
-                        }
-                        disabled={
-                          saving ||
-                          !selectedCreateScopeNorm ||
-                          Boolean(selectedCreateScopeExistingDefault)
-                        }
-                        onChange={(e) =>
-                          updateField('createIsDefault', e.target.checked, 'defaultShift')
-                        }
-                        className="mt-0.5 h-4 w-4 rounded border-[#D8D1E6] text-[#8066B5] focus:ring-[#8066B5]"
-                      />
-                      <div className="text-[12.5px] leading-snug">
-                        <div className="font-semibold flex items-center gap-1.5">
-                          <span>กำหนดเป็นกะเริ่มต้น (Default Shift)</span>
-                          {selectedCreateScopeExistingDefault && (
-                            <Lock className="w-3.5 h-3.5 text-amber-700" aria-hidden="true" />
-                          )}
-                        </div>
-                        <div className="text-[11.5px] text-[#777287] mt-0.5">
-                          {!selectedCreateScopeNorm
-                            ? 'เลือกประเภทบุคลากรด้านซ้ายเพื่อตรวจสอบสถานะก่อนเปิดใช้งาน'
-                            : selectedCreateScopeExistingDefault
-                              ? 'ไม่สามารถเลือกซ้ำได้ เนื่องจากประเภทบุคลากรนี้มีกะเริ่มต้นอยู่แล้ว'
-                              : 'ประเภทบุคลากรนี้ยังไม่มีกะเริ่มต้น สามารถกำหนดเป็นกะเริ่มต้นได้ทันที'}
-                        </div>
-                      </div>
-                    </label>
-                  </div>
-                </div>
-
-                {selectedCreateScopeExistingDefault && (
-                  <div className="rounded-lg border border-amber-300 bg-amber-50/90 px-3.5 py-3 text-[12.5px] text-amber-950 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="space-y-1">
-                      <div className="font-bold flex items-center gap-1.5">
-                        <AlertTriangle className="w-4 h-4 text-amber-700 shrink-0" aria-hidden="true" />
-                        <span>
-                          กะเริ่มต้นที่ใช้งานอยู่ปัจจุบัน:{' '}
-                          {cleanShiftDisplayName(selectedCreateScopeExistingDefault.shiftName)} (
-                          <span className="font-mono">
-                            {selectedCreateScopeExistingDefault.shiftCode}
-                          </span>{' '}
-                          · {selectedCreateScopeExistingDefault.startTime}–
-                          {selectedCreateScopeExistingDefault.endTime} น.)
-                        </span>
-                      </div>
-                      <p className="text-amber-900 leading-relaxed">
-                        ระบบป้องกันการกำหนดกะเริ่มต้นซ้ำทั้งหน้าจอ API และฐานข้อมูล หากต้องการเปลี่ยนกะเริ่มต้น ให้สร้างแม่แบบกะนี้ก่อนแล้วใช้เมนู “จัดการ/เปลี่ยนกะเริ่มต้น”
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      disabled={saving}
-                      onClick={() =>
-                        handleRequestSwitchToChangeDefault({
-                          scopeCode: selectedCreateScopeNorm,
-                        })
-                      }
-                      className="h-9 px-3 rounded-lg border border-amber-400 bg-white hover:bg-amber-100 text-amber-950 font-semibold text-[12px] inline-flex items-center gap-1.5 shrink-0"
-                    >
-                      <ArrowRightLeft className="w-3.5 h-3.5" />
-                      <span>เปลี่ยนกะเริ่มต้นของประเภทนี้</span>
-                    </button>
-                  </div>
-                )}
-
-                {selectedCreateScopeNorm &&
-                  !selectedCreateScopeExistingDefault &&
-                  values.createIsDefault && (
-                    <div className="rounded-lg border border-[#8066B5]/40 bg-[#F1ECFA]/60 px-3.5 py-3 space-y-2 text-[12.5px] text-[#292638]">
-                      <div className="font-semibold text-[#4E3978] flex items-center gap-1.5">
-                        <ShieldCheck className="w-4 h-4 text-[#4E3978] shrink-0" aria-hidden="true" />
-                        <span>ผลกระทบเมื่อกำหนดเป็นกะเริ่มต้น</span>
-                      </div>
-                      <p className="text-[#4E3978]/90 leading-relaxed">
-                        บุคลากรในประเภทที่เลือกซึ่งยังไม่ได้รับการจัดเวรรายวันจะใช้กะนี้เป็นกะทำงานอัตโนมัติ โดยไม่แก้ไขหรือลบตารางเวรและข้อมูลสแกนย้อนหลังใด ๆ
-                      </p>
-                      <div>
-                        <label
-                          htmlFor="stm-default-reason"
-                          className="block text-[12px] font-semibold text-[#292638] mb-1"
-                        >
-                          เหตุผลในการกำหนดกะเริ่มต้น (บันทึกใน Audit Log — ไม่บังคับ)
-                        </label>
-                        <input
-                          id="stm-default-reason"
-                          type="text"
-                          disabled={saving}
-                          value={values.defaultReason}
-                          onChange={(e) => updateField('defaultReason', e.target.value)}
-                          placeholder="เช่น กำหนดกะเริ่มต้นสำหรับบุคลากรกลุ่มใหม่ตามประกาศโรงพยาบาล"
-                          className="w-full h-9 px-3 rounded-lg border border-[#D8D1E6] bg-white text-[12.5px] text-[#292638]"
-                        />
-                      </div>
-                    </div>
-                  )}
-              </>
-            ) : (
-              <>
-                <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
-                  {personnelTypeRules.map((rule) => {
-                    const code = String(rule.personnel_type_code || '').trim().toUpperCase();
-                    const binding = defaultBindingByTypeCode.get(code);
-                    const isBoundToThis =
-                      binding && Number(binding.shiftId) === Number(initialShift?.id);
-                    const isBoundToOther =
-                      binding && Number(binding.shiftId) !== Number(initialShift?.id);
-                    const isChecked = values.editSelectedDefaultScopes.includes(code);
-
-                    return (
-                      <div
-                        key={code}
-                        className={`rounded-lg border px-3 py-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
-                          isBoundToThis
-                            ? 'border-[#8066B5]/50 bg-[#F1ECFA]/60'
-                            : isBoundToOther
-                              ? 'border-[#E8E4EF] bg-white/75'
-                              : 'border-[#D8D1E6] bg-white'
-                        }`}
-                      >
-                        <label
-                          className={`flex items-start gap-2.5 ${
-                            isBoundToOther || isBoundToThis || saving
-                              ? 'cursor-not-allowed'
-                              : 'cursor-pointer'
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={isChecked}
-                            disabled={
-                              saving || Boolean(isBoundToOther) || Boolean(isBoundToThis)
-                            }
-                            onChange={() => toggleEditDefaultScope(code)}
-                            className="mt-0.5 h-4 w-4 rounded border-[#D8D1E6] text-[#8066B5]"
-                          />
-                          <div className="text-[12.5px] leading-snug">
-                            <div className="font-semibold text-[#292638] flex items-center gap-1.5 flex-wrap">
-                              <span>{rule.personnel_type_name}</span>
-                              <span className="font-mono text-[11.5px] text-[#777287]">
-                                ({code})
-                              </span>
-                              {isBoundToOther && (
-                                <Lock className="w-3.5 h-3.5 text-amber-700" aria-hidden="true" />
-                              )}
-                            </div>
-                            {isBoundToThis ? (
-                              <div className="text-[12px] text-[#4E3978] font-medium">
-                                กำลังใช้แม่แบบกะนี้เป็นกะเริ่มต้นอยู่ในปัจจุบัน
-                              </div>
-                            ) : isBoundToOther ? (
-                              <div className="text-[12px] text-amber-900">
-                                มีกะเริ่มต้นอยู่แล้ว:{' '}
-                                <strong>{cleanShiftDisplayName(binding.shiftName)}</strong> (
-                                <span className="font-mono">{binding.shiftCode}</span> ·{' '}
-                                {binding.startTime}–{binding.endTime} น.) — ไม่สามารถกำหนดซ้ำได้
-                              </div>
-                            ) : (
-                              <div className="text-[12px] text-emerald-700 font-medium">
-                                ยังไม่มีกะเริ่มต้น — ติ๊กเพื่อกำหนดเป็นกะเริ่มต้น (Default Shift)
-                              </div>
-                            )}
-                          </div>
-                        </label>
-
-                        {isBoundToOther && initialShift?.id && (
-                          <button
-                            type="button"
-                            disabled={saving}
-                            onClick={() =>
-                              handleRequestSwitchToChangeDefault({
-                                scopeCode: code,
-                                shiftId: Number(initialShift.id),
-                              })
-                            }
-                            className="h-8 px-2.5 rounded-md border border-[#D8D1E6] bg-white hover:bg-[#F1ECFA] text-[#4E3978] text-[11.5px] font-semibold inline-flex items-center gap-1 shrink-0 self-start sm:self-center"
-                          >
-                            <ArrowRightLeft className="w-3.5 h-3.5" />
-                            <span>เปลี่ยนมาใช้กะนี้</span>
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                <div className="text-[12px] text-[#4E3978] bg-white border border-[#E8E4EF] rounded-lg px-3 py-2 flex items-start gap-2">
-                  <ShieldCheck
-                    className="w-4 h-4 text-[#8066B5] shrink-0 mt-0.5"
-                    aria-hidden="true"
-                  />
-                  <span>
-                    การแก้ไขแม่แบบกะทำงานจะไม่กระทบตารางเวรรายวันที่เคยจัดไว้ (Snapshot) และไม่แก้ไขข้อมูลสแกนดิบหรือประวัติการลงเวลาย้อนหลัง
-                  </span>
-                </div>
-              </>
-            )}
-
-            {fieldErrors.defaultShift && (
-              <p className="text-[12px] text-[#C74455] font-medium" role="alert">
-                {fieldErrors.defaultShift}
-              </p>
-            )}
           </div>
         </form>
       </SharedModal>
 
-      {/* หน้าต่างยืนยันก่อนปิด Modal เมื่อมีข้อมูลแก้ไขค้างไว้ยังไม่บันทึก */}
+      {/* หน้าต่างยืนยันเมื่อปิด Modal ขณะมีข้อมูลแก้ไขค้างไว้ */}
       <ConfirmDialog
         open={discardConfirmOpen}
-        onCancel={() => {
-          setDiscardConfirmOpen(false);
-          setPendingSwitchDefaultAction(null);
-        }}
-        onConfirm={handleConfirmDiscard}
         variant="warning"
-        title="ยืนยันปิดหน้าต่างโดยไม่บันทึก?"
-        description="คุณมีการกรอกหรือแก้ไขข้อมูลแม่แบบกะทำงานที่ยังไม่ได้บันทึก หากปิดหน้าต่างตอนนี้ ข้อมูลที่แก้ไขค้างไว้จะหายไป"
+        title="มีข้อมูลที่แก้ไขแต่ยังไม่บันทึก"
+        description="คุณต้องการปิดหน้าต่างนี้และละทิ้งการเปลี่ยนแปลงที่ยังไม่ได้บันทึกหรือไม่?"
+        confirmLabel="ปิดโดยไม่บันทึก"
         cancelLabel="กลับไปแก้ไขต่อ"
-        confirmLabel="ยืนยันปิดโดยไม่บันทึก"
+        onConfirm={handleConfirmDiscard}
+        onCancel={() => setDiscardConfirmOpen(false)}
       />
     </>
   );

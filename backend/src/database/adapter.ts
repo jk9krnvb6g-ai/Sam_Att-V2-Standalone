@@ -1266,6 +1266,9 @@ export async function ensureBaselineSystemCatalog(): Promise<void> {
       'ALTER TABLE fingerprint_mappings ADD COLUMN retroactive_adjusted_at DATETIME NULL',
       'ALTER TABLE fingerprint_mappings ADD COLUMN retroactive_reason VARCHAR(500) NULL',
       'ALTER TABLE fingerprint_mappings ADD COLUMN updated_at DATETIME NULL',
+      // Migration 005 additive columns (Default Shift by Personnel Type: working days)
+      "ALTER TABLE personnel_type_rules ADD COLUMN default_workdays VARCHAR(32) NOT NULL DEFAULT '1,2,3,4,5,6,0'",
+      'ALTER TABLE personnel_type_rule_history ADD COLUMN default_workdays VARCHAR(32) NULL',
     ];
     for (const alterSql of additiveAlterStatements) {
       try {
@@ -1389,6 +1392,19 @@ export async function ensureBaselineSystemCatalog(): Promise<void> {
         created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
         INDEX idx_amh_attendance (attendance_id),
         INDEX idx_amh_person_date (person_id, work_date)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await dbExecute(`
+      CREATE TABLE IF NOT EXISTS public_holidays (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        holiday_date DATE NOT NULL UNIQUE,
+        holiday_name VARCHAR(255) NOT NULL,
+        holiday_type VARCHAR(32) NOT NULL DEFAULT 'OFFICIAL',
+        is_active TINYINT(1) NOT NULL DEFAULT 1,
+        created_by VARCHAR(64) NOT NULL DEFAULT 'system',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_public_holidays_active_date (is_active, holiday_date)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
   }

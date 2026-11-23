@@ -232,7 +232,7 @@ export function UserManualView({
                       onClick={() => handleSelectGuide(g.key)}
                       className={`w-full px-4 py-3.5 text-left transition-colors cursor-pointer flex items-start gap-3 ${
                         isSelected
-                          ? 'bg-[#F1ECFA] text-[#4E3978] border-l-[3px] border-l-[#8066B5]'
+                          ? 'bg-[#F1ECFA] text-[#4E3978]'
                           : 'bg-white hover:bg-[#F8F7FC] text-[#292638]'
                       }`}
                     >
@@ -281,7 +281,6 @@ export function UserManualView({
                       <span>{activeGuide.menuLabel}</span>
                       <StatusBadge
                         tone={activeGuide.readinessStatus === 'READY' ? 'success' : 'warning'}
-                        dot
                       >
                         {activeGuide.readinessLabel}
                       </StatusBadge>
@@ -320,17 +319,17 @@ export function UserManualView({
                   )}
 
                   {/* 1. เมนูนี้ใช้ทำอะไร & 2. ผู้ใช้งานที่มีสิทธิ์ */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-1.5">
-                      <h3 className="text-[14px] font-bold text-[#4E3978]">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pb-5 border-b border-[#E8E4EF]">
+                    <div className="space-y-1.5">
+                      <h3 className="text-[14.5px] font-bold text-[#4E3978]">
                         1. เมนูนี้ใช้ทำอะไร
                       </h3>
                       <p className="text-[13.5px] text-[#292638] leading-relaxed">
                         {activeGuide.whatItDoes}
                       </p>
                     </div>
-                    <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-1.5">
-                      <h3 className="text-[14px] font-bold text-[#4E3978]">
+                    <div className="space-y-1.5 md:border-l md:border-[#E8E4EF] md:pl-6">
+                      <h3 className="text-[14.5px] font-bold text-[#4E3978]">
                         2. ผู้ใช้งานที่มีสิทธิ์
                       </h3>
                       <p className="text-[13.5px] text-[#292638] leading-relaxed">
@@ -405,11 +404,11 @@ export function UserManualView({
                   </div>
 
                   {/* 5. ตัวอย่างการใช้งานจริง */}
-                  <div className="p-4 sm:p-5 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-2">
+                  <div className="pt-5 border-t border-[#E8E4EF] space-y-2.5">
                     <h3 className="text-[15px] font-bold text-[#4E3978]">
                       5. ตัวอย่างการใช้งานจริง
                     </h3>
-                    <div className="space-y-1.5 text-[13.5px] text-[#292638] leading-relaxed">
+                    <div className="p-4 rounded-lg bg-[#F8F7FC] space-y-1.5 text-[13.5px] text-[#292638] leading-relaxed">
                       <div>
                         <span className="font-semibold text-[#777287]">สถานการณ์:</span>{' '}
                         {activeGuide.example.scenario}
@@ -426,8 +425,8 @@ export function UserManualView({
                   </div>
 
                   {/* 6. ผลลัพธ์ที่ควรปรากฏ & 7. ข้อควรระวัง */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="p-4 rounded-xl bg-[#EEF8F4] border border-[#C3E5D8] space-y-2">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5 pt-5 border-t border-[#E8E4EF]">
+                    <div className="p-4 rounded-lg bg-[#EEF8F4]/65 space-y-2">
                       <h3 className="text-[14.5px] font-bold text-[#198568]">
                         6. ผลลัพธ์หลังทำสำเร็จ
                       </h3>
@@ -444,7 +443,7 @@ export function UserManualView({
                       </ul>
                     </div>
 
-                    <div className="p-4 rounded-xl bg-[#FEF7EA] border border-[#F2DCBA] space-y-2">
+                    <div className="p-4 rounded-lg bg-[#FEF7EA]/75 space-y-2">
                       <h3 className="text-[14.5px] font-bold text-[#B87516] flex items-center gap-1.5">
                         <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
                         <span>7. ข้อควรระวัง</span>
@@ -458,14 +457,14 @@ export function UserManualView({
                   </div>
 
                   {/* 8. ปัญหาที่พบบ่อยและแนวทางแก้ไข */}
-                  <div className="space-y-3 pt-4 border-t border-[#E8E4EF]">
+                  <div className="space-y-3 pt-5 border-t border-[#E8E4EF]">
                     <h3 className="text-[15px] font-bold text-[#4E3978] flex items-center gap-1.5">
                       <Wrench className="w-4 h-4 text-[#8066B5] shrink-0" aria-hidden="true" />
                       <span>8. ปัญหาที่พบบ่อยและแนวทางแก้ไข</span>
                     </h3>
-                    <div className="divide-y divide-[#E8E4EF] border border-[#E8E4EF] rounded-xl overflow-hidden bg-white">
+                    <div className="divide-y divide-[#F1ECFA]">
                       {activeGuide.troubleshooting.map((tb, idx) => (
-                        <div key={idx} className="p-3.5 space-y-1 text-[13.5px]">
+                        <div key={idx} className="py-3 first:pt-1 last:pb-0 space-y-1 text-[13.5px]">
                           <div className="font-semibold text-[#292638]">ปัญหา: {tb.problem}</div>
                           <div className="text-[#777287]">แนวทางแก้ไข: {tb.solution}</div>
                         </div>

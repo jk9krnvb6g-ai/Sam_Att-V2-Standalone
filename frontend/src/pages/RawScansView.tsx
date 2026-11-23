@@ -25,6 +25,7 @@ import {
   RotateCcw,
   ShieldCheck,
   Lock,
+  Loader2,
 } from 'lucide-react';
 import { apiRequest, ApiClientError, type AuthUser } from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
@@ -37,7 +38,6 @@ import {
   SlideOverDrawer,
   SortableHeader,
   TablePaginationBar,
-  NotificationBanner,
   TableEmptyState,
   TableLoadingSkeleton,
   RequiredMark,
@@ -46,6 +46,7 @@ import {
   ProgressDialog,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
+import { useToast } from '../components/common/ToastContext.tsx';
 import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
 import type { NavViewKey } from '../components/layout/Sidebar.tsx';
 import {
@@ -802,6 +803,19 @@ export function RawScansView({
     }
   }
 
+  const toast = useToast();
+  const [addScannerModalOpen, setAddScannerModalOpen] = useState(false);
+  const [savingScanner, setSavingScanner] = useState(false);
+  const [scannerModalError, setScannerModalError] = useState<string | null>(null);
+  const [confirmToggleScannerTarget, setConfirmToggleScannerTarget] = useState<any | null>(null);
+  const [togglingScanner, setTogglingScanner] = useState(false);
+
+  const [addScheduleModalOpen, setAddScheduleModalOpen] = useState(false);
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  const [scheduleModalError, setScheduleModalError] = useState<string | null>(null);
+  const [confirmToggleScheduleTarget, setConfirmToggleScheduleTarget] = useState<any | null>(null);
+  const [togglingSchedule, setTogglingSchedule] = useState(false);
+
   async function handleIngestContractJson(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
@@ -812,92 +826,135 @@ export function RawScansView({
         method: 'POST',
         body: JSON.stringify({ events: Array.isArray(parsed) ? parsed : [parsed] }),
       });
-      setNotice(
-        `นำเข้าข้อมูล JSON 6 ฟิลด์สำเร็จ: อ่าน ${res.totalRead} รายการ · เพิ่มใหม่ ${res.newInserted} · ข้ามรายการซ้ำ ${res.duplicatesSkipped} รายการ`
-      );
+      const msg = `นำเข้าข้อมูล JSON 6 ฟิลด์สำเร็จ: อ่าน ${res.totalRead} · เพิ่มใหม่ ${res.newInserted} · ข้ามซ้ำ ${res.duplicatesSkipped} รายการ`;
+      toast.showSuccess('นำเข้าข้อมูลสแกน JSON สำเร็จ', msg);
       await loadData(false);
       await loadSyncHistory();
     } catch (err) {
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
+        toast.showError('นำเข้าข้อมูลไม่สำเร็จ', err.message);
       } else if (err instanceof Error) {
         setError({ code: 'JSON_PARSE_ERROR', message: err.message });
+        toast.showError('รูปแบบ JSON ไม่ถูกต้อง', err.message);
       }
     }
   }
 
   async function handleAddScanner(e: React.FormEvent) {
     e.preventDefault();
+    setScannerModalError(null);
     setError(null);
-    setNotice(null);
+    if (!deviceName.trim() || !ipAddress.trim() || !locationName.trim()) {
+      setScannerModalError('กรุณากรอกข้อมูลเครื่องสแกนให้ครบทุกช่อง');
+      return;
+    }
+    setSavingScanner(true);
     try {
       await apiRequest('/scanners', {
         method: 'POST',
         body: JSON.stringify({
           machineNo: Number(machineNo),
-          deviceName,
-          ipAddress,
+          deviceName: deviceName.trim(),
+          ipAddress: ipAddress.trim(),
           devicePort: 4370,
-          locationName,
+          locationName: locationName.trim(),
         }),
       });
+      const addedNo = machineNo;
       setDeviceName('');
       setLocationName('');
-      setNotice(`ลงทะเบียนเครื่องสแกนหมายเลข #${machineNo} เรียบร้อยแล้ว`);
+      setAddScannerModalOpen(false);
+      toast.showSuccess('ลงทะเบียนเครื่องสแกนแล้ว', `เพิ่มเครื่องสแกนหมายเลข #${addedNo} เข้าสู่ระบบเรียบร้อย`);
       await loadData(false);
     } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
+      const msg =
+        err instanceof ApiClientError ? err.message : 'ไม่สามารถลงทะเบียนเครื่องสแกนได้';
+      setScannerModalError(msg);
+      toast.showError('ลงทะเบียนเครื่องสแกนไม่สำเร็จ', msg);
+    } finally {
+      setSavingScanner(false);
     }
   }
 
-  async function handleToggleScanner(id: number, currentEnabled: number) {
+  async function handleConfirmToggleScanner() {
+    if (!confirmToggleScannerTarget) return;
+    setTogglingScanner(true);
     setError(null);
+    const nextEnabled = Number(confirmToggleScannerTarget.is_enabled) !== 1;
     try {
-      await apiRequest(`/scanners/${id}/enabled`, {
+      await apiRequest(`/scanners/${confirmToggleScannerTarget.id}/enabled`, {
         method: 'PATCH',
-        body: JSON.stringify({ isEnabled: currentEnabled !== 1 }),
+        body: JSON.stringify({ isEnabled: nextEnabled }),
       });
+      toast.showSuccess(
+        nextEnabled ? 'เปิดใช้งานเครื่องสแกนแล้ว' : 'ปิดใช้งานเครื่องสแกนชั่วคราวแล้ว',
+        `เครื่อง #${confirmToggleScannerTarget.machine_no} (${confirmToggleScannerTarget.device_name})`
+      );
+      setConfirmToggleScannerTarget(null);
       await loadData(false);
     } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
+      const msg =
+        err instanceof ApiClientError ? err.message : 'ไม่สามารถปรับสถานะเครื่องสแกนได้';
+      setError({ code: err instanceof ApiClientError ? err.code : undefined, message: msg });
+      toast.showError('ปรับสถานะเครื่องสแกนไม่สำเร็จ', msg);
+    } finally {
+      setTogglingScanner(false);
     }
   }
 
   async function handleAddSchedule(e: React.FormEvent) {
     e.preventDefault();
+    setScheduleModalError(null);
     setError(null);
-    setNotice(null);
+    if (!scheduleLabel.trim() || !cronTime) {
+      setScheduleModalError('กรุณาระบุชื่อรอบและเวลาดึงข้อมูลอัตโนมัติให้ครบถ้วน');
+      return;
+    }
+    setSavingSchedule(true);
     try {
       await apiRequest('/sync-schedules', {
         method: 'POST',
-        body: JSON.stringify({ scheduleLabel, cronTime }),
+        body: JSON.stringify({ scheduleLabel: scheduleLabel.trim(), cronTime }),
       });
+      const addedTime = cronTime;
       setScheduleLabel('');
-      setNotice(`เพิ่มตารางเวลาดึงข้อมูลอัตโนมัติ (${cronTime} น.) เรียบร้อยแล้ว`);
+      setAddScheduleModalOpen(false);
+      toast.showSuccess('เพิ่มรอบดึงข้อมูลอัตโนมัติแล้ว', `ตั้งเวลาทำงานอัตโนมัติทุกวันเวลา ${addedTime} น.`);
       await loadData(false);
     } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
+      const msg =
+        err instanceof ApiClientError ? err.message : 'ไม่สามารถเพิ่มรอบดึงข้อมูลอัตโนมัติได้';
+      setScheduleModalError(msg);
+      toast.showError('เพิ่มรอบซิงก์ไม่สำเร็จ', msg);
+    } finally {
+      setSavingSchedule(false);
     }
   }
 
-  async function handleToggleSchedule(id: number, currentEnabled: number) {
+  async function handleConfirmToggleSchedule() {
+    if (!confirmToggleScheduleTarget) return;
+    setTogglingSchedule(true);
     setError(null);
+    const nextEnabled = Number(confirmToggleScheduleTarget.is_enabled) !== 1;
     try {
-      await apiRequest(`/sync-schedules/${id}`, {
+      await apiRequest(`/sync-schedules/${confirmToggleScheduleTarget.id}`, {
         method: 'PATCH',
-        body: JSON.stringify({ isEnabled: currentEnabled !== 1 }),
+        body: JSON.stringify({ isEnabled: nextEnabled }),
       });
+      toast.showSuccess(
+        nextEnabled ? 'เปิดรอบดึงข้อมูลอัตโนมัติแล้ว' : 'ปิดรอบดึงข้อมูลชั่วคราวแล้ว',
+        `${confirmToggleScheduleTarget.schedule_label} (${confirmToggleScheduleTarget.cron_time} น.)`
+      );
+      setConfirmToggleScheduleTarget(null);
       await loadData(false);
     } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
+      const msg =
+        err instanceof ApiClientError ? err.message : 'ไม่สามารถปรับสถานะรอบซิงก์อัตโนมัติได้';
+      setError({ code: err instanceof ApiClientError ? err.code : undefined, message: msg });
+      toast.showError('ปรับสถานะรอบซิงก์ไม่สำเร็จ', msg);
+    } finally {
+      setTogglingSchedule(false);
     }
   }
 
@@ -955,8 +1012,19 @@ export function RawScansView({
         }
       />
 
-      <ErrorBanner error={error} />
-      <NotificationBanner message={notice} onClose={() => setNotice(null)} />
+      <ErrorBanner error={error} onRetry={() => loadData(true)} />
+      {notice && (
+        <div className="px-4 py-3 rounded-xl bg-[#EEF8F4] border border-[#198568]/25 text-[13.5px] text-[#198568] flex items-center justify-between gap-3">
+          <span className="font-medium">{notice}</span>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            className="text-[12.5px] font-semibold underline shrink-0 cursor-pointer"
+          >
+            ปิด
+          </button>
+        </div>
+      )}
 
       {mode === 'scanners' ? (
         <div className="space-y-5">
@@ -1636,10 +1704,32 @@ export function RawScansView({
             )}
 
             {/* =================================================================
-                แท็บ 2: เครื่องสแกน (Clean Hospital Device Directory)
+                แท็บ 2: เครื่องสแกน (Clean Hospital Device Directory + Modal Add)
                ================================================================= */}
             {activeScannerTab === 'DEVICES' && (
               <div className="divide-y divide-[#E8E4EF]">
+                <div className="px-5 sm:px-6 py-4 bg-white">
+                  <SectionHeader
+                    title={`ทะเบียนเครื่องสแกนลายนิ้วมือ (${devices.length} เครื่อง)`}
+                    subtitle="ตรวจสอบที่อยู่เครือข่าย สถานะการซิงก์ล่าสุด และเปิด-ปิดการใช้งานรายเครื่อง"
+                    actions={
+                      user.role === 'ADMIN' ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setScannerModalError(null);
+                            setAddScannerModalOpen(true);
+                          }}
+                          className="ent-btn-primary"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>เพิ่มเครื่องสแกน</span>
+                        </button>
+                      ) : undefined
+                    }
+                  />
+                </div>
+
                 {loading && devices.length === 0 ? (
                   <div className="p-5">
                     <TableLoadingSkeleton rows={3} cols={5} />
@@ -1684,7 +1774,7 @@ export function RawScansView({
                               {user.role === 'ADMIN' && (
                                 <button
                                   type="button"
-                                  onClick={() => handleToggleScanner(d.id, Number(d.is_enabled))}
+                                  onClick={() => setConfirmToggleScannerTarget(d)}
                                   className="ent-btn-secondary w-full h-9 text-[13px]"
                                 >
                                   {isEnabled ? 'ปิดการใช้งานชั่วคราว' : 'เปิดใช้งานเครื่องนี้'}
@@ -1746,7 +1836,7 @@ export function RawScansView({
                                     <td className="text-right">
                                       <button
                                         type="button"
-                                        onClick={() => handleToggleScanner(d.id, Number(d.is_enabled))}
+                                        onClick={() => setConfirmToggleScannerTarget(d)}
                                         className="ent-btn-secondary h-8 px-3 text-[12.5px]"
                                       >
                                         {isEnabled ? 'ปิดใช้งาน' : 'เปิดใช้งาน'}
@@ -1762,76 +1852,11 @@ export function RawScansView({
                     </div>
                   </>
                 )}
-
-                {user.role === 'ADMIN' && (
-                  <form onSubmit={handleAddScanner} className="p-5 sm:p-6 bg-[#F8F7FC]/60 space-y-4">
-                    <SectionHeader
-                      title="ลงทะเบียนเครื่องสแกนใหม่ (สำหรับผู้ดูแลระบบ)"
-                      subtitle="ระบุหมายเลขเครื่องและที่อยู่ IP ในเครือข่ายโรงพยาบาล (พอร์ตมาตรฐาน 4370)"
-                    />
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                      <div>
-                        <label className="ent-label">
-                          หมายเลขเครื่อง (Machine No) <RequiredMark />
-                        </label>
-                        <input
-                          type="number"
-                          required
-                          value={machineNo}
-                          onChange={(e) => setMachineNo(Number(e.target.value))}
-                          className="ent-input w-full font-mono"
-                        />
-                      </div>
-                      <div>
-                        <label className="ent-label">
-                          IP Address <RequiredMark />
-                        </label>
-                        <input
-                          type="text"
-                          required
-                          value={ipAddress}
-                          onChange={(e) => setIpAddress(e.target.value)}
-                          className="ent-input w-full font-mono"
-                        />
-                      </div>
-                      <div>
-                        <label className="ent-label">
-                          ชื่อเรียกเครื่องสแกน <RequiredMark />
-                        </label>
-                        <input
-                          type="text"
-                          required
-                          value={deviceName}
-                          onChange={(e) => setDeviceName(e.target.value)}
-                          placeholder="เช่น เครื่องสแกนอาคารผู้ป่วยนอก"
-                          className="ent-input w-full"
-                        />
-                      </div>
-                      <div>
-                        <label className="ent-label">
-                          สถานที่ติดตั้ง <RequiredMark />
-                        </label>
-                        <input
-                          type="text"
-                          required
-                          value={locationName}
-                          onChange={(e) => setLocationName(e.target.value)}
-                          placeholder="เช่น ชั้น 1 โถงต้อนรับ"
-                          className="ent-input w-full"
-                        />
-                      </div>
-                    </div>
-                    <button type="submit" className="ent-btn-secondary w-full sm:w-auto">
-                      <Plus className="w-4 h-4 text-[#8066B5]" />
-                      <span>เพิ่มเครื่องสแกนเข้าสู่ระบบ</span>
-                    </button>
-                  </form>
-                )}
               </div>
             )}
 
             {/* =================================================================
-                แท็บ 3: รอบอัตโนมัติ (Automated Sync Schedules)
+                แท็บ 3: รอบอัตโนมัติ (Automated Sync Schedules + Modal Add)
                ================================================================= */}
             {activeScannerTab === 'SCHEDULES' && (
               <div className="divide-y divide-[#E8E4EF]">
@@ -1839,37 +1864,23 @@ export function RawScansView({
                   <SectionHeader
                     title={`ตารางเวลาดึงข้อมูลอัตโนมัติ (${schedules.length} รอบ/วัน)`}
                     subtitle="ระบบจะดึงข้อมูลจากทุกเครื่องสแกนที่เปิดใช้งานและคำนวณเวลาปฏิบัติงานให้อัตโนมัติตามเวลาที่กำหนด"
+                    actions={
+                      user.role === 'ADMIN' ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setScheduleModalError(null);
+                            setAddScheduleModalOpen(true);
+                          }}
+                          className="ent-btn-primary"
+                        >
+                          <Plus className="w-4 h-4" />
+                          <span>เพิ่มรอบซิงก์อัตโนมัติ</span>
+                        </button>
+                      ) : undefined
+                    }
                   />
                 </div>
-
-                {user.role === 'ADMIN' && (
-                  <form
-                    onSubmit={handleAddSchedule}
-                    className="p-4 sm:px-6 bg-[#F8F7FC]/60 flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-3"
-                  >
-                    <input
-                      type="text"
-                      required
-                      aria-label="ชื่อรอบดึงข้อมูล"
-                      value={scheduleLabel}
-                      onChange={(e) => setScheduleLabel(e.target.value)}
-                      placeholder="ระบุชื่อรอบ เช่น หลังเข้าเวรเช้า..."
-                      className="ent-input flex-1 min-w-0 sm:min-w-[220px]"
-                    />
-                    <input
-                      type="time"
-                      required
-                      aria-label="เวลาซิงก์ HH:mm"
-                      value={cronTime}
-                      onChange={(e) => setCronTime(e.target.value)}
-                      className="ent-input font-mono w-full sm:w-40"
-                    />
-                    <button type="submit" className="ent-btn-primary w-full sm:w-auto">
-                      <Plus className="w-4 h-4" />
-                      <span>เพิ่มรอบซิงก์</span>
-                    </button>
-                  </form>
-                )}
 
                 <div className="overflow-x-auto">
                   <table className="his-table">
@@ -1899,7 +1910,7 @@ export function RawScansView({
                                 {user.role === 'ADMIN' ? (
                                   <button
                                     type="button"
-                                    onClick={() => handleToggleSchedule(s.id, Number(s.is_enabled))}
+                                    onClick={() => setConfirmToggleScheduleTarget(s)}
                                     className={`text-[12.5px] font-semibold px-3 py-1 rounded-md border whitespace-nowrap transition-colors cursor-pointer ${
                                       enabled
                                         ? 'text-[#198568] border-[#198568]/25 bg-[#EEF8F4] hover:bg-[#198568]/10'
@@ -2221,19 +2232,11 @@ export function RawScansView({
                   className="ent-input w-full"
                 >
                   <option value="">ทุกเครื่องสแกน</option>
-                  {devices.length > 0 ? (
-                    devices.map((d: any) => (
-                      <option key={d.id} value={String(d.machine_no)}>
-                        เครื่อง #{d.machine_no} ({d.device_name})
-                      </option>
-                    ))
-                  ) : (
-                    <>
-                      <option value="101">เครื่อง #101 (อาคารผู้ป่วยนอก OPD)</option>
-                      <option value="102">เครื่อง #102 (อาคารอุบัติเหตุฉุกเฉิน ER)</option>
-                      <option value="103">เครื่อง #103 (อาคารผู้ป่วยใน / บริหาร)</option>
-                    </>
-                  )}
+                  {devices.map((d: any) => (
+                    <option key={d.id} value={String(d.machine_no)}>
+                      เครื่อง #{d.machine_no} ({d.device_name})
+                    </option>
+                  ))}
                 </select>
               </div>
 
@@ -2318,7 +2321,9 @@ export function RawScansView({
                           {formatThaiDateTime(rs.canonical_bkk_time)}
                         </div>
                       </div>
-                      <StatusBadge tone="brand" label={rs.enroll_number} icon={null} compact />
+                      <span className="font-mono text-[13.5px] font-bold text-[#4E3978] tabular-nums shrink-0">
+                        {rs.enroll_number}
+                      </span>
                     </div>
 
                     <div className="space-y-1 text-[13px]">
@@ -2420,8 +2425,8 @@ export function RawScansView({
                           <td className="font-mono tabular-nums font-semibold text-[#292638] whitespace-nowrap">
                             เครื่อง #{rs.machine_no}
                           </td>
-                          <td className="font-mono tabular-nums">
-                            <StatusBadge tone="brand" label={rs.enroll_number} icon={null} compact />
+                          <td className="font-mono tabular-nums font-semibold text-[#4E3978]">
+                            {rs.enroll_number}
                           </td>
                           <td>
                             <div className="font-medium text-[#292638]">
@@ -2865,6 +2870,219 @@ export function RawScansView({
         summaryText={syncSummaryText}
         errorMessage={syncErrorText}
         onClose={() => setSyncProgressOpen(false)}
+      />
+
+      {/* Modal: ลงทะเบียนเครื่องสแกนใหม่ (ADMIN) */}
+      <SharedModal
+        open={addScannerModalOpen}
+        onClose={() => !savingScanner && setAddScannerModalOpen(false)}
+        kickerText="ทะเบียนเครื่องสแกนลายนิ้วมือ"
+        title="ลงทะเบียนเครื่องสแกนใหม่"
+        subtitle="ระบุหมายเลขเครื่องและ IP ในเครือข่ายโรงพยาบาล (พอร์ตมาตรฐาน 4370)"
+        maxWidthClass="max-w-xl"
+      >
+        <form onSubmit={handleAddScanner} className="space-y-4">
+          {scannerModalError && (
+            <div
+              role="alert"
+              className="p-3.5 rounded-xl bg-[#FDF2F4] border border-[#C74455]/25 text-[#C74455] text-[13px] font-medium"
+            >
+              {scannerModalError}
+            </div>
+          )}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="ent-label">
+                หมายเลขเครื่อง (Machine No) <RequiredMark />
+              </label>
+              <input
+                type="number"
+                required
+                disabled={savingScanner}
+                value={machineNo}
+                onChange={(e) => setMachineNo(Number(e.target.value))}
+                className="ent-input w-full font-mono"
+              />
+            </div>
+            <div>
+              <label className="ent-label">
+                IP Address <RequiredMark />
+              </label>
+              <input
+                type="text"
+                required
+                disabled={savingScanner}
+                value={ipAddress}
+                onChange={(e) => setIpAddress(e.target.value)}
+                className="ent-input w-full font-mono"
+              />
+            </div>
+            <div>
+              <label className="ent-label">
+                ชื่อเรียกเครื่องสแกน <RequiredMark />
+              </label>
+              <input
+                type="text"
+                required
+                disabled={savingScanner}
+                value={deviceName}
+                onChange={(e) => setDeviceName(e.target.value)}
+                placeholder="เช่น เครื่องสแกนอาคารผู้ป่วยนอก"
+                className="ent-input w-full"
+              />
+            </div>
+            <div>
+              <label className="ent-label">
+                สถานที่ติดตั้ง <RequiredMark />
+              </label>
+              <input
+                type="text"
+                required
+                disabled={savingScanner}
+                value={locationName}
+                onChange={(e) => setLocationName(e.target.value)}
+                placeholder="เช่น ชั้น 1 โถงต้อนรับ"
+                className="ent-input w-full"
+              />
+            </div>
+          </div>
+          <div className="flex flex-col-reverse sm:flex-row justify-end gap-2.5 pt-3 border-t border-[#E8E4EF]">
+            <button
+              type="button"
+              disabled={savingScanner}
+              onClick={() => setAddScannerModalOpen(false)}
+              className="ent-btn-secondary w-full sm:w-auto"
+            >
+              ยกเลิก
+            </button>
+            <button
+              type="submit"
+              disabled={savingScanner}
+              className="ent-btn-primary w-full sm:w-auto"
+            >
+              {savingScanner ? (
+                <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Plus className="w-4 h-4" aria-hidden="true" />
+              )}
+              <span>{savingScanner ? 'กำลังบันทึก...' : 'เพิ่มเครื่องสแกน'}</span>
+            </button>
+          </div>
+        </form>
+      </SharedModal>
+
+      {/* Modal: เพิ่มรอบดึงข้อมูลอัตโนมัติ (ADMIN) */}
+      <SharedModal
+        open={addScheduleModalOpen}
+        onClose={() => !savingSchedule && setAddScheduleModalOpen(false)}
+        kickerText="รอบเวลาดึงข้อมูลอัตโนมัติ"
+        title="เพิ่มรอบดึงข้อมูลอัตโนมัติ"
+        subtitle="ระบบจะดึงข้อมูลจากเครื่องสแกนที่เปิดใช้งานทุกวันตามเวลาที่กำหนด"
+        maxWidthClass="max-w-lg"
+      >
+        <form onSubmit={handleAddSchedule} className="space-y-4">
+          {scheduleModalError && (
+            <div
+              role="alert"
+              className="p-3.5 rounded-xl bg-[#FDF2F4] border border-[#C74455]/25 text-[#C74455] text-[13px] font-medium"
+            >
+              {scheduleModalError}
+            </div>
+          )}
+          <div>
+            <label className="ent-label">
+              ชื่อรอบดึงข้อมูล <RequiredMark />
+            </label>
+            <input
+              type="text"
+              required
+              disabled={savingSchedule}
+              value={scheduleLabel}
+              onChange={(e) => setScheduleLabel(e.target.value)}
+              placeholder="เช่น หลังเข้าเวรเช้า 09:00 น."
+              className="ent-input w-full"
+            />
+          </div>
+          <div>
+            <label className="ent-label">
+              เวลาดึงข้อมูล (Asia/Bangkok) <RequiredMark />
+            </label>
+            <input
+              type="time"
+              required
+              disabled={savingSchedule}
+              value={cronTime}
+              onChange={(e) => setCronTime(e.target.value)}
+              className="ent-input font-mono w-full sm:w-48"
+            />
+          </div>
+          <div className="flex flex-col-reverse sm:flex-row justify-end gap-2.5 pt-3 border-t border-[#E8E4EF]">
+            <button
+              type="button"
+              disabled={savingSchedule}
+              onClick={() => setAddScheduleModalOpen(false)}
+              className="ent-btn-secondary w-full sm:w-auto"
+            >
+              ยกเลิก
+            </button>
+            <button
+              type="submit"
+              disabled={savingSchedule}
+              className="ent-btn-primary w-full sm:w-auto"
+            >
+              {savingSchedule ? (
+                <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Plus className="w-4 h-4" aria-hidden="true" />
+              )}
+              <span>{savingSchedule ? 'กำลังบันทึก...' : 'เพิ่มรอบซิงก์'}</span>
+            </button>
+          </div>
+        </form>
+      </SharedModal>
+
+      <ConfirmDialog
+        open={Boolean(confirmToggleScannerTarget)}
+        onCancel={() => !togglingScanner && setConfirmToggleScannerTarget(null)}
+        onConfirm={handleConfirmToggleScanner}
+        title={
+          Number(confirmToggleScannerTarget?.is_enabled) === 1
+            ? 'ยืนยันการปิดใช้งานเครื่องสแกนชั่วคราว'
+            : 'ยืนยันการเปิดใช้งานเครื่องสแกน'
+        }
+        description={
+          confirmToggleScannerTarget
+            ? `เครื่อง #${confirmToggleScannerTarget.machine_no} — ${confirmToggleScannerTarget.device_name} (${confirmToggleScannerTarget.ip_address})`
+            : ''
+        }
+        confirmLabel={
+          Number(confirmToggleScannerTarget?.is_enabled) === 1
+            ? 'ปิดใช้งานชั่วคราว'
+            : 'เปิดใช้งานเครื่องนี้'
+        }
+        variant={Number(confirmToggleScannerTarget?.is_enabled) === 1 ? 'danger' : 'primary'}
+        loading={togglingScanner}
+      />
+
+      <ConfirmDialog
+        open={Boolean(confirmToggleScheduleTarget)}
+        onCancel={() => !togglingSchedule && setConfirmToggleScheduleTarget(null)}
+        onConfirm={handleConfirmToggleSchedule}
+        title={
+          Number(confirmToggleScheduleTarget?.is_enabled) === 1
+            ? 'ยืนยันการปิดรอบดึงข้อมูลอัตโนมัติ'
+            : 'ยืนยันการเปิดรอบดึงข้อมูลอัตโนมัติ'
+        }
+        description={
+          confirmToggleScheduleTarget
+            ? `รอบ "${confirmToggleScheduleTarget.schedule_label}" เวลา ${confirmToggleScheduleTarget.cron_time} น.`
+            : ''
+        }
+        confirmLabel={
+          Number(confirmToggleScheduleTarget?.is_enabled) === 1 ? 'ปิดรอบนี้ชั่วคราว' : 'เปิดใช้งานรอบนี้'
+        }
+        variant={Number(confirmToggleScheduleTarget?.is_enabled) === 1 ? 'danger' : 'primary'}
+        loading={togglingSchedule}
       />
     </div>
   );

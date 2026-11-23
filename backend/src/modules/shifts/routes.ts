@@ -80,6 +80,123 @@ export interface PersonnelTypeRuleRow {
   default_assigned_by?: string | null;
   default_assigned_reason?: string | null;
   default_updated_at?: string | null;
+  default_workdays?: string | null;
+}
+
+export interface PublicHolidayRow {
+  id: number;
+  holiday_date: string;
+  holiday_name: string;
+  holiday_type: string;
+  is_active: number;
+  created_by?: string;
+  created_at?: string;
+}
+
+export const DEFAULT_ALL_WORKDAYS = '1,2,3,4,5,6,0';
+const WORKDAY_DISPLAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
+
+/**
+ * จัดรูปแบบวันทำงานที่ Default Shift มีผลให้เป็นมาตรฐาน CSV ของเลขวัน (0=อา., 1=จ., ..., 6=ส.)
+ * เรียงตามลำดับสัปดาห์การทำงานไทย (จ.–อา.) และตัดค่าซ้ำออก
+ */
+export function normalizeDefaultWorkdays(
+  raw: unknown,
+  fallback: string = DEFAULT_ALL_WORKDAYS
+): string {
+  if (raw === undefined || raw === null) {
+    return fallback;
+  }
+  const tokens: string[] = Array.isArray(raw)
+    ? raw.map((item) => String(item).trim())
+    : String(raw)
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+
+  if (tokens.length === 0) {
+    return '';
+  }
+
+  const validSet = new Set<number>();
+  for (const tok of tokens) {
+    if (/^[0-6]$/.test(tok)) {
+      validSet.add(Number(tok));
+    }
+  }
+  if (validSet.size === 0) {
+    return '';
+  }
+  return WORKDAY_DISPLAY_ORDER.filter((d) => validSet.has(d)).join(',');
+}
+
+export function getWorkDateWeekdayNumber(workDate: string): number {
+  const normalized = normalizeWorkDateString(workDate);
+  const [yStr, mStr, dStr] = normalized.split('-');
+  const y = Number(yStr);
+  const m = Number(mStr);
+  const d = Number(dStr);
+  if (!y || !m || !d) return -1;
+  return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+}
+
+export function isWorkDateMatchingDefaultWorkdays(
+  workDate: string,
+  defaultWorkdays: string | null | undefined
+): boolean {
+  if (defaultWorkdays === undefined || defaultWorkdays === null) {
+    return true;
+  }
+  const trimmed = String(defaultWorkdays).trim();
+  if (!trimmed) {
+    return false;
+  }
+  const weekday = getWorkDateWeekdayNumber(workDate);
+  if (weekday < 0) return false;
+  const allowed = new Set(
+    trimmed
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => /^[0-6]$/.test(s))
+      .map(Number)
+  );
+  return allowed.has(weekday);
+}
+
+export function isFullDayPersonalHolidayLeaveType(leaveType: unknown): boolean {
+  const norm = String(leaveType || '').trim().toUpperCase();
+  return norm === 'FULL_DAY' || norm === 'PERSONAL_HOLIDAY' || norm === 'DAY_OFF';
+}
+
+export async function loadActivePublicHolidaysMap(
+  dateFrom: string,
+  dateTo: string,
+  queryRunner: <T = Record<string, unknown>>(sql: string, params?: unknown[]) => Promise<T[]> = dbQuery
+): Promise<Map<string, PublicHolidayRow>> {
+  const map = new Map<string, PublicHolidayRow>();
+  try {
+    const rows = await queryRunner<PublicHolidayRow>(
+      `SELECT id, holiday_date, holiday_name, holiday_type, is_active, created_by, created_at
+       FROM public_holidays
+       WHERE is_active = 1
+         AND holiday_date >= ?
+         AND holiday_date <= ?
+       ORDER BY holiday_date ASC`,
+      [normalizeWorkDateString(dateFrom), normalizeWorkDateString(dateTo)]
+    );
+    for (const row of rows) {
+      const dateStr = normalizeWorkDateString(row.holiday_date);
+      if (dateStr) {
+        map.set(dateStr, {
+          ...row,
+          holiday_date: dateStr,
+        });
+      }
+    }
+  } catch {
+    // ปลอดภัยกรณี Production ยังไม่ได้รัน Migration 005_default_shift_by_personnel_type.sql
+  }
+  return map;
 }
 
 export interface DefaultShiftBindingSummary {
@@ -87,6 +204,7 @@ export interface DefaultShiftBindingSummary {
   personnelTypeName: string;
   isRuleActive: boolean;
   effectiveFrom: string;
+  defaultWorkdays: string;
   defaultShiftId: number | null;
   defaultShiftCode: string | null;
   defaultShiftName: string | null;
@@ -183,6 +301,10 @@ export async function loadPersonnelTypeRulesWithDefaultShifts(
     return rows.map((r) => ({
       ...r,
       effective_from: normalizeWorkDateString(r.effective_from || '2026-01-01'),
+      default_workdays:
+        r.default_workdays !== undefined && r.default_workdays !== null
+          ? normalizeDefaultWorkdays(r.default_workdays, DEFAULT_ALL_WORKDAYS)
+          : DEFAULT_ALL_WORKDAYS,
       default_shift_id:
         r.resolved_default_shift_id !== undefined && r.resolved_default_shift_id !== null
           ? Number(r.resolved_default_shift_id)
@@ -198,6 +320,10 @@ export async function loadPersonnelTypeRulesWithDefaultShifts(
     return rows.map((r) => ({
       ...r,
       effective_from: normalizeWorkDateString(r.effective_from || '2026-01-01'),
+      default_workdays:
+        r.default_workdays !== undefined && r.default_workdays !== null
+          ? normalizeDefaultWorkdays(r.default_workdays, DEFAULT_ALL_WORKDAYS)
+          : DEFAULT_ALL_WORKDAYS,
       default_shift_id: null,
     }));
   }
@@ -267,6 +393,9 @@ export type DailyScheduleOverrideState =
   | 'DEFAULT_FROM_TYPE'
   | 'CUSTOM_ASSIGNED'
   | 'CLEARED_ALL_SHIFTS'
+  | 'PUBLIC_HOLIDAY'
+  | 'PERSONAL_HOLIDAY'
+  | 'NON_WORKING_DAY'
   | 'RESTORED_DEFAULT'
   | 'UNCONFIGURED_DEFAULT_RULE';
 
@@ -274,7 +403,11 @@ export interface DailyOverrideRow {
   id?: number;
   person_id: string;
   work_date: string;
-  override_state: 'CUSTOM_ASSIGNED' | 'CLEARED_ALL_SHIFTS' | 'RESTORED_DEFAULT';
+  override_state:
+    | 'CUSTOM_ASSIGNED'
+    | 'CLEARED_ALL_SHIFTS'
+    | 'PERSONAL_HOLIDAY'
+    | 'RESTORED_DEFAULT';
   reason: string | null;
   updated_by: string;
   updated_at?: string;
@@ -407,6 +540,8 @@ export function resolveEffectiveDailyScheduleForPersonDate(params: {
   activeAssignments: ExistingAssignmentRow[];
   dailyOverride: DailyOverrideRow | null | undefined;
   rulesByCode: Map<string, PersonnelTypeRuleRow>;
+  publicHoliday?: PublicHolidayRow | null;
+  personalHoliday?: { reason?: string | null; source?: 'OVERRIDE' | 'LEAVE' } | null;
 }): {
   state: DailyScheduleOverrideState;
   effectiveShifts: Array<{
@@ -439,17 +574,8 @@ export function resolveEffectiveDailyScheduleForPersonDate(params: {
     Number(directRule.is_active ?? 1) === 1 &&
     normalizeWorkDateString(directRule.effective_from || '2026-01-01') <= workDate;
 
-  // ลำดับความสำคัญที่ 1 & 2: หากผู้จัดเวรตั้งใจลบกะทั้งหมดในวันนั้น (CLEARED_ALL_SHIFTS) -> วันนั้นไม่มีเวร (0 กะ)
-  if (params.dailyOverride?.override_state === 'CLEARED_ALL_SHIFTS') {
-    return {
-      state: 'CLEARED_ALL_SHIFTS',
-      effectiveShifts: [],
-      defaultRule: directRule,
-      unconfiguredMessage: null,
-    };
-  }
-
-  // ลำดับความสำคัญที่ 3: หากมีเวรที่กำหนดเองในวันนั้น (CUSTOM_ASSIGNED) -> ใช้เวรที่กำหนดไว้
+  // ลำดับที่ 1 — ตารางเวรรายบุคคล (Individual Shift Assignments)
+  // หากมีตารางเวรเฉพาะวัน ให้ใช้ตารางเวรที่กำหนดไว้ทั้งหมด (รวมหลายกะในวันเดียว และกรณีจัดเวรวันหยุด)
   if (params.activeAssignments.length > 0) {
     return {
       state: 'CUSTOM_ASSIGNED',
@@ -470,14 +596,52 @@ export function resolveEffectiveDailyScheduleForPersonDate(params: {
     };
   }
 
-  // ลำดับความสำคัญที่ 4: หากยังไม่เคยกำหนดเวร หรือกดคืนค่ากะเริ่มต้น -> ใช้กะเริ่มต้นตามประเภทบุคลากร
+  // ลำดับที่ 2 — วันหยุดและการยกเลิกเวร (ห้ามให้ Default Shift สร้างเวรทับ)
+  if (params.dailyOverride?.override_state === 'CLEARED_ALL_SHIFTS') {
+    return {
+      state: 'CLEARED_ALL_SHIFTS',
+      effectiveShifts: [],
+      defaultRule: directRule,
+      unconfiguredMessage: null,
+    };
+  }
+
+  if (params.dailyOverride?.override_state === 'PERSONAL_HOLIDAY' || params.personalHoliday) {
+    return {
+      state: 'PERSONAL_HOLIDAY',
+      effectiveShifts: [],
+      defaultRule: directRule,
+      unconfiguredMessage: null,
+    };
+  }
+
+  if (params.publicHoliday && Number(params.publicHoliday.is_active ?? 1) === 1) {
+    return {
+      state: 'PUBLIC_HOLIDAY',
+      effectiveShifts: [],
+      defaultRule: directRule,
+      unconfiguredMessage: null,
+    };
+  }
+
+  // ลำดับที่ 3 — Default ตามประเภทบุคลากร (ตรวจสอบวันที่มีผลและวันทำงานที่กำหนดไว้)
   const defaultSpec = isRuleActive ? resolveDefaultShiftSpecFromRule(directRule) : null;
   if (!directRule || !isRuleActive || !defaultSpec) {
+    // ลำดับที่ 4 — ไม่มีเวร (“ยังไม่กำหนดกะ”) และไม่ถือเป็น NO_SCAN หรือมาสายอัตโนมัติ
     return {
       state: 'UNCONFIGURED_DEFAULT_RULE',
       effectiveShifts: [],
       defaultRule: directRule,
-      unconfiguredMessage: `ไม่พบกะที่กำหนดสำหรับประเภทบุคลากร (${params.person.personnel_type_name || canonicalTypeCode}) หรือยังไม่ถึงวันที่มีผลบังคับใช้`,
+      unconfiguredMessage: `ยังไม่กำหนดกะสำหรับประเภทบุคลากร (${params.person.personnel_type_name || canonicalTypeCode})`,
+    };
+  }
+
+  if (!isWorkDateMatchingDefaultWorkdays(workDate, directRule.default_workdays)) {
+    return {
+      state: 'NON_WORKING_DAY',
+      effectiveShifts: [],
+      defaultRule: directRule,
+      unconfiguredMessage: null,
     };
   }
 
@@ -549,7 +713,7 @@ async function upsertDailyOverrideRecord(
   params: {
     personId: string;
     workDate: string;
-    overrideState: 'CUSTOM_ASSIGNED' | 'CLEARED_ALL_SHIFTS' | 'RESTORED_DEFAULT';
+    overrideState: 'CUSTOM_ASSIGNED' | 'CLEARED_ALL_SHIFTS' | 'RESTORED_DEFAULT' | 'PERSONAL_HOLIDAY';
     reason: string | null;
     actorUsername: string;
   }
@@ -1101,6 +1265,9 @@ export function evaluateDailyCellSync(params: {
   defaultRule: PersonnelTypeRuleRow | null;
   nextDayDefaultRule?: PersonnelTypeRuleRow | null;
   nextDayOverride?: DailyOverrideRow | null;
+  publicHoliday?: PublicHolidayRow | null;
+  nextDayPublicHoliday?: PublicHolidayRow | null;
+  personalHoliday?: boolean;
   keepSpecialAssignmentIds?: number[];
 }): DailyCellSyncEvaluationResult {
   const {
@@ -1112,6 +1279,9 @@ export function evaluateDailyCellSync(params: {
     defaultRule,
     nextDayDefaultRule,
     nextDayOverride,
+    publicHoliday,
+    nextDayPublicHoliday,
+    personalHoliday,
   } = params;
 
   const uniqueSelectedIds: number[] = [];
@@ -1183,24 +1353,48 @@ export function evaluateDailyCellSync(params: {
 
   const isCleared =
     dailyOverride?.override_state === 'CLEARED_ALL_SHIFTS' && existingEffectiveShifts.length === 0;
+  const isPersonalHoliday =
+    (dailyOverride?.override_state === 'PERSONAL_HOLIDAY' || Boolean(personalHoliday)) &&
+    existingEffectiveShifts.length === 0;
+  const isPublicHoliday =
+    Boolean(publicHoliday && Number(publicHoliday.is_active ?? 1) === 1) &&
+    existingEffectiveShifts.length === 0;
   const isCustomWithoutRows =
     dailyOverride?.override_state === 'CUSTOM_ASSIGNED' && existingEffectiveShifts.length === 0;
 
-  const syncDefaultSpec =
+  const isRuleActiveToday =
+    Boolean(defaultRule) &&
+    Number(defaultRule!.is_active) === 1 &&
+    (!defaultRule!.effective_from || workDate >= normalizeWorkDateString(defaultRule!.effective_from));
+
+  const rawDefaultSpecToday =
     !isCleared &&
+    !isPersonalHoliday &&
+    !isPublicHoliday &&
     existingEffectiveShifts.length === 0 &&
     !isCustomWithoutRows &&
-    defaultRule &&
-    Number(defaultRule.is_active) === 1 &&
-    (!defaultRule.effective_from || workDate >= normalizeWorkDateString(defaultRule.effective_from))
+    isRuleActiveToday
       ? resolveDefaultShiftSpecFromRule(defaultRule)
       : null;
 
+  const isWorkingDayToday =
+    defaultRule && rawDefaultSpecToday
+      ? isWorkDateMatchingDefaultWorkdays(workDate, defaultRule.default_workdays)
+      : false;
+
+  const syncDefaultSpec = isWorkingDayToday ? rawDefaultSpecToday : null;
+
   let effectiveState: DailyScheduleOverrideState = 'UNCONFIGURED_DEFAULT_RULE';
-  if (isCleared) {
-    effectiveState = 'CLEARED_ALL_SHIFTS';
-  } else if (existingEffectiveShifts.length > 0) {
+  if (existingEffectiveShifts.length > 0) {
     effectiveState = 'CUSTOM_ASSIGNED';
+  } else if (isCleared) {
+    effectiveState = 'CLEARED_ALL_SHIFTS';
+  } else if (isPersonalHoliday) {
+    effectiveState = 'PERSONAL_HOLIDAY';
+  } else if (isPublicHoliday) {
+    effectiveState = 'PUBLIC_HOLIDAY';
+  } else if (rawDefaultSpecToday && !isWorkingDayToday) {
+    effectiveState = 'NON_WORKING_DAY';
   } else if (syncDefaultSpec && defaultRule) {
     effectiveState =
       dailyOverride?.override_state === 'RESTORED_DEFAULT'
@@ -1368,16 +1562,23 @@ export function evaluateDailyCellSync(params: {
     })
   );
 
-  // รวมกะเช้าเริ่มต้นของวันถัดไป (ถ้าวันถัดไปไม่มี Assignment เฉพาะ และไม่ได้ CLEARED_ALL_SHIFTS)
+  // รวมกะเช้าเริ่มต้นของวันถัดไป (ถ้าวันถัดไปไม่มี Assignment เฉพาะ และไม่ได้ CLEARED_ALL_SHIFTS / วันหยุด / วันไม่ทำงาน)
   const nextDayHasExplicit = adjacentPreviewItems.some((a) => a.workDate === nextDate);
-  const nextDayCleared = nextDayOverride?.override_state === 'CLEARED_ALL_SHIFTS';
+  const nextDayCleared =
+    nextDayOverride?.override_state === 'CLEARED_ALL_SHIFTS' ||
+    nextDayOverride?.override_state === 'PERSONAL_HOLIDAY';
+  const nextDayIsHoliday = Boolean(
+    nextDayPublicHoliday && Number(nextDayPublicHoliday.is_active ?? 1) === 1
+  );
   const nextDayDefaultSpec =
     !nextDayHasExplicit &&
     !nextDayCleared &&
+    !nextDayIsHoliday &&
     nextDayDefaultRule &&
     Number(nextDayDefaultRule.is_active) === 1 &&
     (!nextDayDefaultRule.effective_from ||
-      nextDate >= normalizeWorkDateString(nextDayDefaultRule.effective_from))
+      nextDate >= normalizeWorkDateString(nextDayDefaultRule.effective_from)) &&
+    isWorkDateMatchingDefaultWorkdays(nextDate, nextDayDefaultRule.default_workdays)
       ? resolveDefaultShiftSpecFromRule(nextDayDefaultRule)
       : null;
 
@@ -1931,25 +2132,81 @@ shiftsRouter.post(
         .trim()
         .toUpperCase();
       const personnelTypeName = String(req.body?.personnelTypeName || '').trim();
-      const noDefaultShift = Boolean(req.body?.noDefaultShift);
-      const defaultStartTime = noDefaultShift
-        ? ''
-        : String(req.body?.defaultStartTime ?? '08:00').trim();
-      const defaultEndTime = noDefaultShift
-        ? ''
-        : String(req.body?.defaultEndTime ?? '16:00').trim();
-      const defaultGraceMinutes = Number(req.body?.defaultGraceMinutes ?? 15);
-      const defaultCutoffTime = noDefaultShift
-        ? ''
-        : String(req.body?.defaultCutoffTime ?? '11:00').trim();
+      const rawDefaultShiftId = req.body?.defaultShiftId;
+      const hasExplicitDefaultShiftId =
+        rawDefaultShiftId !== undefined && rawDefaultShiftId !== null && String(rawDefaultShiftId).trim() !== '';
+      const defaultShiftIdNum = hasExplicitDefaultShiftId ? Number(rawDefaultShiftId) : null;
+      const noDefaultShift =
+        Boolean(req.body?.noDefaultShift) ||
+        (req.body?.defaultShiftId === null && req.body?.defaultStartTime === undefined);
+
+      const defaultWorkdays = normalizeDefaultWorkdays(
+        req.body?.defaultWorkdays,
+        DEFAULT_ALL_WORKDAYS
+      );
+
+      let linkedShift: ShiftRow | null = null;
+      if (hasExplicitDefaultShiftId) {
+        if (!Number.isInteger(defaultShiftIdNum) || (defaultShiftIdNum as number) <= 0) {
+          res.status(400).json({
+            error: 'VALIDATION_ERROR',
+            message: 'รหัสแม่แบบกะเริ่มต้นไม่ถูกต้อง',
+            requestId: req.requestId,
+          });
+          return;
+        }
+        const shiftRows = await dbQuery<ShiftRow>('SELECT * FROM shifts WHERE id = ? LIMIT 1', [
+          defaultShiftIdNum,
+        ]);
+        if (shiftRows.length === 0) {
+          res.status(404).json({
+            error: 'SHIFT_NOT_FOUND',
+            message: 'ไม่พบแม่แบบกะทำงานที่เลือก',
+            requestId: req.requestId,
+          });
+          return;
+        }
+        if (Number(shiftRows[0].is_active) !== 1) {
+          res.status(400).json({
+            error: 'SHIFT_INACTIVE',
+            message: `แม่แบบกะ "${shiftRows[0].shift_name}" ถูกปิดใช้งานอยู่ ไม่สามารถกำหนดเป็นกะเริ่มต้นได้`,
+            requestId: req.requestId,
+          });
+          return;
+        }
+        linkedShift = shiftRows[0];
+      }
+
+      const defaultStartTime = linkedShift
+        ? linkedShift.start_time
+        : noDefaultShift
+          ? ''
+          : String(req.body?.defaultStartTime ?? '08:00').trim();
+      const defaultEndTime = linkedShift
+        ? linkedShift.end_time
+        : noDefaultShift
+          ? ''
+          : String(req.body?.defaultEndTime ?? '16:00').trim();
+      const defaultGraceMinutes = linkedShift
+        ? Number(linkedShift.grace_minutes ?? 15)
+        : Number(req.body?.defaultGraceMinutes ?? 15);
+      const defaultCutoffTime = linkedShift
+        ? linkedShift.cutoff_time
+        : noDefaultShift
+          ? ''
+          : String(req.body?.defaultCutoffTime ?? '11:00').trim();
       const effectiveFrom = normalizeWorkDateString(req.body?.effectiveFrom || '2026-01-01');
       const isActive = req.body?.isActive !== undefined ? (req.body.isActive ? 1 : 0) : 1;
+      const reason = String(
+        req.body?.reason || 'สร้างประเภทบุคลากรและกำหนดกะเริ่มต้นตามประเภทบุคลากร'
+      ).trim();
 
-      const timesValid = noDefaultShift
-        ? true
-        : /^\d{2}:\d{2}$/.test(defaultStartTime) &&
-          /^\d{2}:\d{2}$/.test(defaultEndTime) &&
-          /^\d{2}:\d{2}$/.test(defaultCutoffTime);
+      const timesValid =
+        linkedShift !== null || noDefaultShift
+          ? true
+          : /^\d{2}:\d{2}$/.test(defaultStartTime) &&
+            /^\d{2}:\d{2}$/.test(defaultEndTime) &&
+            /^\d{2}:\d{2}$/.test(defaultCutoffTime);
 
       if (
         !personnelTypeCode ||
@@ -1969,6 +2226,15 @@ shiftsRouter.post(
         return;
       }
 
+      if (linkedShift && !defaultWorkdays) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'กรุณาเลือกวันทำงานอย่างน้อย 1 วันเมื่อกำหนดแม่แบบกะเริ่มต้น',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
       const existing = await dbQuery<{ id: number }>(
         'SELECT id FROM personnel_type_rules WHERE personnel_type_code = ? LIMIT 1',
         [personnelTypeCode]
@@ -1982,42 +2248,62 @@ shiftsRouter.post(
         return;
       }
 
-      const ins = await dbExecute(
-        `INSERT INTO personnel_type_rules (
-          personnel_type_code, personnel_type_name, default_start_time, default_end_time,
-          default_grace_minutes, default_cutoff_time, effective_from, is_active,
-          CheckinWindowBeforeMinutes, CheckoutWindowAfterMinutes, require_checkout,
-          allow_overlapping_shifts, rule_version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 120, 240, 1, 0, 'v2.2.0')`,
-        [
-          personnelTypeCode,
-          personnelTypeName,
-          defaultStartTime,
-          defaultEndTime,
-          defaultGraceMinutes,
-          defaultCutoffTime,
-          effectiveFrom,
-          isActive,
-        ]
-      );
+      const createdId = await withDefaultShiftScopeLocks([personnelTypeCode], () =>
+        dbTransaction(async (tx: DbTransactionContext): Promise<number> => {
+          const ins = await tx.execute(
+            `INSERT INTO personnel_type_rules (
+              personnel_type_code, personnel_type_name, default_start_time, default_end_time,
+              default_grace_minutes, default_cutoff_time, effective_from, is_active,
+              CheckinWindowBeforeMinutes, CheckoutWindowAfterMinutes, require_checkout,
+              allow_overlapping_shifts, rule_version, default_shift_id, default_workdays
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 120, 240, 1, 0, 'v2.3.0', ?, ?)`,
+            [
+              personnelTypeCode,
+              personnelTypeName,
+              defaultStartTime,
+              defaultEndTime,
+              defaultGraceMinutes,
+              defaultCutoffTime,
+              effectiveFrom,
+              isActive,
+              linkedShift ? linkedShift.id : null,
+              defaultWorkdays || DEFAULT_ALL_WORKDAYS,
+            ]
+          );
 
-      await dbExecute(
-        `INSERT INTO personnel_type_rule_history (
-          rule_id, personnel_type_code, personnel_type_name, default_start_time, default_end_time,
-          default_grace_minutes, default_cutoff_time, effective_from, is_active, action_type, changed_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATED', ?)`,
-        [
-          ins.insertId,
-          personnelTypeCode,
-          personnelTypeName,
-          defaultStartTime,
-          defaultEndTime,
-          defaultGraceMinutes,
-          defaultCutoffTime,
-          effectiveFrom,
-          isActive,
-          req.user!.username,
-        ]
+          if (linkedShift) {
+            await tx.execute(
+              `INSERT INTO personnel_type_default_shifts (
+                personnel_type_code, shift_id, assigned_by, assigned_reason
+              ) VALUES (?, ?, ?, ?)`,
+              [personnelTypeCode, linkedShift.id, req.user!.username, reason]
+            );
+          }
+
+          await tx.execute(
+            `INSERT INTO personnel_type_rule_history (
+              rule_id, personnel_type_code, personnel_type_name, default_start_time, default_end_time,
+              default_grace_minutes, default_cutoff_time, effective_from, is_active, action_type, changed_by,
+              default_shift_id, default_workdays
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?)`,
+            [
+              ins.insertId,
+              personnelTypeCode,
+              personnelTypeName,
+              defaultStartTime,
+              defaultEndTime,
+              defaultGraceMinutes,
+              defaultCutoffTime,
+              effectiveFrom,
+              isActive,
+              req.user!.username,
+              linkedShift ? linkedShift.id : null,
+              defaultWorkdays || DEFAULT_ALL_WORKDAYS,
+            ]
+          );
+
+          return Number(ins.insertId);
+        })
       );
 
       await writeAuditLog({
@@ -2027,24 +2313,30 @@ shiftsRouter.post(
         ipAddress: req.ip || '127.0.0.1',
         action: 'PERSONNEL_TYPE_RULE_CREATED',
         targetType: 'PERSONNEL_TYPE_RULE',
-        targetId: String(ins.insertId),
+        targetId: String(createdId),
         result: 'SUCCESS',
         detail: {
           personnelTypeCode,
           personnelTypeName,
+          defaultShiftId: linkedShift ? linkedShift.id : null,
+          defaultShiftCode: linkedShift ? linkedShift.shift_code : null,
+          defaultWorkdays: defaultWorkdays || DEFAULT_ALL_WORKDAYS,
           defaultStartTime,
           defaultEndTime,
           defaultGraceMinutes,
           defaultCutoffTime,
           effectiveFrom,
           isActive,
+          reason,
         },
       });
 
       res.status(201).json({
-        id: ins.insertId,
+        id: createdId,
         personnelTypeCode,
         personnelTypeName,
+        defaultShiftId: linkedShift ? linkedShift.id : null,
+        defaultWorkdays: defaultWorkdays || DEFAULT_ALL_WORKDAYS,
         defaultStartTime,
         defaultEndTime,
         defaultGraceMinutes,
@@ -2079,22 +2371,83 @@ shiftsRouter.put(
       }
 
       const current = rows[0];
+      const scopeCode = String(current.personnel_type_code || '').trim().toUpperCase();
       const personnelTypeName = String(
         req.body?.personnelTypeName || current.personnel_type_name
       ).trim();
-      const defaultStartTime = String(
-        req.body?.defaultStartTime || current.default_start_time || '08:00'
-      ).trim();
-      const defaultEndTime = String(
-        req.body?.defaultEndTime || current.default_end_time || '16:00'
-      ).trim();
-      const defaultGraceMinutes =
-        req.body?.defaultGraceMinutes !== undefined
+
+      const hasDefaultShiftIdKey = Object.prototype.hasOwnProperty.call(
+        req.body || {},
+        'defaultShiftId'
+      );
+      const hasDefaultWorkdaysKey = Object.prototype.hasOwnProperty.call(
+        req.body || {},
+        'defaultWorkdays'
+      );
+
+      const nextDefaultWorkdays = hasDefaultWorkdaysKey
+        ? normalizeDefaultWorkdays(req.body.defaultWorkdays, '')
+        : normalizeDefaultWorkdays(current.default_workdays, DEFAULT_ALL_WORKDAYS);
+
+      let targetShift: ShiftRow | null = null;
+      let clearingDefaultShift = false;
+      if (hasDefaultShiftIdKey) {
+        const rawSid = req.body.defaultShiftId;
+        if (rawSid === null || rawSid === '' || Number(rawSid) === 0) {
+          clearingDefaultShift = true;
+        } else {
+          const parsedSid = Number(rawSid);
+          if (!Number.isInteger(parsedSid) || parsedSid <= 0) {
+            res.status(400).json({
+              error: 'VALIDATION_ERROR',
+              message: 'รหัสแม่แบบกะเริ่มต้นไม่ถูกต้อง',
+              requestId: req.requestId,
+            });
+            return;
+          }
+          const shiftRows = await dbQuery<ShiftRow>('SELECT * FROM shifts WHERE id = ? LIMIT 1', [
+            parsedSid,
+          ]);
+          if (shiftRows.length === 0) {
+            res.status(404).json({
+              error: 'SHIFT_NOT_FOUND',
+              message: 'ไม่พบแม่แบบกะทำงานที่เลือก',
+              requestId: req.requestId,
+            });
+            return;
+          }
+          if (Number(shiftRows[0].is_active) !== 1) {
+            res.status(400).json({
+              error: 'SHIFT_INACTIVE',
+              message: `แม่แบบกะ "${shiftRows[0].shift_name}" ถูกปิดใช้งานอยู่ ไม่สามารถกำหนดเป็นกะเริ่มต้นได้`,
+              requestId: req.requestId,
+            });
+            return;
+          }
+          targetShift = shiftRows[0];
+        }
+      }
+
+      const defaultStartTime = targetShift
+        ? targetShift.start_time
+        : clearingDefaultShift
+          ? ''
+          : String(req.body?.defaultStartTime ?? current.default_start_time ?? '').trim();
+      const defaultEndTime = targetShift
+        ? targetShift.end_time
+        : clearingDefaultShift
+          ? ''
+          : String(req.body?.defaultEndTime ?? current.default_end_time ?? '').trim();
+      const defaultGraceMinutes = targetShift
+        ? Number(targetShift.grace_minutes ?? 15)
+        : req.body?.defaultGraceMinutes !== undefined
           ? Number(req.body.defaultGraceMinutes)
-          : Number(current.default_grace_minutes);
-      const defaultCutoffTime = String(
-        req.body?.defaultCutoffTime || current.default_cutoff_time || '11:00'
-      ).trim();
+          : Number(current.default_grace_minutes ?? 15);
+      const defaultCutoffTime = targetShift
+        ? targetShift.cutoff_time
+        : clearingDefaultShift
+          ? ''
+          : String(req.body?.defaultCutoffTime ?? current.default_cutoff_time ?? '').trim();
       const effectiveFrom = normalizeWorkDateString(
         req.body?.effectiveFrom || current.effective_from || '2026-01-01'
       );
@@ -2104,12 +2457,31 @@ shiftsRouter.put(
             ? 1
             : 0
           : Number(current.is_active ?? 1);
+      const reason = String(
+        req.body?.reason ||
+          (clearingDefaultShift
+            ? 'ยกเลิกการกำหนดกะเริ่มต้นตามประเภทบุคลากร'
+            : targetShift
+              ? `เปลี่ยนกะเริ่มต้นตามประเภทบุคลากรเป็น "${targetShift.shift_name}"`
+              : 'แก้ไขกฎกะเริ่มต้นตามประเภทบุคลากร')
+      ).trim();
+
+      const allowEmptyTimes =
+        clearingDefaultShift ||
+        (!hasDefaultShiftIdKey &&
+          current.default_shift_id == null &&
+          !defaultStartTime &&
+          !defaultEndTime);
+
+      const timesValid = allowEmptyTimes
+        ? true
+        : /^\d{2}:\d{2}$/.test(defaultStartTime) &&
+          /^\d{2}:\d{2}$/.test(defaultEndTime) &&
+          /^\d{2}:\d{2}$/.test(defaultCutoffTime);
 
       if (
         !personnelTypeName ||
-        !/^\d{2}:\d{2}$/.test(defaultStartTime) ||
-        !/^\d{2}:\d{2}$/.test(defaultEndTime) ||
-        !/^\d{2}:\d{2}$/.test(defaultCutoffTime) ||
+        !timesValid ||
         !/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom) ||
         Number.isNaN(defaultGraceMinutes) ||
         defaultGraceMinutes < 0 ||
@@ -2124,46 +2496,128 @@ shiftsRouter.put(
         return;
       }
 
-      await dbExecute(
-        `UPDATE personnel_type_rules
-         SET personnel_type_name = ?,
-             default_start_time = ?,
-             default_end_time = ?,
-             default_grace_minutes = ?,
-             default_cutoff_time = ?,
-             effective_from = ?,
-             is_active = ?,
-             updated_at = CURRENT_TIMESTAMP
-         WHERE id = ?`,
-        [
-          personnelTypeName,
-          defaultStartTime,
-          defaultEndTime,
-          defaultGraceMinutes,
-          defaultCutoffTime,
-          effectiveFrom,
-          isActive,
-          ruleId,
-        ]
-      );
+      if (targetShift && !nextDefaultWorkdays) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'กรุณาเลือกวันทำงานอย่างน้อย 1 วันสำหรับแม่แบบกะเริ่มต้น',
+          requestId: req.requestId,
+        });
+        return;
+      }
 
-      await dbExecute(
-        `INSERT INTO personnel_type_rule_history (
-          rule_id, personnel_type_code, personnel_type_name, default_start_time, default_end_time,
-          default_grace_minutes, default_cutoff_time, effective_from, is_active, action_type, changed_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'UPDATED', ?)`,
-        [
-          ruleId,
-          current.personnel_type_code,
-          personnelTypeName,
-          defaultStartTime,
-          defaultEndTime,
-          defaultGraceMinutes,
-          defaultCutoffTime,
-          effectiveFrom,
-          isActive,
-          req.user!.username,
-        ]
+      const txOutcome = await withDefaultShiftScopeLocks([scopeCode], () =>
+        dbTransaction(async (tx: DbTransactionContext) => {
+          const lockClause = loadConfig().dbEngine === 'mysql' ? ' FOR UPDATE' : '';
+          const prevBindingRows = await tx.query<{
+            id: number;
+            shift_id: number;
+            shift_code: string | null;
+            shift_name: string | null;
+          }>(
+            `SELECT ds.id, ds.shift_id, s.shift_code, s.shift_name
+             FROM personnel_type_default_shifts ds
+             LEFT JOIN shifts s ON s.id = ds.shift_id
+             WHERE ds.personnel_type_code = ?
+             LIMIT 1${lockClause}`,
+            [scopeCode]
+          );
+          const prevBinding = prevBindingRows[0] || null;
+
+          let nextDefaultShiftId: number | null =
+            current.default_shift_id !== undefined && current.default_shift_id !== null
+              ? Number(current.default_shift_id)
+              : prevBinding
+                ? Number(prevBinding.shift_id)
+                : null;
+          let actionType = 'UPDATED';
+
+          if (clearingDefaultShift) {
+            await tx.execute(
+              'DELETE FROM personnel_type_default_shifts WHERE personnel_type_code = ?',
+              [scopeCode]
+            );
+            nextDefaultShiftId = null;
+            actionType = 'DEFAULT_SHIFT_CLEARED';
+          } else if (targetShift) {
+            if (prevBinding) {
+              await tx.execute(
+                `UPDATE personnel_type_default_shifts
+                 SET shift_id = ?, assigned_by = ?, assigned_reason = ?, updated_at = CURRENT_TIMESTAMP
+                 WHERE personnel_type_code = ?`,
+                [targetShift.id, req.user!.username, reason, scopeCode]
+              );
+              actionType =
+                Number(prevBinding.shift_id) === Number(targetShift.id)
+                  ? 'DEFAULT_WORKDAYS_UPDATED'
+                  : 'DEFAULT_SHIFT_CHANGED';
+            } else {
+              await tx.execute(
+                `INSERT INTO personnel_type_default_shifts (
+                  personnel_type_code, shift_id, assigned_by, assigned_reason
+                ) VALUES (?, ?, ?, ?)`,
+                [scopeCode, targetShift.id, req.user!.username, reason]
+              );
+              actionType = 'DEFAULT_SHIFT_ASSIGNED';
+            }
+            nextDefaultShiftId = Number(targetShift.id);
+          }
+
+          await tx.execute(
+            `UPDATE personnel_type_rules
+             SET personnel_type_name = ?,
+                 default_shift_id = ?,
+                 default_workdays = ?,
+                 default_start_time = ?,
+                 default_end_time = ?,
+                 default_grace_minutes = ?,
+                 default_cutoff_time = ?,
+                 effective_from = ?,
+                 is_active = ?,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = ?`,
+            [
+              personnelTypeName,
+              nextDefaultShiftId,
+              nextDefaultWorkdays || DEFAULT_ALL_WORKDAYS,
+              defaultStartTime,
+              defaultEndTime,
+              defaultGraceMinutes,
+              defaultCutoffTime,
+              effectiveFrom,
+              isActive,
+              ruleId,
+            ]
+          );
+
+          await tx.execute(
+            `INSERT INTO personnel_type_rule_history (
+              rule_id, personnel_type_code, personnel_type_name, default_start_time, default_end_time,
+              default_grace_minutes, default_cutoff_time, effective_from, is_active, action_type, changed_by,
+              default_shift_id, default_workdays
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              ruleId,
+              scopeCode,
+              personnelTypeName,
+              defaultStartTime,
+              defaultEndTime,
+              defaultGraceMinutes,
+              defaultCutoffTime,
+              effectiveFrom,
+              isActive,
+              actionType,
+              req.user!.username,
+              nextDefaultShiftId,
+              nextDefaultWorkdays || DEFAULT_ALL_WORKDAYS,
+            ]
+          );
+
+          return {
+            prevBinding,
+            nextDefaultShiftId,
+            actionType,
+          };
+        })
       );
 
       await writeAuditLog({
@@ -2171,13 +2625,27 @@ shiftsRouter.put(
         actorUsername: req.user!.username,
         actorRole: req.user!.role,
         ipAddress: req.ip || '127.0.0.1',
-        action: 'PERSONNEL_TYPE_RULE_UPDATED',
+        action:
+          txOutcome.actionType === 'DEFAULT_SHIFT_CLEARED'
+            ? 'DEFAULT_SHIFT_CLEARED'
+            : txOutcome.actionType === 'DEFAULT_SHIFT_CHANGED'
+              ? 'DEFAULT_SHIFT_CHANGED'
+              : txOutcome.actionType === 'DEFAULT_SHIFT_ASSIGNED'
+                ? 'DEFAULT_SHIFT_ASSIGNED'
+                : 'PERSONNEL_TYPE_RULE_UPDATED',
         targetType: 'PERSONNEL_TYPE_RULE',
         targetId: String(ruleId),
         result: 'SUCCESS',
         detail: {
-          personnelTypeCode: current.personnel_type_code,
+          personnelTypeCode: scopeCode,
+          reason,
+          historicalAssignmentsPreserved: true,
+          attendanceAutoMutation: false,
           previous: {
+            defaultShiftId: txOutcome.prevBinding ? Number(txOutcome.prevBinding.shift_id) : null,
+            defaultShiftCode: txOutcome.prevBinding?.shift_code || null,
+            defaultShiftName: txOutcome.prevBinding?.shift_name || null,
+            defaultWorkdays: normalizeDefaultWorkdays(current.default_workdays, DEFAULT_ALL_WORKDAYS),
             defaultStartTime: current.default_start_time,
             defaultEndTime: current.default_end_time,
             defaultGraceMinutes: current.default_grace_minutes,
@@ -2187,6 +2655,10 @@ shiftsRouter.put(
           },
           updated: {
             personnelTypeName,
+            defaultShiftId: txOutcome.nextDefaultShiftId,
+            defaultShiftCode: targetShift ? targetShift.shift_code : null,
+            defaultShiftName: targetShift ? targetShift.shift_name : null,
+            defaultWorkdays: nextDefaultWorkdays || DEFAULT_ALL_WORKDAYS,
             defaultStartTime,
             defaultEndTime,
             defaultGraceMinutes,
@@ -2200,14 +2672,24 @@ shiftsRouter.put(
       res.json({
         status: 'UPDATED',
         id: ruleId,
-        personnelTypeCode: current.personnel_type_code,
+        personnelTypeCode: scopeCode,
         personnelTypeName,
+        defaultShiftId: txOutcome.nextDefaultShiftId,
+        defaultShiftCode: targetShift ? targetShift.shift_code : null,
+        defaultShiftName: targetShift ? targetShift.shift_name : null,
+        defaultWorkdays: nextDefaultWorkdays || DEFAULT_ALL_WORKDAYS,
         defaultStartTime,
         defaultEndTime,
         defaultGraceMinutes,
         defaultCutoffTime,
         effectiveFrom,
         isActive,
+        message: clearingDefaultShift
+          ? `ยกเลิกกะเริ่มต้นของ "${personnelTypeName}" เรียบร้อยแล้ว (ไม่กระทบตารางเวรและข้อมูลย้อนหลัง)`
+          : targetShift
+            ? `กำหนดกะเริ่มต้นของ "${personnelTypeName}" เป็น "${targetShift.shift_name}" เรียบร้อยแล้ว (ไม่กระทบตารางเวรและข้อมูลย้อนหลัง)`
+            : `อัปเดตกฎประเภทบุคลากร "${personnelTypeName}" เรียบร้อยแล้ว`,
+        requestId: req.requestId,
       });
     } catch (err) {
       next(err);
@@ -2360,6 +2842,7 @@ shiftsRouter.get(
           personnelTypeName: r.personnel_type_name,
           isRuleActive,
           effectiveFrom,
+          defaultWorkdays: normalizeDefaultWorkdays(r.default_workdays, DEFAULT_ALL_WORKDAYS),
           defaultShiftId: shiftId,
           defaultShiftCode: r.default_shift_code || null,
           defaultShiftName: r.default_shift_name || null,
@@ -3414,6 +3897,158 @@ shiftsRouter.delete(
 );
 
 // ============================================================================
+// 2.3 วันหยุดราชการ (Public Holidays — ลำดับที่ 2: Default Shift ไม่สร้างเวรทับวันหยุด)
+// ============================================================================
+
+shiftsRouter.get('/holidays', requireAuth, async (req, res, next) => {
+  try {
+    const dateFrom = req.query.dateFrom ? normalizeWorkDateString(req.query.dateFrom) : null;
+    const dateTo = req.query.dateTo ? normalizeWorkDateString(req.query.dateTo) : null;
+    const conditions = ['is_active = 1'];
+    const params: unknown[] = [];
+    if (dateFrom && /^\d{4}-\d{2}-\d{2}$/.test(dateFrom)) {
+      conditions.push('holiday_date >= ?');
+      params.push(dateFrom);
+    }
+    if (dateTo && /^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+      conditions.push('holiday_date <= ?');
+      params.push(dateTo);
+    }
+    let items: PublicHolidayRow[] = [];
+    try {
+      const rows = await dbQuery<PublicHolidayRow>(
+        `SELECT id, holiday_date, holiday_name, holiday_type, is_active, created_by, created_at
+         FROM public_holidays
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY holiday_date ASC`,
+        params
+      );
+      items = rows.map((r) => ({
+        ...r,
+        holiday_date: normalizeWorkDateString(r.holiday_date),
+      }));
+    } catch {
+      items = [];
+    }
+    res.json({ items });
+  } catch (err) {
+    next(err);
+  }
+});
+
+shiftsRouter.post(
+  '/holidays',
+  requireAuth,
+  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
+  async (req, res, next) => {
+    try {
+      const holidayDate = normalizeWorkDateString(req.body?.holidayDate);
+      const holidayName = String(req.body?.holidayName || '').trim();
+      const holidayType = String(req.body?.holidayType || 'PUBLIC_HOLIDAY').trim().toUpperCase();
+
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(holidayDate) || !holidayName) {
+        res.status(400).json({
+          error: 'VALIDATION_ERROR',
+          message: 'กรุณาระบุวันที่วันหยุด (YYYY-MM-DD) และชื่อวันหยุดราชการให้ครบถ้วน',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const existing = await dbQuery<PublicHolidayRow>(
+        'SELECT * FROM public_holidays WHERE holiday_date = ? LIMIT 1',
+        [holidayDate]
+      );
+
+      let holidayId: number;
+      if (existing.length > 0) {
+        holidayId = Number(existing[0].id);
+        await dbExecute(
+          `UPDATE public_holidays
+           SET holiday_name = ?, holiday_type = ?, is_active = 1, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ?`,
+          [holidayName, holidayType, holidayId]
+        );
+      } else {
+        const ins = await dbExecute(
+          `INSERT INTO public_holidays (holiday_date, holiday_name, holiday_type, is_active, created_by)
+           VALUES (?, ?, ?, 1, ?)`,
+          [holidayDate, holidayName, holidayType, req.user!.username]
+        );
+        holidayId = Number(ins.insertId);
+      }
+
+      await writeAuditLog({
+        requestId: req.requestId,
+        actorUsername: req.user!.username,
+        actorRole: req.user!.role,
+        ipAddress: req.ip || '127.0.0.1',
+        action: 'PUBLIC_HOLIDAY_SAVED',
+        targetType: 'PUBLIC_HOLIDAY',
+        targetId: String(holidayId),
+        result: 'SUCCESS',
+        detail: { holidayDate, holidayName, holidayType },
+      });
+
+      res.status(201).json({
+        id: holidayId,
+        holidayDate,
+        holidayName,
+        holidayType,
+        isActive: 1,
+        requestId: req.requestId,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+shiftsRouter.delete(
+  '/holidays/:id',
+  requireAuth,
+  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
+  async (req, res, next) => {
+    try {
+      const id = Number(req.params.id);
+      const existing = await dbQuery<PublicHolidayRow>(
+        'SELECT * FROM public_holidays WHERE id = ? LIMIT 1',
+        [id]
+      );
+      if (existing.length === 0) {
+        res.status(404).json({
+          error: 'HOLIDAY_NOT_FOUND',
+          message: 'ไม่พบข้อมูลวันหยุดราชการที่ต้องการลบ',
+          requestId: req.requestId,
+        });
+        return;
+      }
+      await dbExecute(
+        'UPDATE public_holidays SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [id]
+      );
+      await writeAuditLog({
+        requestId: req.requestId,
+        actorUsername: req.user!.username,
+        actorRole: req.user!.role,
+        ipAddress: req.ip || '127.0.0.1',
+        action: 'PUBLIC_HOLIDAY_DEACTIVATED',
+        targetType: 'PUBLIC_HOLIDAY',
+        targetId: String(id),
+        result: 'SUCCESS',
+        detail: {
+          holidayDate: normalizeWorkDateString(existing[0].holiday_date),
+          holidayName: existing[0].holiday_name,
+        },
+      });
+      res.json({ status: 'DEACTIVATED', id, requestId: req.requestId });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ============================================================================
 // 3. รายการตารางเวรและสถานะรายวัน (Shift Assignments & Daily Overrides)
 // ============================================================================
 
@@ -3501,10 +4136,14 @@ shiftsRouter.get(
         'SELECT * FROM shift_import_logs ORDER BY id DESC LIMIT 20'
       );
 
+      const publicHolidayMap = await loadActivePublicHolidaysMap(dateFrom, dateTo);
+      const publicHolidays = Array.from(publicHolidayMap.values());
+
       res.json({
         items,
         dailyOverrides,
         personnelTypeRules,
+        publicHolidays,
         cancellationLogs,
         importLogs,
       });
@@ -3576,28 +4215,30 @@ shiftsRouter.get(
       const prevDate = addDaysToDateString(workDate, -1);
       const nextDate = addDaysToDateString(workDate, 1);
 
-      const [availableTemplates, nearbyAssignments, overrides, allTypeRules] = await Promise.all([
-        dbQuery<ShiftRow>('SELECT * FROM shifts WHERE is_active = 1 ORDER BY start_time ASC, id ASC'),
-        dbQuery<ExistingAssignmentRow>(
-          `SELECT id, person_id, shift_id, work_date,
-                  snapshot_shift_code, snapshot_shift_name,
-                  snapshot_start_time, snapshot_end_time,
-                  snapshot_grace_minutes, snapshot_cutoff_time,
-                  snapshot_is_cross_midnight, status
-           FROM shift_assignments
-           WHERE person_id = ?
-             AND work_date >= ?
-             AND work_date <= ?
-             AND status = 'ACTIVE'
-           ORDER BY work_date ASC, snapshot_start_time ASC, id ASC`,
-          [personId, prevDate, nextDate]
-        ),
-        dbQuery<DailyOverrideRow>(
-          'SELECT * FROM shift_daily_overrides WHERE person_id = ? AND work_date IN (?, ?)',
-          [personId, workDate, nextDate]
-        ),
-        loadPersonnelTypeRulesWithDefaultShifts(),
-      ]);
+      const [availableTemplates, nearbyAssignments, overrides, allTypeRules, holidayMap] =
+        await Promise.all([
+          dbQuery<ShiftRow>('SELECT * FROM shifts WHERE is_active = 1 ORDER BY start_time ASC, id ASC'),
+          dbQuery<ExistingAssignmentRow>(
+            `SELECT id, person_id, shift_id, work_date,
+                    snapshot_shift_code, snapshot_shift_name,
+                    snapshot_start_time, snapshot_end_time,
+                    snapshot_grace_minutes, snapshot_cutoff_time,
+                    snapshot_is_cross_midnight, status
+             FROM shift_assignments
+             WHERE person_id = ?
+               AND work_date >= ?
+               AND work_date <= ?
+               AND status = 'ACTIVE'
+             ORDER BY work_date ASC, snapshot_start_time ASC, id ASC`,
+            [personId, prevDate, nextDate]
+          ),
+          dbQuery<DailyOverrideRow>(
+            'SELECT * FROM shift_daily_overrides WHERE person_id = ? AND work_date IN (?, ?)',
+            [personId, workDate, nextDate]
+          ),
+          loadPersonnelTypeRulesWithDefaultShifts(),
+          loadActivePublicHolidaysMap(workDate, nextDate),
+        ]);
 
       const normalizedNearby = nearbyAssignments.map((a) => ({
         ...a,
@@ -3624,6 +4265,20 @@ shiftsRouter.get(
       );
       const defaultRule = normTypeCode ? rulesByCode.get(normTypeCode) || null : null;
 
+      let hasFullDayLeaveToday = false;
+      try {
+        const leaveRows = await dbQuery<{ leave_type: string }>(
+          `SELECT leave_type FROM attendance_leaves
+           WHERE person_id = ? AND work_date = ? AND status = 'ACTIVE'`,
+          [personId, workDate]
+        );
+        hasFullDayLeaveToday = leaveRows.some((l) =>
+          isFullDayPersonalHolidayLeaveType(l.leave_type)
+        );
+      } catch {
+        hasFullDayLeaveToday = false;
+      }
+
       // คำนวณสถานะปัจจุบันก่อน เพื่อดึง selectedTemplateIds ที่ตรงกับกะที่มีผลจริง 100%
       const initialEval = evaluateDailyCellSync({
         workDate,
@@ -3635,6 +4290,9 @@ shiftsRouter.get(
         defaultRule,
         nextDayDefaultRule: defaultRule,
         nextDayOverride,
+        publicHoliday: holidayMap.get(workDate) || null,
+        nextDayPublicHoliday: holidayMap.get(nextDate) || null,
+        personalHoliday: hasFullDayLeaveToday,
       });
 
       const currentSelectedTemplateIds: number[] = [];
@@ -3649,12 +4307,25 @@ shiftsRouter.get(
       const clearedAll =
         todayOverride?.override_state === 'CLEARED_ALL_SHIFTS' && sameDayActive.length === 0;
 
+      const todayPublicHoliday = holidayMap.get(workDate) || null;
+
       res.json({
         status: 'OK',
         canEdit,
         person: personRows[0],
         workDate,
         effectiveState: initialEval.effectiveState,
+        unconfiguredMessage:
+          initialEval.effectiveState === 'UNCONFIGURED_DEFAULT_RULE'
+            ? 'ยังไม่กำหนดกะ (ไม่มีเวรรายบุคคลและประเภทบุคลากรนี้ยังไม่ได้กำหนดกะเริ่มต้น)'
+            : null,
+        publicHoliday: todayPublicHoliday
+          ? {
+              holidayDate: todayPublicHoliday.holiday_date,
+              holidayName: todayPublicHoliday.holiday_name,
+              holidayType: todayPublicHoliday.holiday_type,
+            }
+          : null,
         effectiveShifts: initialEval.existingEffectiveShifts,
         availableTemplates: availableTemplates.map((t) => ({
           id: Number(t.id),
@@ -4861,7 +5532,7 @@ shiftsRouter.post(
         },
       });
 
-      const [updatedAssignments, updatedOverrides, allTypeRules] = await Promise.all([
+      const [updatedAssignments, updatedOverrides, allTypeRules, publicHolidayMap] = await Promise.all([
         dbQuery<ExistingAssignmentRow>(
           `SELECT id, person_id, shift_id, work_date,
                   snapshot_shift_code, snapshot_shift_name,
@@ -4878,6 +5549,7 @@ shiftsRouter.post(
           [personId, workDate]
         ),
         loadPersonnelTypeRulesWithDefaultShifts(),
+        loadActivePublicHolidaysMap(workDate, workDate),
       ]);
 
       const rulesByCode = new Map<string, PersonnelTypeRuleRow>();
@@ -4895,6 +5567,7 @@ shiftsRouter.post(
         })),
         dailyOverride: updatedOverrides[0] || null,
         rulesByCode,
+        publicHoliday: publicHolidayMap.get(workDate) || null,
       });
 
       const effectiveSchedule = {

@@ -10,7 +10,18 @@
  * 3. เปิดแผงด้านข้าง (Slide-Over Drawer) เพื่อตรวจสอบหลักฐาน Raw Scan บันทึกลาครึ่งวัน หมายเหตุ และรับรองผล HR
  */
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { Play, Eye, CheckCircle2, FileText, Search, PanelRightOpen } from 'lucide-react';
+import {
+  Play,
+  Eye,
+  CheckCircle2,
+  FileText,
+  Search,
+  PanelRightOpen,
+  Loader2,
+  ChevronDown,
+  ChevronUp,
+  RefreshCw,
+} from 'lucide-react';
 import { apiRequest, ApiClientError, type UserRole } from '../services/api.ts';
 import {
   AttendanceStatusText,
@@ -25,12 +36,13 @@ import {
   SlideOverDrawer,
   SortableHeader,
   TablePaginationBar,
-  NotificationBanner,
   TableEmptyState,
   TableLoadingSkeleton,
+  ConfirmDialog,
   RequiredMark,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
+import { useToast } from '../components/common/ToastContext.tsx';
 import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
 import type { NavViewKey } from '../components/layout/Sidebar.tsx';
 import {
@@ -62,6 +74,7 @@ export function HrAttendanceView({
   onNavigate?: (view: NavViewKey) => void;
 }) {
   const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
+  const toast = useToast();
 
   const [periodMode, setPeriodMode] = useState<PeriodMode>('MONTHLY');
   const [dailyDate, setDailyDate] = useState(initialBkk.todayYmd);
@@ -71,12 +84,14 @@ export function HrAttendanceView({
   const [customTo, setCustomTo] = useState(initialBkk.monthEndYmd);
 
   const [statusFilter, setStatusFilter] = useState('');
+  const [reviewQueueFilter, setReviewQueueFilter] = useState<'ALL' | 'PENDING' | 'VERIFIED'>(
+    mode === 'review' ? 'PENDING' : 'ALL'
+  );
   const [departmentFilter, setDepartmentFilter] = useState('');
   const [personnelTypeFilter, setPersonnelTypeFilter] = useState('');
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ code?: string; message: string } | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [items, setItems] = useState<any[]>([]);
   const [notes, setNotes] = useState<any[]>([]);
   const [reviewHistory, setReviewHistory] = useState<any[]>([]);
@@ -95,6 +110,9 @@ export function HrAttendanceView({
   const [reasonType, setReasonType] = useState('OFFICIAL_DUTY');
   const [noteText, setNoteText] = useState('');
   const [reviewComment, setReviewComment] = useState('');
+  const [savingNote, setSavingNote] = useState(false);
+  const [savingReview, setSavingReview] = useState(false);
+  const [drawerError, setDrawerError] = useState<string | null>(null);
 
   // Half-day leave form inside drawer (ATT-15)
   const [leaveType, setLeaveType] = useState<'HALF_DAY_MORNING' | 'HALF_DAY_AFTERNOON'>('HALF_DAY_MORNING');
@@ -104,9 +122,34 @@ export function HrAttendanceView({
   const [savingLeave, setSavingLeave] = useState(false);
 
   // Reprocess Preview / Execute state
+  const [reprocessExpanded, setReprocessExpanded] = useState(false);
   const [reprocessFrom, setReprocessFrom] = useState(initialBkk.yesterdayYmd);
   const [reprocessTo, setReprocessTo] = useState(initialBkk.todayYmd);
   const [previewResult, setPreviewResult] = useState<any>(null);
+  const [previewingReprocess, setPreviewingReprocess] = useState(false);
+  const [confirmReprocessOpen, setConfirmReprocessOpen] = useState(false);
+  const [executingReprocess, setExecutingReprocess] = useState(false);
+
+  useEffect(() => {
+    setReviewQueueFilter(mode === 'review' ? 'PENDING' : 'ALL');
+    setPage(1);
+  }, [mode]);
+
+  function getNoScanOrMappingHint(row: any): string | null {
+    if (!row.fingle_id || row.mapping_status === 'EMPTY_FINGLE_ID' || row.status === 'PENDING_MAPPING') {
+      return 'สาเหตุ: ยังไม่ผูกรหัสสแกนลายนิ้วมือ (FINGLE_ID)';
+    }
+    if (row.mapping_status === 'DUPLICATE_FINGLE_ID') {
+      return 'สาเหตุ: รหัสสแกนซ้ำซ้อนในทะเบียนบุคลากร';
+    }
+    if (row.no_scan_reason) {
+      return `สาเหตุ: ${row.no_scan_reason}`;
+    }
+    if (row.status === 'NO_SCAN') {
+      return 'ไม่พบรายการสแกนในช่วงเวลากะนี้ (รหัสสแกนเชื่อมโยงปกติ)';
+    }
+    return null;
+  }
 
   const resolvedRange = useMemo(
     () =>
@@ -232,8 +275,44 @@ export function HrAttendanceView({
         ? String(valA || '').localeCompare(String(valB || ''), 'th')
         : String(valB || '').localeCompare(String(valA || ''), 'th');
     });
+    if (reviewQueueFilter === 'PENDING') {
+      list = list.filter(
+        (r) =>
+          r.review_status === 'PENDING_REVIEW' ||
+          r.review_status === 'NEEDS_RE_REVIEW' ||
+          r.status === 'NEEDS_RE_REVIEW' ||
+          !r.review_status
+      );
+    } else if (reviewQueueFilter === 'VERIFIED') {
+      list = list.filter(
+        (r) =>
+          r.review_status === 'VERIFIED_APPROVED' ||
+          r.review_status === 'VERIFIED' ||
+          r.review_status === 'APPROVED'
+      );
+    }
     return list;
-  }, [items, departmentFilter, personnelTypeFilter, sortKey, sortDir]);
+  }, [items, departmentFilter, personnelTypeFilter, reviewQueueFilter, sortKey, sortDir]);
+
+  const queueCounts = useMemo(() => {
+    let base = [...items];
+    if (departmentFilter) base = base.filter((r) => r.department_name === departmentFilter);
+    if (personnelTypeFilter) base = base.filter((r) => r.personnel_type_name === personnelTypeFilter);
+    let pending = 0;
+    let verified = 0;
+    for (const r of base) {
+      if (
+        r.review_status === 'VERIFIED_APPROVED' ||
+        r.review_status === 'VERIFIED' ||
+        r.review_status === 'APPROVED'
+      ) {
+        verified += 1;
+      } else {
+        pending += 1;
+      }
+    }
+    return { all: base.length, pending, verified };
+  }, [items, departmentFilter, personnelTypeFilter]);
 
   const pagedItems = useMemo(() => {
     if (pageSize === 'ALL') return filteredAndSortedItems;
@@ -274,56 +353,76 @@ export function HrAttendanceView({
 
   async function handleAddNote() {
     if (!selectedRow) return;
+    if (!noteText.trim()) {
+      setDrawerError('กรุณาระบุรายละเอียดหมายเหตุก่อนบันทึก');
+      return;
+    }
+    setSavingNote(true);
+    setDrawerError(null);
     setError(null);
-    setNotice(null);
     try {
       await apiRequest(`/attendance/${selectedRow.id}/notes`, {
         method: 'POST',
         body: JSON.stringify({
           reasonType,
-          noteText,
+          noteText: noteText.trim(),
           visibleToEmployee: true,
         }),
       });
       setNoteText('');
-      setNotice(`บันทึกหมายเหตุสำหรับเวรของ ${selectedRow.full_name} สำเร็จ (โดยไม่แก้ไขข้อมูลสแกนต้นฉบับ)`);
+      toast.showSuccess(
+        'บันทึกหมายเหตุเรียบร้อยแล้ว',
+        `บันทึกหมายเหตุสำหรับ ${selectedRow.full_name} โดยไม่แก้ไขข้อมูลสแกนต้นฉบับ`
+      );
       await loadData();
     } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
+      const msg =
+        err instanceof ApiClientError
+          ? err.message
+          : 'ไม่สามารถบันทึกหมายเหตุได้ กรุณาลองใหม่อีกครั้ง';
+      setDrawerError(msg);
+      toast.showError('บันทึกหมายเหตุไม่สำเร็จ', msg);
+    } finally {
+      setSavingNote(false);
     }
   }
 
   async function handleConfirmReview() {
     if (!selectedRow) return;
+    setSavingReview(true);
+    setDrawerError(null);
     setError(null);
-    setNotice(null);
     try {
       await apiRequest(`/attendance/${selectedRow.id}/review`, {
         method: 'POST',
         body: JSON.stringify({
           reviewStatus: 'VERIFIED_APPROVED',
           reviewReasonCategory: reasonType,
-          reviewComment: reviewComment || 'ตรวจสอบหลักฐานถูกต้องตามระเบียบโรงพยาบาล',
+          reviewComment: reviewComment.trim() || 'ตรวจสอบหลักฐานถูกต้องตามระเบียบโรงพยาบาล',
         }),
       });
+      const targetName = selectedRow.full_name;
       setReviewComment('');
       setSelectedRow(null);
-      setNotice(`รับรองผลการตรวจสอบสำหรับ ${selectedRow.full_name} เรียบร้อยแล้ว`);
+      toast.showSuccess('รับรองผลการตรวจสอบแล้ว', `ยืนยันผลการลงเวลาของ ${targetName} เรียบร้อย`);
       await loadData();
     } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
+      const msg =
+        err instanceof ApiClientError
+          ? err.message
+          : 'ไม่สามารถรับรองผลการตรวจสอบได้ กรุณาลองใหม่อีกครั้ง';
+      setDrawerError(msg);
+      toast.showError('รับรองผลตรวจสอบไม่สำเร็จ', msg);
+    } finally {
+      setSavingReview(false);
     }
   }
 
   async function handleSaveHalfDayLeave() {
     if (!selectedRow) return;
     setSavingLeave(true);
+    setDrawerError(null);
     setError(null);
-    setNotice(null);
     try {
       await apiRequest('/attendance/leaves', {
         method: 'POST',
@@ -334,28 +433,35 @@ export function HrAttendanceView({
           leaveType,
           leaveStartTime,
           leaveEndTime,
-          reason: leaveReason || (leaveType === 'HALF_DAY_MORNING' ? 'ลาครึ่งวันเช้า' : 'ลาครึ่งวันบ่าย'),
+          reason:
+            leaveReason.trim() ||
+            (leaveType === 'HALF_DAY_MORNING' ? 'ลาครึ่งวันเช้า' : 'ลาครึ่งวันบ่าย'),
           autoReprocess: true,
         }),
       });
+      const targetName = selectedRow.full_name;
       setLeaveReason('');
-      setNotice(
-        `บันทึกการลาครึ่งวัน (${leaveStartTime}–${leaveEndTime} น.) สำหรับ ${selectedRow.full_name} และคำนวณเวลาใหม่เรียบร้อยแล้ว (ไม่แก้ไขแม่แบบกะ)`
-      );
       setSelectedRow(null);
+      toast.showSuccess(
+        'บันทึกการลาครึ่งวันและคำนวณใหม่แล้ว',
+        `${targetName} (${leaveStartTime}–${leaveEndTime} น.) โดยไม่แก้ไขแม่แบบกะ`
+      );
       await loadData();
     } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
+      const msg =
+        err instanceof ApiClientError
+          ? err.message
+          : 'ไม่สามารถบันทึกการลาครึ่งวันได้ กรุณาลองใหม่อีกครั้ง';
+      setDrawerError(msg);
+      toast.showError('บันทึกลาครึ่งวันไม่สำเร็จ', msg);
     } finally {
       setSavingLeave(false);
     }
   }
 
   async function handlePreviewReprocess() {
+    setPreviewingReprocess(true);
     setError(null);
-    setNotice(null);
     try {
       const bkk = getCurrentBangkokDateParts();
       const res = await apiRequest('/attendance/reprocess/preview', {
@@ -368,15 +474,20 @@ export function HrAttendanceView({
       });
       setPreviewResult(res);
     } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
+      const msg =
+        err instanceof ApiClientError
+          ? err.message
+          : 'ไม่สามารถจำลองผลการคำนวณซ้ำได้';
+      setError({ code: err instanceof ApiClientError ? err.code : undefined, message: msg });
+      toast.showError('จำลองผลกระทบไม่สำเร็จ', msg);
+    } finally {
+      setPreviewingReprocess(false);
     }
   }
 
   async function handleExecuteReprocess() {
+    setExecutingReprocess(true);
     setError(null);
-    setNotice(null);
     try {
       const bkk = getCurrentBangkokDateParts();
       const res = await apiRequest('/attendance/reprocess', {
@@ -388,14 +499,21 @@ export function HrAttendanceView({
         }),
       });
       setPreviewResult(null);
-      setNotice(
-        `คำนวณเวลาปฏิบัติงานซ้ำสำเร็จ: ประมวลผล ${res.totalProcessed} เวร (อัปเดต ${res.updatedCount}, เพิ่มใหม่ ${res.insertedCount}) โดยคงข้อมูลสแกนต้นฉบับและหมายเหตุเดิมครบถ้วน`
+      setConfirmReprocessOpen(false);
+      toast.showSuccess(
+        'คำนวณเวลาปฏิบัติงานซ้ำสำเร็จ',
+        `ประมวลผล ${res.totalProcessed} เวร (อัปเดต ${res.updatedCount}, เพิ่มใหม่ ${res.insertedCount})`
       );
       await loadData();
     } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      }
+      const msg =
+        err instanceof ApiClientError
+          ? err.message
+          : 'ไม่สามารถคำนวณเวลาปฏิบัติงานซ้ำได้';
+      setError({ code: err instanceof ApiClientError ? err.code : undefined, message: msg });
+      toast.showError('คำนวณเวลาซ้ำไม่สำเร็จ', msg);
+    } finally {
+      setExecutingReprocess(false);
     }
   }
 
@@ -513,7 +631,6 @@ export function HrAttendanceView({
       />
 
       <ErrorBanner error={error} onRetry={loadData} />
-      <NotificationBanner message={notice} onClose={() => setNotice(null)} />
 
       {/* Unified Operational Metric Strip */}
       <MetricStrip
@@ -554,15 +671,82 @@ export function HrAttendanceView({
         ]}
       />
 
-      {mode === 'review' && (
-        <div className="his-surface p-5 sm:p-6 space-y-4">
+      {/* Quick Review Queue Switcher (Separates Pending vs Verified cleanly) + Collapsible Reprocess Trigger */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="ent-tab-bar" role="tablist" aria-label="แยกสถานะการตรวจสอบ">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={reviewQueueFilter === 'PENDING'}
+            onClick={() => {
+              setReviewQueueFilter('PENDING');
+              setPage(1);
+            }}
+            className={`ent-tab-btn ${reviewQueueFilter === 'PENDING' ? 'ent-tab-btn-active' : ''}`}
+          >
+            <span>รอตรวจ / ต้องตรวจซ้ำ</span>
+            <span className="font-mono text-[12px] tabular-nums opacity-85">
+              ({queueCounts.pending})
+            </span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={reviewQueueFilter === 'VERIFIED'}
+            onClick={() => {
+              setReviewQueueFilter('VERIFIED');
+              setPage(1);
+            }}
+            className={`ent-tab-btn ${reviewQueueFilter === 'VERIFIED' ? 'ent-tab-btn-active' : ''}`}
+          >
+            <span>ตรวจสอบแล้ว</span>
+            <span className="font-mono text-[12px] tabular-nums opacity-85">
+              ({queueCounts.verified})
+            </span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={reviewQueueFilter === 'ALL'}
+            onClick={() => {
+              setReviewQueueFilter('ALL');
+              setPage(1);
+            }}
+            className={`ent-tab-btn ${reviewQueueFilter === 'ALL' ? 'ent-tab-btn-active' : ''}`}
+          >
+            <span>ทั้งหมด</span>
+            <span className="font-mono text-[12px] tabular-nums opacity-85">
+              ({queueCounts.all})
+            </span>
+          </button>
+        </div>
+
+        {mode === 'review' && (
+          <button
+            type="button"
+            onClick={() => setReprocessExpanded((v) => !v)}
+            className="ent-btn-secondary self-start sm:self-auto"
+          >
+            <RefreshCw className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+            <span>คำนวณเวลาซ้ำ (Reprocess)</span>
+            {reprocessExpanded ? (
+              <ChevronUp className="w-4 h-4 text-[#777287]" aria-hidden="true" />
+            ) : (
+              <ChevronDown className="w-4 h-4 text-[#777287]" aria-hidden="true" />
+            )}
+          </button>
+        )}
+      </div>
+
+      {mode === 'review' && reprocessExpanded && (
+        <div className="his-surface p-5 space-y-4">
           <div className="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
-            <div className="space-y-1">
-              <h2 className="text-[16.5px] font-bold text-[#292638]">
+            <div className="space-y-0.5">
+              <h2 className="text-[15.5px] font-bold text-[#292638]">
                 คำนวณผลเวลาปฏิบัติงานซ้ำ (Reprocess)
               </h2>
               <p className="text-[13px] text-[#777287]">
-                ใช้เมื่อมีการปรับตารางเวรหรืออัปเดตการเชื่อมโยงรหัสสแกน โดยคงข้อมูลสแกนต้นฉบับและหมายเหตุเดิมครบถ้วน
+                ใช้เมื่อปรับตารางเวรหรือเชื่อมโยงรหัสสแกนใหม่ โดยไม่แก้ไขข้อมูลสแกนต้นฉบับและหมายเหตุเดิม
               </p>
             </div>
 
@@ -586,15 +770,21 @@ export function HrAttendanceView({
               </div>
               <button
                 type="button"
+                disabled={previewingReprocess || executingReprocess}
                 onClick={handlePreviewReprocess}
                 className="ent-btn-secondary w-full sm:w-auto"
               >
-                <Eye className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+                {previewingReprocess ? (
+                  <Loader2 className="w-4 h-4 animate-spin text-[#8066B5]" aria-hidden="true" />
+                ) : (
+                  <Eye className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+                )}
                 <span>1. ดูตัวอย่างผลกระทบ</span>
               </button>
               <button
                 type="button"
-                onClick={handleExecuteReprocess}
+                disabled={executingReprocess}
+                onClick={() => setConfirmReprocessOpen(true)}
                 className="ent-btn-primary w-full sm:w-auto"
               >
                 <Play className="w-4 h-4" aria-hidden="true" />
@@ -659,7 +849,7 @@ export function HrAttendanceView({
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2.5 p-3 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] text-[13px]">
+                      <div className="grid grid-cols-2 gap-3 pt-2.5 border-t border-[#E8E4EF] text-[13px]">
                         <div>
                           <div className="text-[#777287] text-[12px]">เวลาสแกนเข้า</div>
                           {row.check_in_time ? (
@@ -871,6 +1061,11 @@ export function HrAttendanceView({
                               secondaryFlags={row.secondary_flags}
                               earlyCheckoutMinutes={row.early_checkout_minutes}
                             />
+                            {getNoScanOrMappingHint(row) && (
+                              <div className="text-[11.5px] text-[#C74455] mt-1 leading-snug">
+                                {getNoScanOrMappingHint(row)}
+                              </div>
+                            )}
                             {row.leave_type && (
                               <div className="text-[12px] text-[#4E3978] mt-1">
                                 ลาบางส่วน ({row.leave_start_time}–{row.leave_end_time} น.)
@@ -923,7 +1118,10 @@ export function HrAttendanceView({
       {/* Slide-Over Detail Drawer for Inspecting Raw Scan Evidence & Recording HR Review */}
       <SlideOverDrawer
         open={Boolean(selectedRow)}
-        onClose={() => setSelectedRow(null)}
+        onClose={() => {
+          setSelectedRow(null);
+          setDrawerError(null);
+        }}
         kickerText="แผงตรวจสอบหลักฐานการสแกนและบันทึกหมายเหตุ HR"
         title={selectedRow ? `${selectedRow.full_name}` : ''}
         subtitle={
@@ -934,14 +1132,29 @@ export function HrAttendanceView({
       >
         {selectedRow && (
           <div className="space-y-6">
-            {/* Employee & Shift Summary */}
-            <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#E8E4EF] pb-3">
+            {drawerError && (
+              <div
+                role="alert"
+                className="p-3.5 rounded-xl bg-[#FDF2F4] border border-[#C74455]/25 text-[#C74455] text-[13px] font-medium"
+              >
+                {drawerError}
+              </div>
+            )}
+
+            {/* Employee & Shift Summary (Flat Hairline Surface) */}
+            <div className="divide-y divide-[#E8E4EF] rounded-xl border border-[#E8E4EF] bg-white overflow-hidden">
+              <div className="p-4 flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <div className="text-[12px] text-[#777287]">รหัสบุคลากร · รหัสลายนิ้วมือ · กลุ่มงาน</div>
                   <div className="font-mono font-bold text-[#292638] text-[13.5px] mt-0.5">
-                    {selectedRow.person_id} · สแกน {selectedRow.fingle_id || '—'} ·{' '}
-                    <span className="font-sans font-medium text-[#777287]">{selectedRow.department_name}</span>
+                    {selectedRow.person_id} · สแกน{' '}
+                    <span className={!selectedRow.fingle_id ? 'text-[#C74455]' : ''}>
+                      {selectedRow.fingle_id || 'ยังไม่ผูก'}
+                    </span>{' '}
+                    ·{' '}
+                    <span className="font-sans font-medium text-[#777287]">
+                      {selectedRow.department_name}
+                    </span>
                   </div>
                 </div>
                 <AttendanceStatusText
@@ -951,12 +1164,19 @@ export function HrAttendanceView({
                 />
               </div>
 
+              {getNoScanOrMappingHint(selectedRow) && (
+                <div className="px-4 py-2.5 bg-[#FDF2F4]/60 text-[12.5px] text-[#C74455] font-medium">
+                  {getNoScanOrMappingHint(selectedRow)}
+                </div>
+              )}
+
               {(selectedRow.leave_type || Number(selectedRow.early_checkout_minutes || 0) > 0) && (
-                <div className="flex flex-wrap gap-2 text-[12.5px]">
+                <div className="px-4 py-2.5 flex flex-wrap gap-2 text-[12.5px] bg-[#F8F7FC]">
                   {selectedRow.leave_type && (
                     <StatusBadge tone="primary">
                       ลาบางส่วน {selectedRow.leave_start_time}–{selectedRow.leave_end_time} น. (ประเมินช่วง{' '}
-                      {selectedRow.evaluated_start_time?.slice(11, 16)}–{selectedRow.evaluated_end_time?.slice(11, 16)} น.)
+                      {selectedRow.evaluated_start_time?.slice(11, 16)}–
+                      {selectedRow.evaluated_end_time?.slice(11, 16)} น.)
                     </StatusBadge>
                   )}
                   {Number(selectedRow.early_checkout_minutes || 0) > 0 && (
@@ -967,8 +1187,8 @@ export function HrAttendanceView({
                 </div>
               )}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[13px]">
-                <div className="p-3 rounded-lg bg-white border border-[#E8E4EF]">
+              <div className="grid grid-cols-1 sm:grid-cols-2 divide-y sm:divide-y-0 sm:divide-x divide-[#E8E4EF] text-[13px] bg-[#F8F7FC]">
+                <div className="p-4">
                   <div className="text-[12px] text-[#777287]">หลักฐานเวลาสแกนเข้า</div>
                   <div className="font-mono font-semibold text-[#292638] mt-1 tabular-nums">
                     {selectedRow.check_in_time
@@ -980,7 +1200,7 @@ export function HrAttendanceView({
                   </div>
                 </div>
 
-                <div className="p-3 rounded-lg bg-white border border-[#E8E4EF]">
+                <div className="p-4">
                   <div className="text-[12px] text-[#777287]">หลักฐานเวลาสแกนออก</div>
                   <div className="font-mono font-semibold text-[#292638] mt-1 tabular-nums">
                     {selectedRow.check_out_time
@@ -1176,25 +1396,46 @@ export function HrAttendanceView({
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 pt-2">
                 <button
                   type="button"
+                  disabled={savingNote || savingReview}
                   onClick={handleAddNote}
                   className="ent-btn-secondary w-full sm:w-auto"
                 >
-                  <FileText className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
-                  <span>บันทึกหมายเหตุ</span>
+                  {savingNote ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-[#8066B5]" aria-hidden="true" />
+                  ) : (
+                    <FileText className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+                  )}
+                  <span>{savingNote ? 'กำลังบันทึก...' : 'บันทึกหมายเหตุ'}</span>
                 </button>
                 <button
                   type="button"
+                  disabled={savingReview || savingNote}
                   onClick={handleConfirmReview}
                   className="ent-btn-primary w-full sm:w-auto"
                 >
-                  <CheckCircle2 className="w-4 h-4" aria-hidden="true" />
-                  <span>ยืนยันรับรองผลตรวจสอบ HR</span>
+                  {savingReview ? (
+                    <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <CheckCircle2 className="w-4 h-4" aria-hidden="true" />
+                  )}
+                  <span>{savingReview ? 'กำลังรับรองผล...' : 'ยืนยันรับรองผลตรวจสอบ HR'}</span>
                 </button>
               </div>
             </div>
           </div>
         )}
       </SlideOverDrawer>
+
+      <ConfirmDialog
+        open={confirmReprocessOpen}
+        onCancel={() => !executingReprocess && setConfirmReprocessOpen(false)}
+        onConfirm={handleExecuteReprocess}
+        title="ยืนยันการคำนวณผลเวลาปฏิบัติงานซ้ำ (Reprocess)"
+        description={`ระบบจะประมวลผลการจับคู่เวลาสแกนกับตารางเวรในช่วงวันที่ ${formatThaiDate(reprocessFrom)} ถึง ${formatThaiDate(reprocessTo)} โดยไม่แก้ไขข้อมูลสแกนต้นฉบับและหมายเหตุเดิม`}
+        confirmLabel={executingReprocess ? 'กำลังคำนวณเวลาซ้ำ...' : 'ยืนยันคำนวณเวลาซ้ำ'}
+        variant="primary"
+        loading={executingReprocess}
+      />
 
       {mode === 'review' && reviewHistory.length > 0 && (
         <div className="his-surface overflow-hidden">

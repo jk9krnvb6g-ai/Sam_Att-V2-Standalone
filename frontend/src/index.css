@@ -279,6 +279,36 @@
     cursor: not-allowed;
   }
 
+  /* Soft Lavender Button — Secondary Contextual Action */
+  .ent-btn-soft {
+    min-height: var(--control-height);
+    padding: 0.45rem 0.95rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--brand-primary-dark);
+    background-color: var(--lavender-soft);
+    border: 1px solid rgba(128, 102, 181, 0.22);
+    border-radius: var(--radius-sm);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    text-align: center;
+    transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+    cursor: pointer;
+  }
+
+  .ent-btn-soft:hover:not(:disabled) {
+    background-color: var(--lavender-light);
+    border-color: var(--brand-primary);
+    color: var(--brand-primary-dark);
+  }
+
+  .ent-btn-soft:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
   /* Danger Button — Semantic Crimson */
   .ent-btn-danger {
     min-height: var(--control-height);
@@ -338,6 +368,7 @@
   @media (min-width: 640px) {
     .ent-btn-primary,
     .ent-btn-secondary,
+    .ent-btn-soft,
     .ent-btn-danger,
     .ent-btn-ghost {
       white-space: nowrap;

@@ -187,10 +187,14 @@ export function getShiftIconKindThaiLabel(kind: ShiftIconKind): string {
 export interface EffectiveCellLike {
   mode:
     | 'CLEARED_ALL_SHIFTS'
+    | 'PUBLIC_HOLIDAY'
+    | 'PERSONAL_HOLIDAY'
+    | 'NON_WORKING_DAY'
     | 'CUSTOM_ASSIGNED'
     | 'DEFAULT_FROM_TYPE'
     | 'UNCONFIGURED_DEFAULT_RULE'
     | 'UNCONFIGURED';
+  holidayLabel?: string | null;
   activeItems: Array<{
     id?: number | string;
     snapshot_shift_code?: string;
@@ -210,6 +214,7 @@ export interface EffectiveCellLike {
     default_shift_end_time?: string | null;
     default_shift_grace_minutes?: number | null;
     default_shift_is_cross_midnight?: number | null;
+    default_workdays?: string | null;
     default_start_time?: string;
     default_end_time?: string;
     default_grace_minutes?: number;
@@ -219,7 +224,7 @@ export interface EffectiveCellLike {
 /**
  * สร้าง ViewModel สำหรับช่องวันที่ในตารางเวรรายเดือน:
  * - สูงสุด maxVisible (ค่าเริ่มต้น 2) Icon; หากมีมากกว่า 2 กะให้คืน overflowCount เพื่อแสดง +N
- * - วันไม่มีเวรคืน kind = 'EMPTY_DASH' (แสดงเครื่องหมายขีด "—")
+ * - วันไม่มีเวร / วันหยุด / นอกวันทำงาน / ยังไม่กำหนดกะ คืน kind = 'EMPTY_DASH' (แสดงเครื่องหมายขีด "—")
  * - กะเริ่มต้น (DEFAULT) แยกจากกะที่เจ้าหน้าที่กำหนดเอง (CUSTOM) ชัดเจน
  */
 export function buildCompactMonthlyCellViewModel(
@@ -230,7 +235,7 @@ export function buildCompactMonthlyCellViewModel(
   if (cellEff.mode === 'CLEARED_ALL_SHIFTS') {
     const tooltipLines = [
       `วันที่ ${formattedThaiDate}`,
-      'สถานะ: ไม่มีเวร (เจ้าหน้าที่ลบเวรวันนี้ออกแล้ว)',
+      'สถานะ: ไม่มีเวร (เจ้าหน้าที่ยกเลิกเวรวันนี้ออกแล้ว)',
       'คลิกเพื่อเพิ่มเวรหรือคืนค่ากะเริ่มต้น',
     ];
     return {
@@ -241,7 +246,81 @@ export function buildCompactMonthlyCellViewModel(
       overflowCount: 0,
       tooltipLines,
       tooltipText: tooltipLines.join('\n'),
-      ariaLabel: `${formattedThaiDate} ไม่มีเวร (ลบเวรแล้ว) คลิกเพื่อจัดการ`,
+      ariaLabel: `${formattedThaiDate} ไม่มีเวร (ยกเลิกเวรแล้ว) คลิกเพื่อจัดการ`,
+    };
+  }
+
+  if (cellEff.mode === 'PUBLIC_HOLIDAY') {
+    const label = cellEff.holidayLabel ? `วันหยุดราชการ (${cellEff.holidayLabel})` : 'วันหยุดราชการ';
+    const tooltipLines = [
+      `วันที่ ${formattedThaiDate}`,
+      `สถานะ: ${label} — ไม่นำกะเริ่มต้นมาใช้`,
+      'คลิกเพื่อจัดตารางเวรรายบุคคล (หากต้องขึ้นปฏิบัติงานในวันหยุด)',
+    ];
+    return {
+      kind: 'EMPTY_DASH',
+      isClearedByStaff: false,
+      totalShifts: 0,
+      visibleIcons: [],
+      overflowCount: 0,
+      tooltipLines,
+      tooltipText: tooltipLines.join('\n'),
+      ariaLabel: `${formattedThaiDate} ${label} คลิกเพื่อจัดเวรรายบุคคล`,
+    };
+  }
+
+  if (cellEff.mode === 'PERSONAL_HOLIDAY') {
+    const label = cellEff.holidayLabel ? `วันหยุดเฉพาะบุคคล (${cellEff.holidayLabel})` : 'วันหยุดเฉพาะบุคคล';
+    const tooltipLines = [
+      `วันที่ ${formattedThaiDate}`,
+      `สถานะ: ${label} — ไม่นำกะเริ่มต้นมาใช้`,
+      'คลิกเพื่อจัดการเวรรายวัน',
+    ];
+    return {
+      kind: 'EMPTY_DASH',
+      isClearedByStaff: true,
+      totalShifts: 0,
+      visibleIcons: [],
+      overflowCount: 0,
+      tooltipLines,
+      tooltipText: tooltipLines.join('\n'),
+      ariaLabel: `${formattedThaiDate} ${label}`,
+    };
+  }
+
+  if (cellEff.mode === 'NON_WORKING_DAY') {
+    const tooltipLines = [
+      `วันที่ ${formattedThaiDate}`,
+      'สถานะ: วันหยุดประจำสัปดาห์ (อยู่นอกวันทำงานของกะเริ่มต้น)',
+      'คลิกเพื่อจัดเวรรายบุคคลเพิ่มเติมในวันนี้',
+    ];
+    return {
+      kind: 'EMPTY_DASH',
+      isClearedByStaff: false,
+      totalShifts: 0,
+      visibleIcons: [],
+      overflowCount: 0,
+      tooltipLines,
+      tooltipText: tooltipLines.join('\n'),
+      ariaLabel: `${formattedThaiDate} วันหยุดประจำสัปดาห์ คลิกเพื่อจัดเวร`,
+    };
+  }
+
+  if (cellEff.mode === 'UNCONFIGURED_DEFAULT_RULE' || cellEff.mode === 'UNCONFIGURED') {
+    const tooltipLines = [
+      `วันที่ ${formattedThaiDate}`,
+      'สถานะ: ยังไม่กำหนดกะ (ไม่มีเวรรายบุคคลและประเภทบุคลากรนี้ยังไม่ได้กำหนดกะเริ่มต้น)',
+      'คลิกเพื่อจัดเวรรายบุคคล หรือกำหนดกะเริ่มต้นที่หัวข้อ “กะเริ่มต้นตามประเภทบุคลากร”',
+    ];
+    return {
+      kind: 'EMPTY_DASH',
+      isClearedByStaff: false,
+      totalShifts: 0,
+      visibleIcons: [],
+      overflowCount: 0,
+      tooltipLines,
+      tooltipText: tooltipLines.join('\n'),
+      ariaLabel: `${formattedThaiDate} ยังไม่กำหนดกะ คลิกเพื่อจัดเวร`,
     };
   }
 
@@ -252,7 +331,7 @@ export function buildCompactMonthlyCellViewModel(
     if (!startTime || !endTime) {
       const tooltipLines = [
         `วันที่ ${formattedThaiDate}`,
-        'สถานะ: ไม่พบกะที่กำหนด (ยังไม่ได้กำหนดกะเริ่มต้นของประเภทบุคลากรนี้)',
+        'สถานะ: ยังไม่กำหนดกะ (ประเภทบุคลากรนี้ยังไม่ได้กำหนดกะเริ่มต้น)',
         'คลิกเพื่อจัดเวรรายวัน หรือกำหนดกะเริ่มต้นในแท็บแม่แบบกะทำงาน',
       ];
       return {
@@ -263,7 +342,7 @@ export function buildCompactMonthlyCellViewModel(
         overflowCount: 0,
         tooltipLines,
         tooltipText: tooltipLines.join('\n'),
-        ariaLabel: `${formattedThaiDate} ไม่พบกะที่กำหนด คลิกเพื่อจัดการ`,
+        ariaLabel: `${formattedThaiDate} ยังไม่กำหนดกะ คลิกเพื่อจัดการ`,
       };
     }
 

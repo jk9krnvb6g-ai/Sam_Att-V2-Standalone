@@ -332,7 +332,7 @@ export function Sidebar({
                 }
               >
                 {!collapsed && (
-                  <div className="px-3 pb-1 text-[11px] font-bold uppercase tracking-wider text-[#777287]">
+                  <div className="px-3 pb-1 text-[12px] font-semibold text-[#777287]">
                     {group.title}
                   </div>
                 )}

@@ -25,7 +25,11 @@ import {
   Loader2,
   Inbox,
 } from 'lucide-react';
-import { type PeriodMode, resolvePeriodRange } from '../../utils/thaiFormat.ts';
+import {
+  type PeriodMode,
+  resolvePeriodRange,
+  getCurrentBangkokDateParts,
+} from '../../utils/thaiFormat.ts';
 
 export type PageSizeOption = 10 | 50 | 100 | 'ALL';
 
@@ -100,7 +104,7 @@ export function SectionHeader({
     >
       <div className="min-w-0 space-y-0.5">
         {kicker && (
-          <div className="text-[11.5px] font-semibold text-[#8066B5] uppercase tracking-wider">
+          <div className="text-[12px] font-semibold text-[#8066B5]">
             {kicker}
           </div>
         )}
@@ -994,8 +998,18 @@ export function PeriodFilterBar({
             onChange={(e) => onYearValueChange(e.target.value)}
             className="ent-input font-mono tabular-nums w-full sm:w-auto"
           >
-            <option value="2026">พ.ศ. 2569 (2026)</option>
-            <option value="2025">พ.ศ. 2568 (2025)</option>
+            {(() => {
+              const currentYear = Number(getCurrentBangkokDateParts().currentYear);
+              const years = Array.from({ length: 6 }, (_, i) => currentYear + 1 - i);
+              if (yearValue && !years.includes(Number(yearValue))) {
+                years.push(Number(yearValue));
+              }
+              return years.map((yr) => (
+                <option key={yr} value={String(yr)}>
+                  พ.ศ. {yr + 543} ({yr})
+                </option>
+              ));
+            })()}
           </select>
         )}
 
@@ -1404,14 +1418,14 @@ export function ProgressDialog({
               />
             ) : (
               <div
-                className={`h-full w-full ${
+                className={`h-full w-full transition-colors ${
                   status === 'FAILED'
                     ? 'bg-[#C74455]'
                     : status === 'PARTIAL_SUCCESS'
                       ? 'bg-[#B87516]'
                       : status === 'SUCCESS'
                         ? 'bg-[#198568]'
-                        : 'bg-[#8066B5]/70 animate-pulse'
+                        : 'bg-[#8066B5]/65'
                 }`}
               />
             )}

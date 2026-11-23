@@ -27,6 +27,8 @@ import {
   resolveEffectiveDailyScheduleForPersonDate,
   computeAbsoluteIntervalMinutes,
   loadPersonnelTypeRulesWithDefaultShifts,
+  loadActivePublicHolidaysMap,
+  isFullDayPersonalHolidayLeaveType,
   type DailyOverrideRow,
   type ExistingAssignmentRow,
   type PersonnelTypeRuleRow,
@@ -549,16 +551,76 @@ export async function computeAttendanceOutcomes(
     });
   }
 
+  // Load official public holidays and active leaves BEFORE resolving daily schedules (4-Step Priority Order)
+  const publicHolidayMap = await loadActivePublicHolidaysMap(evalDateFrom, evalDateTo);
+
+  const leaveParams: unknown[] = [evalDateFrom, evalDateTo];
+  let leavePersonClause = '';
+  if (options.personId) {
+    leavePersonClause = ' AND person_id = ?';
+    leaveParams.push(options.personId);
+  }
+  let rawLeaves: Array<{
+    id: number;
+    person_id: string;
+    work_date: string;
+    shift_assignment_id: number | null;
+    leave_type: string;
+    leave_start_time: string;
+    leave_end_time: string;
+    reason: string | null;
+  }> = [];
+  try {
+    rawLeaves = await dbQuery(
+      `SELECT id, person_id, work_date, shift_assignment_id, leave_type, leave_start_time, leave_end_time, reason
+       FROM attendance_leaves
+       WHERE status = 'ACTIVE'
+         AND work_date >= ? AND work_date <= ?${leavePersonClause}
+       ORDER BY id ASC`,
+      leaveParams
+    );
+  } catch {
+    rawLeaves = [];
+  }
+
+  const leavesByPerson = new Map<string, MatchingLeaveInput[]>();
+  const personalHolidayByPersonDate = new Map<string, { label?: string | null; reason?: string | null }>();
+  for (const lv of rawLeaves) {
+    const pid = String(lv.person_id || '').trim();
+    const wDate = normalizeWorkDateString(lv.work_date);
+    const list = leavesByPerson.get(pid) || [];
+    list.push({
+      id: Number(lv.id),
+      personId: pid,
+      workDate: wDate,
+      shiftAssignmentId: lv.shift_assignment_id !== null ? Number(lv.shift_assignment_id) : null,
+      leaveType: lv.leave_type,
+      leaveStartTime: lv.leave_start_time,
+      leaveEndTime: lv.leave_end_time,
+      reason: lv.reason,
+    });
+    leavesByPerson.set(pid, list);
+
+    if (isFullDayPersonalHolidayLeaveType(lv.leave_type)) {
+      personalHolidayByPersonDate.set(`${pid}:${wDate}`, {
+        label: lv.reason || lv.leave_type,
+        reason: lv.reason,
+      });
+    }
+  }
+
   // Construct effective shift inputs across [evalDateFrom .. evalDateTo] per person
   const dateList = buildDateRangeList(evalDateFrom, evalDateTo);
   const shiftsByPerson = new Map<string, MatchingShiftInput[]>();
 
   for (const workDate of dateList) {
+    const dayPublicHoliday = publicHolidayMap.get(workDate) || null;
     for (const person of activePersonnel) {
       const pid = String(person.person_id ?? '').trim();
       const key = `${pid}:${workDate}`;
       const dayAssignments = assignmentsByPersonDate.get(key) || [];
       const dayOverride = overridesByPersonDate.get(key) || null;
+      const dayPersonalHoliday = personalHolidayByPersonDate.get(key) || null;
 
       const resolved = resolveEffectiveDailyScheduleForPersonDate({
         person,
@@ -566,10 +628,15 @@ export async function computeAttendanceOutcomes(
         activeAssignments: dayAssignments,
         dailyOverride: dayOverride,
         rulesByCode,
+        publicHoliday: dayPublicHoliday,
+        personalHoliday: dayPersonalHoliday,
       });
 
       if (
         resolved.state === 'CLEARED_ALL_SHIFTS' ||
+        resolved.state === 'PUBLIC_HOLIDAY' ||
+        resolved.state === 'PERSONAL_HOLIDAY' ||
+        resolved.state === 'NON_WORKING_DAY' ||
         resolved.state === 'UNCONFIGURED_DEFAULT_RULE'
       ) {
         continue;
@@ -715,52 +782,7 @@ export async function computeAttendanceOutcomes(
     }
   }
 
-  // Load active half-day / partial leaves across [evalDateFrom .. evalDateTo] (ATT-15)
-  const leaveParams: unknown[] = [evalDateFrom, evalDateTo];
-  let leavePersonClause = '';
-  if (options.personId) {
-    leavePersonClause = ' AND person_id = ?';
-    leaveParams.push(options.personId);
-  }
-  let rawLeaves: Array<{
-    id: number;
-    person_id: string;
-    work_date: string;
-    shift_assignment_id: number | null;
-    leave_type: string;
-    leave_start_time: string;
-    leave_end_time: string;
-    reason: string | null;
-  }> = [];
-  try {
-    rawLeaves = await dbQuery(
-      `SELECT id, person_id, work_date, shift_assignment_id, leave_type, leave_start_time, leave_end_time, reason
-       FROM attendance_leaves
-       WHERE status = 'ACTIVE'
-         AND work_date >= ? AND work_date <= ?${leavePersonClause}
-       ORDER BY id ASC`,
-      leaveParams
-    );
-  } catch {
-    rawLeaves = [];
-  }
-
-  const leavesByPerson = new Map<string, MatchingLeaveInput[]>();
-  for (const lv of rawLeaves) {
-    const pid = String(lv.person_id || '').trim();
-    const list = leavesByPerson.get(pid) || [];
-    list.push({
-      id: Number(lv.id),
-      personId: pid,
-      workDate: normalizeWorkDateString(lv.work_date),
-      shiftAssignmentId: lv.shift_assignment_id !== null ? Number(lv.shift_assignment_id) : null,
-      leaveType: lv.leave_type,
-      leaveStartTime: lv.leave_start_time,
-      leaveEndTime: lv.leave_end_time,
-      reason: lv.reason,
-    });
-    leavesByPerson.set(pid, list);
-  }
+  // Active leaves were loaded above before daily schedule resolution and mapped into leavesByPerson.
 
   // Run Global Multi-Shift Matching per person
   const results: CalculatedShiftAttendance[] = [];

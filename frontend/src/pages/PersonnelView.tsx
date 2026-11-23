@@ -21,7 +21,6 @@ import {
   StatusBadge,
   SortableHeader,
   TablePaginationBar,
-  NotificationBanner,
   TableEmptyState,
   TableLoadingSkeleton,
   ConfirmDialog,
@@ -30,6 +29,7 @@ import {
   RequiredMark,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
+import { useToast } from '../components/common/ToastContext.tsx';
 import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
 import type { NavViewKey } from '../components/layout/Sidebar.tsx';
 import {
@@ -66,12 +66,18 @@ export function PersonnelView({
   const [progressError, setProgressError] = useState<string | null>(null);
 
   const initialBkk = useMemo(() => getCurrentBangkokDateParts(), []);
+  const toast = useToast();
 
   // Sorting & Pagination
   const [sortKey, setSortKey] = useState('person_id');
   const [sortDir, setSortDir] = useState<'ASC' | 'DESC'>('ASC');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<PageSizeOption>(10);
+
+  const [issuesPage, setIssuesPage] = useState(1);
+  const [issuesPageSize, setIssuesPageSize] = useState<PageSizeOption>(10);
+  const [logsPage, setLogsPage] = useState(1);
+  const [logsPageSize, setLogsPageSize] = useState<PageSizeOption>(10);
 
   // Resolve unmatched raw scans state
   const [resolveDateFrom, setResolveDateFrom] = useState(initialBkk.monthStartYmd);
@@ -246,16 +252,17 @@ export function PersonnelView({
         }),
       });
       const attCount = Number(res.reprocess?.processedCount || 0);
-      setSyncNotice(
-        `ตรวจสอบสแกนค้างสำเร็จ (${formatThaiDate(resolveDateFrom)} – ${formatThaiDate(resolveDateTo)}): จับคู่เพิ่ม ${res.newlyMatched ?? 0} รายการ · ยังไม่พบ ${res.stillUnmatched ?? 0} รายการ · ซ้ำซ้อน ${res.conflicts ?? 0} รายการ${attCount > 0 ? ` · ประมวลผลเวรใหม่ ${attCount} รายการ` : ''}`
-      );
+      const msg = `ตรวจสอบสแกนค้างสำเร็จ (${formatThaiDate(resolveDateFrom)} – ${formatThaiDate(resolveDateTo)}): จับคู่เพิ่ม ${res.newlyMatched ?? 0} · ยังไม่พบ ${res.stillUnmatched ?? 0} · ซ้ำซ้อน ${res.conflicts ?? 0}${attCount > 0 ? ` · ประมวลผลเวรใหม่ ${attCount}` : ''}`;
+      setSyncNotice(msg);
+      toast.showSuccess('ตรวจสอบและจับคู่สแกนค้างสำเร็จ', msg);
       await loadPersonnel();
     } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      } else {
-        setError({ message: 'ไม่สามารถตรวจสอบและจับคู่สแกนค้างได้' });
-      }
+      const errMsg =
+        err instanceof ApiClientError
+          ? err.message
+          : 'ไม่สามารถตรวจสอบและจับคู่สแกนค้างได้';
+      setError({ code: err instanceof ApiClientError ? err.code : undefined, message: errMsg });
+      toast.showError('ตรวจสอบสแกนค้างไม่สำเร็จ', errMsg);
     } finally {
       setResolvingUnmatched(false);
     }
@@ -346,9 +353,9 @@ export function PersonnelView({
       );
       const newlyMatched = Number(res.mappingResolution?.newlyMatched || 0);
       const processed = Number(res.reprocess?.processedCount || 0);
-      setSyncNotice(
-        `อนุมัติปรับวันที่มีผลย้อนหลังของ ${retroMappingTarget.full_name} (FINGLE_ID ${retroMappingTarget.fingle_id}) เป็น ${formatThaiDate(retroEffectiveFrom)} สำเร็จ: จับคู่สแกนเพิ่ม ${newlyMatched} รายการ${processed > 0 ? ` · ประมวลผลเวรใหม่ ${processed} รายการ` : ''}`
-      );
+      const msg = `อนุมัติปรับวันที่มีผลย้อนหลังของ ${retroMappingTarget.full_name} (FINGLE_ID ${retroMappingTarget.fingle_id}) เป็น ${formatThaiDate(retroEffectiveFrom)} สำเร็จ: จับคู่สแกนเพิ่ม ${newlyMatched} รายการ${processed > 0 ? ` · ประมวลผลเวรใหม่ ${processed} รายการ` : ''}`;
+      setSyncNotice(msg);
+      toast.showSuccess('อนุมัติปรับวันที่มีผลย้อนหลังสำเร็จ', msg);
       handleCloseRetroModal();
       await loadPersonnel();
     } catch (err) {
@@ -417,8 +424,19 @@ export function PersonnelView({
         }
       />
 
-      <ErrorBanner error={error} />
-      <NotificationBanner message={syncNotice} onClose={() => setSyncNotice(null)} />
+      <ErrorBanner error={error} onRetry={loadPersonnel} />
+      {syncNotice && (
+        <div className="px-4 py-3 rounded-xl bg-[#EEF8F4] border border-[#198568]/25 text-[13.5px] text-[#198568] flex items-center justify-between gap-3">
+          <span className="font-medium">{syncNotice}</span>
+          <button
+            type="button"
+            onClick={() => setSyncNotice(null)}
+            className="text-[12.5px] font-semibold underline shrink-0 cursor-pointer"
+          >
+            ปิด
+          </button>
+        </div>
+      )}
 
       {/* Unified 4-Column Metric Strip */}
       <MetricStrip
@@ -629,9 +647,9 @@ export function PersonnelView({
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="font-semibold text-[14px] text-[#292638]">{p.full_name}</span>
                           {Number(p.is_active) === 0 && (
-                            <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-[#F3F2F7] text-[#666079] border border-[#DDD8E8]">
-                              ไม่ปฏิบัติงาน (HR_STATUS ≠ 01)
-                            </span>
+                            <StatusBadge tone="neutral" compact>
+                              ไม่ปฏิบัติงาน
+                            </StatusBadge>
                           )}
                         </div>
                         <div className="text-[12px] font-mono text-[#777287] mt-0.5">
@@ -647,7 +665,7 @@ export function PersonnelView({
                       <td className="text-[#292638] font-medium">{p.department_name}</td>
                       <td className="font-mono tabular-nums">
                         {p.fingle_id ? (
-                          <span className="font-semibold text-[13.5px] text-[#4E3978] bg-[#F1ECFA] px-2.5 py-1 rounded-md border border-[#E8E4EF]">
+                          <span className="font-semibold text-[13.5px] text-[#4E3978]">
                             {p.fingle_id}
                           </span>
                         ) : (
@@ -730,7 +748,13 @@ export function PersonnelView({
                       title="ไม่พบปัญหาการเชื่อมโยงรหัสสแกน บุคลากรทุกคนมีรหัส FINGLE_ID ครบถ้วนและไม่ซ้ำซ้อน"
                     />
                   ) : (
-                    issuesData.personnelIssues.map((issue: any) => (
+                    (issuesPageSize === 'ALL'
+                      ? issuesData.personnelIssues
+                      : issuesData.personnelIssues.slice(
+                          (issuesPage - 1) * issuesPageSize,
+                          issuesPage * issuesPageSize
+                        )
+                    ).map((issue: any) => (
                       <tr key={issue.person_id}>
                         <td className="font-mono font-semibold text-[#292638]">
                           {issue.person_id}
@@ -864,7 +888,7 @@ export function PersonnelView({
                           )}
                         </td>
                         <td>
-                          <StatusBadge tone={m.conflict_state === 'NONE' ? 'success' : 'danger'} dot>
+                          <StatusBadge tone={m.conflict_state === 'NONE' ? 'success' : 'danger'}>
                             {m.conflict_state === 'NONE' ? 'ปกติ' : m.conflict_state}
                           </StatusBadge>
                         </td>
@@ -886,6 +910,15 @@ export function PersonnelView({
                 </tbody>
               </table>
             </div>
+            {(issuesData?.personnelIssues?.length || 0) > 10 && (
+              <TablePaginationBar
+                currentPage={issuesPage}
+                pageSize={issuesPageSize}
+                totalItems={issuesData?.personnelIssues?.length || 0}
+                onPageChange={setIssuesPage}
+                onPageSizeChange={setIssuesPageSize}
+              />
+            )}
           </div>
         </div>
       ) : (
@@ -907,7 +940,10 @@ export function PersonnelView({
                 {syncLogs.length === 0 ? (
                   <TableEmptyState colSpan={7} title="ยังไม่มีประวัติการสั่งซิงก์ข้อมูลจาก HOSOffice" />
                 ) : (
-                  syncLogs.map((log) => (
+                  (logsPageSize === 'ALL'
+                    ? syncLogs
+                    : syncLogs.slice((logsPage - 1) * logsPageSize, logsPage * logsPageSize)
+                  ).map((log) => (
                     <tr key={log.id}>
                       <td className="font-mono tabular-nums font-semibold text-[#292638]">
                         #{log.id}
@@ -916,7 +952,7 @@ export function PersonnelView({
                         {formatThaiDateTime(log.started_at)}
                       </td>
                       <td>
-                        <StatusBadge tone={log.status === 'SUCCESS' ? 'success' : 'danger'} dot>
+                        <StatusBadge tone={log.status === 'SUCCESS' ? 'success' : 'danger'}>
                           {log.status === 'SUCCESS' ? 'สำเร็จ' : 'ไม่สำเร็จ'}
                         </StatusBadge>
                       </td>
@@ -936,6 +972,13 @@ export function PersonnelView({
               </tbody>
             </table>
           </div>
+          <TablePaginationBar
+            currentPage={logsPage}
+            pageSize={logsPageSize}
+            totalItems={syncLogs.length}
+            onPageChange={setLogsPage}
+            onPageSizeChange={setLogsPageSize}
+          />
         </div>
       )}
 

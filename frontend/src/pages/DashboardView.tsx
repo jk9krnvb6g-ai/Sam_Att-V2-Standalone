@@ -141,18 +141,16 @@ export function DashboardView({
 
   const kpi = data?.kpi;
   const telemetry = data?.scannerTelemetry;
-  const availableDepartments: string[] =
-    Array.isArray(data?.availableDepartments) && data.availableDepartments.length > 0
-      ? data.availableDepartments
-      : ['กลุ่มงานการแพทย์', 'กลุ่มงานการพยาบาล', 'กลุ่มงานบริหารทั่วไป', 'กลุ่มงานเภสัชกรรม'];
-  const availablePersonnelTypes: Array<{ code: string; name: string }> =
-    Array.isArray(data?.availablePersonnelTypes) && data.availablePersonnelTypes.length > 0
-      ? data.availablePersonnelTypes
-      : [
-          { code: 'CIVIL_SERVANT', name: 'ข้าราชการ' },
-          { code: 'PUBLIC_HEALTH_EMP', name: 'พนักงานกระทรวงสาธารณสุข (พกส.)' },
-          { code: 'TEMP_EMPLOYEE', name: 'ลูกจ้างชั่วคราว' },
-        ];
+  const availableDepartments: string[] = Array.isArray(data?.availableDepartments)
+    ? data.availableDepartments
+    : [];
+  const availablePersonnelTypes: Array<{ code: string; name: string }> = Array.isArray(
+    data?.availablePersonnelTypes
+  )
+    ? data.availablePersonnelTypes
+    : [];
+  const [drillPage, setDrillPage] = useState(1);
+  const [drillPageSize, setDrillPageSize] = useState<PageSizeOption>(10);
 
   function handleSortRanking(key: string) {
     if (rankSortKey === key) {
@@ -587,15 +585,18 @@ export function DashboardView({
                   )}
                 </div>
 
-                {/* Hairline-Divided Breakdown List (No Nested Cards) */}
+                {/* Hairline-Divided Breakdown List (Zero Decorative Dots, Proportional Bars) */}
                 <div className="divide-y divide-[#E8E4EF] border-t border-[#E8E4EF]">
                   <button
                     type="button"
-                    onClick={() => openKpiDrilldown('NORMAL')}
+                    onClick={() => {
+                      setDrillPage(1);
+                      openKpiDrilldown('NORMAL');
+                    }}
                     className="w-full py-3 flex items-center justify-between gap-3 text-left hover:bg-[#F8F7FC] px-2 -mx-2 rounded-md transition-colors cursor-pointer"
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <span className="w-2.5 h-2.5 rounded-full bg-[#198568] shrink-0" />
+                      <span className="w-1 h-4 rounded-xs bg-[#198568] shrink-0" aria-hidden="true" />
                       <span className="text-[14px] font-medium text-[#292638]">
                         ลงเวลาปกติ (สแกนเข้า–ออกครบ)
                       </span>
@@ -607,11 +608,14 @@ export function DashboardView({
 
                   <button
                     type="button"
-                    onClick={() => openKpiDrilldown('LATE')}
+                    onClick={() => {
+                      setDrillPage(1);
+                      openKpiDrilldown('LATE');
+                    }}
                     className="w-full py-3 flex items-center justify-between gap-3 text-left hover:bg-[#F8F7FC] px-2 -mx-2 rounded-md transition-colors cursor-pointer"
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <span className="w-2.5 h-2.5 rounded-full bg-[#B87516] shrink-0" />
+                      <span className="w-1 h-4 rounded-xs bg-[#B87516] shrink-0" aria-hidden="true" />
                       <span className="text-[14px] font-medium text-[#292638]">
                         มาสาย (สแกนออกครบ)
                       </span>
@@ -623,16 +627,19 @@ export function DashboardView({
 
                   <button
                     type="button"
-                    onClick={() => openKpiDrilldown('MISSING_CHECKOUT')}
+                    onClick={() => {
+                      setDrillPage(1);
+                      openKpiDrilldown('MISSING_CHECKOUT');
+                    }}
                     className="w-full py-3 flex items-center justify-between gap-3 text-left hover:bg-[#F8F7FC] px-2 -mx-2 rounded-md transition-colors cursor-pointer"
                   >
                     <div className="min-w-0">
                       <div className="flex items-center gap-2.5">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#E5A93C] shrink-0" />
+                        <span className="w-1 h-4 rounded-xs bg-[#E5A93C] shrink-0" aria-hidden="true" />
                         <span className="text-[14px] font-medium text-[#292638]">ไม่สแกนออกงาน</span>
                       </div>
                       {statusMissingOutAndLateCount > 0 && (
-                        <div className="text-[12px] text-[#777287] pl-5 mt-0.5">
+                        <div className="text-[12px] text-[#777287] pl-3.5 mt-0.5">
                           เข้าสายร่วมด้วย {statusMissingOutAndLateCount} เวร
                         </div>
                       )}
@@ -644,11 +651,14 @@ export function DashboardView({
 
                   <button
                     type="button"
-                    onClick={() => openKpiDrilldown('NO_SCAN')}
+                    onClick={() => {
+                      setDrillPage(1);
+                      openKpiDrilldown('NO_SCAN');
+                    }}
                     className="w-full py-3 flex items-center justify-between gap-3 text-left hover:bg-[#F8F7FC] px-2 -mx-2 rounded-md transition-colors cursor-pointer"
                   >
                     <div className="flex items-center gap-2.5 min-w-0">
-                      <span className="w-2.5 h-2.5 rounded-full bg-[#C74455] shrink-0" />
+                      <span className="w-1 h-4 rounded-xs bg-[#C74455] shrink-0" aria-hidden="true" />
                       <span className="text-[14px] font-medium text-[#292638]">
                         ไม่พบข้อมูลสแกน (NO_SCAN)
                       </span>
@@ -661,11 +671,14 @@ export function DashboardView({
                   {statusMissingInCount > 0 && (
                     <button
                       type="button"
-                      onClick={() => openKpiDrilldown('MISSING_CHECKIN')}
+                      onClick={() => {
+                        setDrillPage(1);
+                        openKpiDrilldown('MISSING_CHECKIN');
+                      }}
                       className="w-full py-3 flex items-center justify-between gap-3 text-left hover:bg-[#F8F7FC] px-2 -mx-2 rounded-md transition-colors cursor-pointer"
                     >
                       <div className="flex items-center gap-2.5 min-w-0">
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#D97757] shrink-0" />
+                        <span className="w-1 h-4 rounded-xs bg-[#D97757] shrink-0" aria-hidden="true" />
                         <span className="text-[14px] font-medium text-[#292638]">ไม่สแกนเข้างาน</span>
                       </div>
                       <span className="text-[13.5px] font-mono font-bold text-[#C74455] tabular-nums shrink-0">
@@ -1044,53 +1057,75 @@ export function DashboardView({
           ) : null
         }
       >
-        <div className="border border-[#E8E4EF] rounded-xl overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="his-table text-[13.5px]">
-              <thead>
-                <tr>
-                  <th>วันที่ปฏิบัติงาน</th>
-                  <th>ชื่อ-นามสกุล · รหัสบุคลากร</th>
-                  <th>กะปฏิบัติงาน</th>
-                  <th>เวลาเข้า / เวลาออก</th>
-                  <th className="text-right">นาทีสาย</th>
-                  <th>สถานะ</th>
-                </tr>
-              </thead>
-              <tbody>
-                {drillModal?.rows.length === 0 ? (
-                  <TableEmptyState colSpan={6} title="ไม่มีรายการในหมวดหมู่นี้สำหรับช่วงเวลาที่เลือก" />
-                ) : (
-                  drillModal?.rows.map((r: any) => (
-                    <tr key={r.id}>
-                      <td className="font-mono tabular-nums whitespace-nowrap">
-                        {formatThaiDate(r.work_date)}
-                      </td>
-                      <td>
-                        <div className="font-semibold text-[#292638]">{r.full_name}</div>
-                        <div className="text-[12px] font-mono text-[#777287]">{r.person_id}</div>
-                      </td>
-                      <td className="whitespace-nowrap">{r.shift_name}</td>
-                      <td className="font-mono tabular-nums whitespace-nowrap">
-                        {r.check_in_time?.slice(11, 16) || '—'} / {r.check_out_time?.slice(11, 16) || '—'}
-                      </td>
-                      <td className="text-right font-mono tabular-nums font-bold text-[#B87516] whitespace-nowrap">
-                        {r.late_minutes > 0 ? `${r.late_minutes} นาที` : '0'}
-                      </td>
-                      <td className="whitespace-nowrap">
-                        <AttendanceStatusText
-                          status={r.status}
-                          secondaryFlags={r.secondary_flags}
-                          earlyCheckoutMinutes={r.early_checkout_minutes}
-                        />
-                      </td>
+        {(() => {
+          const allRows = drillModal?.rows || [];
+          const pagedDrillRows =
+            drillPageSize === 'ALL'
+              ? allRows
+              : allRows.slice((drillPage - 1) * drillPageSize, drillPage * drillPageSize);
+          return (
+            <div className="-mx-5 sm:-mx-6 -my-5">
+              <div className="overflow-x-auto">
+                <table className="his-table text-[13.5px]">
+                  <thead>
+                    <tr>
+                      <th>วันที่ปฏิบัติงาน</th>
+                      <th>ชื่อ-นามสกุล · รหัสบุคลากร</th>
+                      <th>กะปฏิบัติงาน</th>
+                      <th>เวลาเข้า / เวลาออก</th>
+                      <th className="text-right">นาทีสาย</th>
+                      <th>สถานะ</th>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+                  </thead>
+                  <tbody>
+                    {pagedDrillRows.length === 0 ? (
+                      <TableEmptyState
+                        colSpan={6}
+                        title="ไม่มีรายการในหมวดหมู่นี้สำหรับช่วงเวลาที่เลือก"
+                      />
+                    ) : (
+                      pagedDrillRows.map((r: any) => (
+                        <tr key={r.id}>
+                          <td className="font-mono tabular-nums whitespace-nowrap">
+                            {formatThaiDate(r.work_date)}
+                          </td>
+                          <td>
+                            <div className="font-semibold text-[#292638]">{r.full_name}</div>
+                            <div className="text-[12px] font-mono text-[#777287]">{r.person_id}</div>
+                          </td>
+                          <td className="whitespace-nowrap">{r.shift_name}</td>
+                          <td className="font-mono tabular-nums whitespace-nowrap">
+                            {r.check_in_time?.slice(11, 16) || '—'} /{' '}
+                            {r.check_out_time?.slice(11, 16) || '—'}
+                          </td>
+                          <td className="text-right font-mono tabular-nums font-bold text-[#B87516] whitespace-nowrap">
+                            {r.late_minutes > 0 ? `${r.late_minutes} นาที` : '0'}
+                          </td>
+                          <td className="whitespace-nowrap">
+                            <AttendanceStatusText
+                              status={r.status}
+                              secondaryFlags={r.secondary_flags}
+                              earlyCheckoutMinutes={r.early_checkout_minutes}
+                            />
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {allRows.length > 0 && (
+                <TablePaginationBar
+                  totalItems={allRows.length}
+                  currentPage={drillPage}
+                  pageSize={drillPageSize}
+                  onPageChange={setDrillPage}
+                  onPageSizeChange={setDrillPageSize}
+                />
+              )}
+            </div>
+          );
+        })()}
       </SharedModal>
     </div>
   );

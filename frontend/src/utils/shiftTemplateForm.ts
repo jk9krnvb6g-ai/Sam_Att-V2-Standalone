@@ -1,14 +1,15 @@
 /**
  * ============================================================================
- * ยูทิลิตี้สถานะฟอร์ม การตรวจสอบข้อมูล และแผนที่ข้อผิดพลาดสำหรับ Shift Template Modal
+ * ยูทิลิตี้สถานะฟอร์ม การตรวจสอบข้อมูล และวันทำงานสำหรับแม่แบบกะทำงาน
+ * และกฎกะเริ่มต้นตามประเภทบุคลากร
  * ไฟล์: frontend/src/utils/shiftTemplateForm.ts
  * ============================================================================
  * แยก Pure Functions เพื่อความเสถียร ตรวจสอบได้ด้วย Automated Tests ครบทุกกรณี:
- * - สร้างค่าเริ่มต้นของฟอร์มสำหรับโหมด Create และ Edit
+ * - สร้างค่าเริ่มต้นของฟอร์มแม่แบบกะทำงาน (เฉพาะ 7 ฟิลด์หลัก + สถานะใช้งานในโหมดแก้ไข)
+ * - ไม่มีการกำหนด Default Shift ภายในฟอร์มแม่แบบกะทำงาน (ย้ายไปกำหนดที่ประเภทบุคลากรจุดเดียว)
  * - ตรวจจับการแก้ไขค้างไว้ (Unsaved Changes / Dirty Check)
  * - ตรวจสอบ Required Fields และรูปแบบเวลา/ตัวเลขพร้อมข้อความผิดพลาดใต้ฟิลด์
- * - ตรวจจับกฎ Default Shift ไม่ให้กำหนดซ้ำในประเภทบุคลากรเดียวกัน
- * - แปลง Error Code จาก Backend API เป็นข้อความผิดพลาดระดับฟิลด์ที่ชัดเจน
+ * - แปลง/ตรวจสอบวันทำงานของกะเริ่มต้น (default_workdays) เช่น จันทร์–ศุกร์, จันทร์–เสาร์, ทุกวัน
  */
 import { cleanShiftDisplayName } from './shiftDisplay.ts';
 
@@ -22,6 +23,7 @@ export interface ActiveDefaultBindingInfo {
   shiftName: string;
   startTime: string;
   endTime: string;
+  defaultWorkdays?: string;
 }
 
 export interface ShiftTemplateFormValues {
@@ -33,10 +35,6 @@ export interface ShiftTemplateFormValues {
   graceMinutes: string;
   cutoffTime: string;
   isActive: boolean;
-  createIsDefault: boolean;
-  createDefaultScopeCode: string;
-  editSelectedDefaultScopes: string[];
-  defaultReason: string;
 }
 
 export type ShiftTemplateFieldKey =
@@ -47,7 +45,6 @@ export type ShiftTemplateFieldKey =
   | 'endTime'
   | 'graceMinutes'
   | 'cutoffTime'
-  | 'defaultShift'
   | 'isActive';
 
 export type ShiftTemplateFieldErrors = Partial<Record<ShiftTemplateFieldKey, string>>;
@@ -71,7 +68,79 @@ export const DEFAULT_SUCCESS_TOAST_MS = 4000;
 export const DEFAULT_WARNING_TOAST_MS = 5000;
 export const DEFAULT_ERROR_TOAST_MS = 6500;
 
+export const DEFAULT_ALL_WORKDAYS_CSV = '1,2,3,4,5,6,0';
+
+export const WEEKDAY_OPTIONS: ReadonlyArray<{
+  value: number;
+  shortLabel: string;
+  fullLabel: string;
+}> = [
+  { value: 1, shortLabel: 'จ.', fullLabel: 'จันทร์' },
+  { value: 2, shortLabel: 'อ.', fullLabel: 'อังคาร' },
+  { value: 3, shortLabel: 'พ.', fullLabel: 'พุธ' },
+  { value: 4, shortLabel: 'พฤ.', fullLabel: 'พฤหัสบดี' },
+  { value: 5, shortLabel: 'ศ.', fullLabel: 'ศุกร์' },
+  { value: 6, shortLabel: 'ส.', fullLabel: 'เสาร์' },
+  { value: 0, shortLabel: 'อา.', fullLabel: 'อาทิตย์' },
+];
+
+export const WORKDAY_PRESETS: ReadonlyArray<{
+  key: 'MON_FRI' | 'MON_SAT' | 'ALL_DAYS';
+  label: string;
+  csv: string;
+  days: number[];
+}> = [
+  { key: 'MON_FRI', label: 'จันทร์–ศุกร์', csv: '1,2,3,4,5', days: [1, 2, 3, 4, 5] },
+  { key: 'MON_SAT', label: 'จันทร์–เสาร์', csv: '1,2,3,4,5,6', days: [1, 2, 3, 4, 5, 6] },
+  { key: 'ALL_DAYS', label: 'ทุกวัน (จ.–อา.)', csv: '1,2,3,4,5,6,0', days: [1, 2, 3, 4, 5, 6, 0] },
+];
+
+const CANONICAL_DAY_ORDER = [1, 2, 3, 4, 5, 6, 0];
 const HHMM_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/;
+
+export function parseWorkdaysCsv(csv: string | null | undefined): number[] {
+  if (csv === null || csv === undefined || String(csv).trim() === '') {
+    return [1, 2, 3, 4, 5, 6, 0];
+  }
+  const tokens = String(csv)
+    .split(',')
+    .map((t) => Number(t.trim()))
+    .filter((n) => Number.isInteger(n) && n >= 0 && n <= 6);
+  const set = new Set(tokens);
+  return CANONICAL_DAY_ORDER.filter((d) => set.has(d));
+}
+
+export function serializeWorkdays(days: number[]): string {
+  const set = new Set(days.filter((n) => Number.isInteger(n) && n >= 0 && n <= 6));
+  return CANONICAL_DAY_ORDER.filter((d) => set.has(d)).join(',');
+}
+
+export function formatDefaultWorkdaysThai(csv: string | null | undefined): string {
+  const days = parseWorkdaysCsv(csv);
+  if (days.length === 0) return 'ไม่ได้กำหนดวันทำงาน';
+  const normalized = days.join(',');
+  if (normalized === '1,2,3,4,5,6,0') return 'ทุกวัน (จ.–อา.)';
+  if (normalized === '1,2,3,4,5') return 'จันทร์–ศุกร์';
+  if (normalized === '1,2,3,4,5,6') return 'จันทร์–เสาร์';
+  if (normalized === '6,0') return 'เสาร์–อาทิตย์';
+  return days
+    .map((d) => WEEKDAY_OPTIONS.find((w) => w.value === d)?.shortLabel || '')
+    .filter(Boolean)
+    .join(', ');
+}
+
+export function isDateInWorkdays(
+  dateStr: string,
+  csv: string | null | undefined
+): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || '').trim());
+  if (!m) return false;
+  const weekday = new Date(
+    Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+  ).getUTCDay();
+  const days = parseWorkdaysCsv(csv);
+  return days.includes(weekday);
+}
 
 export function createInitialShiftTemplateFormValues(
   mode: ShiftTemplateModalMode,
@@ -85,23 +154,9 @@ export function createInitialShiftTemplateFormValues(
     grace_minutes?: number | string;
     cutoff_time?: string;
     is_active?: number | boolean;
-    default_personnel_types?: Array<{
-      personnelTypeCode?: string;
-      personnel_type_code?: string;
-    }>;
   } | null
 ): ShiftTemplateFormValues {
   if (mode === 'edit' && shiftRow) {
-    const boundCodes = Array.isArray(shiftRow.default_personnel_types)
-      ? shiftRow.default_personnel_types
-          .map((d) =>
-            String(d.personnelTypeCode || d.personnel_type_code || '')
-              .trim()
-              .toUpperCase()
-          )
-          .filter(Boolean)
-          .sort()
-      : [];
     return {
       shiftName: cleanShiftDisplayName(shiftRow.shift_name),
       shiftCode: String(shiftRow.shift_code || '').trim(),
@@ -115,10 +170,6 @@ export function createInitialShiftTemplateFormValues(
       ),
       cutoffTime: String(shiftRow.cutoff_time || '10:30').trim(),
       isActive: Number(shiftRow.is_active ?? 1) === 1,
-      createIsDefault: false,
-      createDefaultScopeCode: '',
-      editSelectedDefaultScopes: boundCodes,
-      defaultReason: '',
     };
   }
 
@@ -131,10 +182,6 @@ export function createInitialShiftTemplateFormValues(
     graceMinutes: '15',
     cutoffTime: '10:30',
     isActive: true,
-    createIsDefault: false,
-    createDefaultScopeCode: '',
-    editSelectedDefaultScopes: [],
-    defaultReason: '',
   };
 }
 
@@ -150,16 +197,9 @@ export function isShiftTemplateFormDirty(
   if (initial.endTime !== current.endTime) return true;
   if (initial.graceMinutes.trim() !== current.graceMinutes.trim()) return true;
   if (initial.cutoffTime !== current.cutoffTime) return true;
-  if (initial.defaultReason.trim() !== current.defaultReason.trim()) return true;
 
-  if (mode === 'create') {
-    if (initial.createIsDefault !== current.createIsDefault) return true;
-    if (initial.createDefaultScopeCode !== current.createDefaultScopeCode) return true;
-  } else {
+  if (mode === 'edit') {
     if (initial.isActive !== current.isActive) return true;
-    const initSorted = [...initial.editSelectedDefaultScopes].sort().join(',');
-    const curSorted = [...current.editSelectedDefaultScopes].sort().join(',');
-    if (initSorted !== curSorted) return true;
   }
 
   return false;
@@ -167,9 +207,7 @@ export function isShiftTemplateFormDirty(
 
 export function validateShiftTemplateForm(
   values: ShiftTemplateFormValues,
-  mode: ShiftTemplateModalMode,
-  defaultBindingByTypeCode?: Map<string, ActiveDefaultBindingInfo>,
-  editingShiftId?: number | null
+  _mode: ShiftTemplateModalMode
 ): ShiftTemplateValidationResult {
   const fieldErrors: ShiftTemplateFieldErrors = {};
 
@@ -189,7 +227,8 @@ export function validateShiftTemplateForm(
   if (!trimmedCode) {
     fieldErrors.shiftCode = 'กรุณาระบุรหัสกะทำงาน';
   } else if (!/^[A-Za-z0-9_-]{2,32}$/.test(trimmedCode)) {
-    fieldErrors.shiftCode = 'รหัสกะต้องเป็นตัวอักษรภาษาอังกฤษ ตัวเลข หรือขีด (-, _) ความยาว 2–32 ตัวอักษร';
+    fieldErrors.shiftCode =
+      'รหัสกะต้องเป็นตัวอักษรภาษาอังกฤษ ตัวเลข หรือขีด (-, _) ความยาว 2–32 ตัวอักษร';
   }
 
   if (!values.shiftCategory.trim()) {
@@ -215,32 +254,7 @@ export function validateShiftTemplateForm(
     fieldErrors.graceMinutes = 'เวลาผ่อนผันการมาสายต้องอยู่ระหว่าง 0 ถึง 180 นาที';
   }
 
-  // ตรวจสอบกฎ Default Shift
-  if (mode === 'create' && values.createIsDefault) {
-    const scopeNorm = values.createDefaultScopeCode.trim().toUpperCase();
-    if (!scopeNorm) {
-      fieldErrors.defaultShift = 'กรุณาเลือกประเภทบุคลากรเป้าหมายก่อนกำหนดเป็นกะเริ่มต้น';
-    } else if (defaultBindingByTypeCode) {
-      const existing = defaultBindingByTypeCode.get(scopeNorm);
-      if (existing) {
-        fieldErrors.defaultShift = `ประเภทบุคลากร "${existing.personnelTypeName}" มีกะเริ่มต้นอยู่แล้วคือ "${cleanShiftDisplayName(existing.shiftName)}" (${existing.shiftCode}) ไม่สามารถกำหนดซ้ำได้`;
-      }
-    }
-  }
-
-  if (mode === 'edit' && defaultBindingByTypeCode && editingShiftId != null) {
-    for (const rawScope of values.editSelectedDefaultScopes) {
-      const scopeNorm = rawScope.trim().toUpperCase();
-      const existing = defaultBindingByTypeCode.get(scopeNorm);
-      if (existing && Number(existing.shiftId) !== Number(editingShiftId)) {
-        fieldErrors.defaultShift = `ประเภทบุคลากร "${existing.personnelTypeName}" มีกะเริ่มต้นอื่นอยู่แล้วคือ "${cleanShiftDisplayName(existing.shiftName)}" (${existing.shiftCode}) ไม่สามารถกำหนดซ้ำได้`;
-        break;
-      }
-    }
-  }
-
-  const errorKeys = Object.keys(fieldErrors);
-  if (errorKeys.length > 0) {
+  if (Object.keys(fieldErrors).length > 0) {
     return {
       valid: false,
       fieldErrors,
@@ -268,8 +282,6 @@ export function mapShiftTemplateApiErrorToFields(err: {
 
   if (code === 'SHIFT_CODE_EXISTS' || code === 'DUPLICATE_SHIFT_CODE') {
     fieldErrors.shiftCode = message;
-  } else if (code === 'DEFAULT_SHIFT_ALREADY_EXISTS') {
-    fieldErrors.defaultShift = message;
   } else if (code === 'DEFAULT_SHIFT_IN_USE') {
     fieldErrors.isActive = message;
   } else if (code === 'VALIDATION_ERROR' || code === 'INVALID_INPUT') {
@@ -284,5 +296,69 @@ export function mapShiftTemplateApiErrorToFields(err: {
   return {
     fieldErrors,
     formError: message,
+  };
+}
+
+export interface PersonnelTypeDefaultFormValues {
+  personnelTypeName: string;
+  defaultShiftId: number | null;
+  defaultWorkdays: number[];
+  effectiveFrom: string;
+  reason: string;
+  isActive: boolean;
+}
+
+export type PersonnelTypeDefaultFieldKey =
+  | 'personnelTypeName'
+  | 'defaultShiftId'
+  | 'defaultWorkdays'
+  | 'effectiveFrom';
+
+export function isPersonnelTypeDefaultFormDirty(
+  initial: PersonnelTypeDefaultFormValues,
+  current: PersonnelTypeDefaultFormValues
+): boolean {
+  if (initial.personnelTypeName.trim() !== current.personnelTypeName.trim()) return true;
+  if ((initial.defaultShiftId ?? null) !== (current.defaultShiftId ?? null)) return true;
+  if (serializeWorkdays(initial.defaultWorkdays) !== serializeWorkdays(current.defaultWorkdays)) {
+    return true;
+  }
+  if (initial.effectiveFrom !== current.effectiveFrom) return true;
+  if (initial.reason.trim() !== current.reason.trim()) return true;
+  if (initial.isActive !== current.isActive) return true;
+  return false;
+}
+
+export function validatePersonnelTypeDefaultForm(values: PersonnelTypeDefaultFormValues): {
+  valid: boolean;
+  fieldErrors: Partial<Record<PersonnelTypeDefaultFieldKey, string>>;
+  formError: string | null;
+} {
+  const fieldErrors: Partial<Record<PersonnelTypeDefaultFieldKey, string>> = {};
+
+  if (!values.personnelTypeName.trim()) {
+    fieldErrors.personnelTypeName = 'กรุณาระบุชื่อประเภทบุคลากร';
+  }
+
+  if (values.defaultShiftId !== null && values.defaultWorkdays.length === 0) {
+    fieldErrors.defaultWorkdays = 'กรุณาเลือกวันทำงานอย่างน้อย 1 วันเมื่อกำหนดกะเริ่มต้น';
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(values.effectiveFrom || '').trim())) {
+    fieldErrors.effectiveFrom = 'กรุณาระบุวันที่เริ่มมีผลบังคับใช้ให้ถูกต้อง (YYYY-MM-DD)';
+  }
+
+  if (Object.keys(fieldErrors).length > 0) {
+    return {
+      valid: false,
+      fieldErrors,
+      formError: 'กรุณาตรวจสอบข้อมูลการตั้งค่ากะเริ่มต้นให้ครบถ้วนก่อนบันทึก',
+    };
+  }
+
+  return {
+    valid: true,
+    fieldErrors: {},
+    formError: null,
   };
 }

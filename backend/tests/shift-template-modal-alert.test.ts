@@ -3,16 +3,16 @@
  * ชุดทดสอบอัตโนมัติ: Shift Template Modal & Alert System (UX/UI + API Integration)
  * ไฟล์: backend/tests/shift-template-modal-alert.test.ts
  * ============================================================================
- * ตรวจสอบครบทั้ง 12 หัวข้อสำคัญ:
- * 1. ค่าเริ่มต้นโหมด Create และโหมด Edit (Pre-fill ข้อมูลเดิมถูกต้อง)
- * 2. Dirty Check / Unsaved Changes Guard ทุกฟิลด์ (รวม Default Shift)
+ * ตรวจสอบครบทุกหัวข้อสำคัญ:
+ * 1. ค่าเริ่มต้นโหมด Create และโหมด Edit (Pre-fill ข้อมูลเดิมถูกต้อง 7 ฟิลด์หลัก)
+ * 2. Dirty Check / Unsaved Changes Guard ทุกฟิลด์ของ Shift Template และ Personnel Type Default
  * 3. Validation ระดับฟิลด์ (Required fields, รูปแบบรหัสกะ, เวลา 24 ชม., ผ่อนผัน 0–180 นาที)
- * 4. ป้องกัน Default Shift ซ้ำทั้งใน Client Validation และ Backend API (409)
+ * 4. ยืนยันว่า ShiftTemplateModal ไม่มี Checkbox/Toggle สำหรับ Default Shift (จัดการจุดเดียวที่ประเภทบุคลากร)
  * 5. แปลง API Error Codes เป็นข้อความระดับฟิลด์ที่อ่านเข้าใจง่าย
  * 6. Success Toast auto-dismiss 4000ms และไม่ใช้ browser alert()/confirm()
  * 7. Create -> Refresh list จริงจาก API, Edit -> Refresh list จริงจาก API
  * 8. Failure path (409 / 400) ไม่ทำให้ข้อมูลเดิมเสียหาย
- * 9. Deactivate / Reactivate แม่แบบกะ (พร้อมบล็อกปิดใช้งานกะเริ่มต้น 409 DEFAULT_SHIFT_IN_USE)
+ * 9. Deactivate / Reactivate แม่แบบกะ
  * 10. Zero regression กับการจัดตารางเวรรายวัน (Shift Assignments)
  */
 import test, { describe, before, after } from 'node:test';
@@ -49,8 +49,10 @@ import {
   isShiftTemplateFormDirty,
   validateShiftTemplateForm,
   mapShiftTemplateApiErrorToFields,
+  formatDefaultWorkdaysThai,
+  isDateInWorkdays,
+  validatePersonnelTypeDefaultForm,
   DEFAULT_SUCCESS_TOAST_MS,
-  type ActiveDefaultBindingInfo,
 } from '../../frontend/src/utils/shiftTemplateForm.ts';
 
 let server: http.Server;
@@ -78,7 +80,7 @@ async function apiCall(
   return { status: res.status, data };
 }
 
-describe('Shift Template Modal & Standard Alert System (UI-01..UI-12)', () => {
+describe('Shift Template Modal & Standard Alert System (UI-01..UI-06)', () => {
   before(async () => {
     resetSqliteInstanceForTests(TEST_DB_FILE);
     await runMigrations();
@@ -106,14 +108,14 @@ describe('Shift Template Modal & Standard Alert System (UI-01..UI-12)', () => {
     }
   });
 
-  test('UI-01: Create & Edit initial values pre-fill cleanly and strip redundant time suffix', () => {
+  test('UI-01: Create & Edit initial values pre-fill cleanly (7 core fields only) and strip redundant time suffix', () => {
     const createInit = createInitialShiftTemplateFormValues('create');
     assert.equal(createInit.shiftName, '');
     assert.equal(createInit.shiftCode, '');
     assert.equal(createInit.startTime, '08:00');
     assert.equal(createInit.endTime, '16:00');
     assert.equal(createInit.graceMinutes, '15');
-    assert.equal(createInit.createIsDefault, false);
+    assert.equal('createIsDefault' in createInit, false);
 
     const editInit = createInitialShiftTemplateFormValues('edit', {
       id: 7,
@@ -125,14 +127,12 @@ describe('Shift Template Modal & Standard Alert System (UI-01..UI-12)', () => {
       grace_minutes: 10,
       cutoff_time: '02:00',
       is_active: 1,
-      default_personnel_types: [{ personnelTypeCode: 'GOV_OFFICER' }],
     });
     assert.equal(editInit.shiftName, 'เวรดึกฉุกเฉิน');
     assert.equal(editInit.shiftCode, 'ER-NIGHT');
     assert.equal(editInit.shiftCategory, 'NIGHT');
     assert.equal(editInit.graceMinutes, '10');
     assert.equal(editInit.isActive, true);
-    assert.deepEqual(editInit.editSelectedDefaultScopes, ['GOV_OFFICER']);
   });
 
   test('UI-02: Unsaved changes (dirty) detection works for both Create and Edit modes', () => {
@@ -140,14 +140,6 @@ describe('Shift Template Modal & Standard Alert System (UI-01..UI-12)', () => {
     assert.equal(isShiftTemplateFormDirty(createInit, { ...createInit }, 'create'), false);
     assert.equal(
       isShiftTemplateFormDirty(createInit, { ...createInit, shiftName: 'เวรคลินิกพิเศษ' }, 'create'),
-      true
-    );
-    assert.equal(
-      isShiftTemplateFormDirty(
-        createInit,
-        { ...createInit, createDefaultScopeCode: 'CONTRACT_TEMP', createIsDefault: true },
-        'create'
-      ),
       true
     );
 
@@ -161,7 +153,6 @@ describe('Shift Template Modal & Standard Alert System (UI-01..UI-12)', () => {
       grace_minutes: 15,
       cutoff_time: '10:30',
       is_active: 1,
-      default_personnel_types: [],
     });
     assert.equal(isShiftTemplateFormDirty(editInit, { ...editInit }, 'edit'), false);
     assert.equal(
@@ -172,17 +163,9 @@ describe('Shift Template Modal & Standard Alert System (UI-01..UI-12)', () => {
       isShiftTemplateFormDirty(editInit, { ...editInit, isActive: false }, 'edit'),
       true
     );
-    assert.equal(
-      isShiftTemplateFormDirty(
-        editInit,
-        { ...editInit, editSelectedDefaultScopes: ['GOV_OFFICER'] },
-        'edit'
-      ),
-      true
-    );
   });
 
-  test('UI-03: Field-level validation blocks missing required fields, bad code/times, and duplicate Default Shift', () => {
+  test('UI-03: Field-level validation blocks missing required fields and validates Personnel Type Default Shift workdays', () => {
     const emptyCreate = createInitialShiftTemplateFormValues('create');
     const invalidRes = validateShiftTemplateForm(
       {
@@ -204,35 +187,32 @@ describe('Shift Template Modal & Standard Alert System (UI-01..UI-12)', () => {
     assert.ok(invalidRes.fieldErrors.graceMinutes);
     assert.ok(invalidRes.fieldErrors.cutoffTime);
 
-    const bindings = new Map<string, ActiveDefaultBindingInfo>([
-      [
-        'GOV_OFFICER',
-        {
-          personnelTypeCode: 'GOV_OFFICER',
-          personnelTypeName: 'ข้าราชการ',
-          shiftId: 1,
-          shiftCode: 'STD-0816',
-          shiftName: 'เวรราชการปกติ',
-          startTime: '08:00',
-          endTime: '16:00',
-        },
-      ],
-    ]);
+    assert.equal(formatDefaultWorkdaysThai('1,2,3,4,5'), 'จันทร์–ศุกร์');
+    assert.equal(formatDefaultWorkdaysThai('1,2,3,4,5,6'), 'จันทร์–เสาร์');
+    assert.equal(formatDefaultWorkdaysThai('1,2,3,4,5,6,0'), 'ทุกวัน (จ.–อา.)');
+    assert.equal(isDateInWorkdays('2026-07-06', '1,2,3,4,5'), true); // Monday
+    assert.equal(isDateInWorkdays('2026-07-11', '1,2,3,4,5'), false); // Saturday
 
-    const dupDefaultRes = validateShiftTemplateForm(
-      {
-        ...emptyCreate,
-        shiftName: 'เวรใหม่',
-        shiftCode: 'NEW-0816',
-        createIsDefault: true,
-        createDefaultScopeCode: 'GOV_OFFICER',
-      },
-      'create',
-      bindings
-    );
-    assert.equal(dupDefaultRes.valid, false);
-    assert.ok(dupDefaultRes.fieldErrors.defaultShift?.includes('เวรราชการปกติ'));
-    assert.ok(dupDefaultRes.fieldErrors.defaultShift?.includes('STD-0816'));
+    const badRuleForm = validatePersonnelTypeDefaultForm({
+      personnelTypeName: 'ข้าราชการ',
+      defaultShiftId: 1,
+      defaultWorkdays: [],
+      effectiveFrom: '2026-01-01',
+      reason: '',
+      isActive: true,
+    });
+    assert.equal(badRuleForm.valid, false);
+    assert.ok(badRuleForm.fieldErrors.defaultWorkdays);
+
+    const noDefaultRuleForm = validatePersonnelTypeDefaultForm({
+      personnelTypeName: 'พยาบาลเวรผลัด',
+      defaultShiftId: null,
+      defaultWorkdays: [],
+      effectiveFrom: '2026-01-01',
+      reason: '',
+      isActive: true,
+    });
+    assert.equal(noDefaultRuleForm.valid, true);
   });
 
   test('UI-04: API error codes map cleanly to field-level errors and Success Toast defaults to 4000ms', () => {
@@ -244,12 +224,6 @@ describe('Shift Template Modal & Standard Alert System (UI-01..UI-12)', () => {
     });
     assert.equal(dupCode.fieldErrors.shiftCode, 'รหัสกะ ER-2008 มีอยู่ในระบบแล้ว');
 
-    const dupDefault = mapShiftTemplateApiErrorToFields({
-      code: 'DEFAULT_SHIFT_ALREADY_EXISTS',
-      message: 'ประเภทบุคลากรนี้มีกะเริ่มต้นอยู่แล้ว',
-    });
-    assert.equal(dupDefault.fieldErrors.defaultShift, 'ประเภทบุคลากรนี้มีกะเริ่มต้นอยู่แล้ว');
-
     const inUse = mapShiftTemplateApiErrorToFields({
       code: 'DEFAULT_SHIFT_IN_USE',
       message: 'ไม่สามารถปิดใช้งานกะเริ่มต้นที่กำลังใช้งานอยู่ได้',
@@ -257,7 +231,7 @@ describe('Shift Template Modal & Standard Alert System (UI-01..UI-12)', () => {
     assert.equal(inUse.fieldErrors.isActive, 'ไม่สามารถปิดใช้งานกะเริ่มต้นที่กำลังใช้งานอยู่ได้');
   });
 
-  test('UI-05: Architecture guard — no window.alert/window.confirm, unified modal width 780px, FloatingToastStack & ConfirmDialog wired', () => {
+  test('UI-05: Architecture guard — no window.alert/confirm, no Default Shift checkbox inside ShiftTemplateModal, PersonnelTypeDefaultModal wired', () => {
     const repoRoot = process.cwd();
     const shiftsViewSrc = fs.readFileSync(
       path.join(repoRoot, 'frontend/src/pages/ShiftsView.tsx'),
@@ -267,23 +241,36 @@ describe('Shift Template Modal & Standard Alert System (UI-01..UI-12)', () => {
       path.join(repoRoot, 'frontend/src/components/shifts/ShiftTemplateModal.tsx'),
       'utf8'
     );
+    const ptDefaultModalSrc = fs.readFileSync(
+      path.join(repoRoot, 'frontend/src/components/shifts/PersonnelTypeDefaultModal.tsx'),
+      'utf8'
+    );
 
     assert.equal(shiftsViewSrc.includes('window.alert('), false);
     assert.equal(shiftsViewSrc.includes('window.confirm('), false);
     assert.equal(modalSrc.includes('window.alert('), false);
     assert.equal(modalSrc.includes('window.confirm('), false);
+    assert.equal(ptDefaultModalSrc.includes('window.alert('), false);
+    assert.equal(ptDefaultModalSrc.includes('window.confirm('), false);
+
+    // ShiftTemplateModal MUST NOT have Default Shift checkbox/toggle
+    assert.equal(modalSrc.includes('createIsDefault'), false);
+    assert.equal(modalSrc.includes('editSelectedDefaultScopes'), false);
+    assert.equal(modalSrc.includes('กำหนดเป็นกะเริ่มต้น (Default Shift)'), false);
+
     assert.equal(shiftsViewSrc.includes('showCreateTemplateForm'), false);
     assert.ok(shiftsViewSrc.includes('<ShiftTemplateModal'));
+    assert.ok(shiftsViewSrc.includes('<PersonnelTypeDefaultModal'));
     assert.ok(shiftsViewSrc.includes('<FloatingToastStack'));
     assert.ok(shiftsViewSrc.includes('confirmToggleShiftTarget'));
-    assert.ok(shiftsViewSrc.includes('confirmChangeDefaultPayload'));
     assert.ok(modalSrc.includes('max-w-[780px]'));
     assert.ok(modalSrc.includes('discardConfirmOpen'));
     assert.ok(modalSrc.includes('bg-black/45'));
+    assert.ok(ptDefaultModalSrc.includes('ไม่กำหนดกะเริ่มต้น'));
   });
 
   test('UI-06: End-to-end API Create, Edit, Duplicate Failure Preservation, Deactivate/Activate, and Roster Regression', async () => {
-    // 1. Create new shift template via Modal endpoint
+    // 1. Create new shift template via Modal endpoint (no Default Shift fields)
     const createRes = await apiCall('/api/Sam_Att/shifts', {
       method: 'POST',
       token: adminToken,
@@ -295,8 +282,6 @@ describe('Shift Template Modal & Standard Alert System (UI-01..UI-12)', () => {
         endTime: '20:30',
         graceMinutes: 10,
         cutoffTime: '18:00',
-        isDefault: false,
-        defaultPersonnelTypeCodes: [],
       },
     });
     assert.equal(createRes.status, 201);

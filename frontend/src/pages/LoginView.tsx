@@ -10,6 +10,7 @@ import {
   Fingerprint,
   FileBarChart2,
   ShieldCheck,
+  Loader2,
 } from 'lucide-react';
 import { apiRequest, setStoredToken, type AuthUser, ApiClientError } from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
@@ -32,6 +33,11 @@ export function LoginView({
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    const trimmedUser = username.trim();
+    if (!trimmedUser || !password) {
+      setError({ message: 'กรุณากรอกชื่อผู้ใช้งานและรหัสผ่านให้ครบถ้วน' });
+      return;
+    }
     setLoading(true);
     try {
       const res = await apiRequest<{
@@ -41,7 +47,7 @@ export function LoginView({
         user: AuthUser;
       }>('/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username: trimmedUser, password }),
       });
       setStoredToken(res.csrfToken || 'cookie-session-active');
       const me = await apiRequest<{ user: AuthUser; dataMode?: 'REAL' | 'DEMO' }>('/auth/me');
@@ -81,13 +87,12 @@ export function LoginView({
               </div>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               <h1 className="text-[22px] sm:text-[24px] font-bold text-[#292638] tracking-tight leading-snug">
                 ระบบบริหารเวลาปฏิบัติงานบุคลากร
               </h1>
               <p className="text-[13.5px] text-[#777287] leading-relaxed">
-                พื้นที่ทำงานกลางสำหรับการจัดตารางเวร ดึงข้อมูลสแกนลายนิ้วมือ
-                ตรวจสอบการลงเวลา และสรุปรายงานส่งต่อระบบ HOSOffice
+                ตารางเวร การดึงข้อมูลสแกน ตรวจสอบการลงเวลา และส่งข้อมูล HOSOffice
               </p>
             </div>
 
@@ -202,6 +207,7 @@ export function LoginView({
               disabled={loading}
               className="ent-btn-primary w-full h-11 text-[15px] mt-1"
             >
+              {loading && <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />}
               <span>{loading ? 'กำลังตรวจสอบข้อมูลผู้ใช้งาน...' : 'เข้าสู่ระบบ'}</span>
               {!loading && <ArrowRight className="w-4 h-4" />}
             </button>

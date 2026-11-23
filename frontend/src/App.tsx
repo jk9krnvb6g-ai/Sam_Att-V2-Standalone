@@ -41,6 +41,8 @@ import { ReportsView } from './pages/ReportsView.tsx';
 import { AdminViews } from './pages/AdminViews.tsx';
 import { WorkflowGuideView } from './pages/WorkflowGuideView.tsx';
 import { UserManualView } from './pages/UserManualView.tsx';
+import { ToastProvider } from './components/common/ToastContext.tsx';
+import { ConfirmDialog } from './components/common/SharedComponents.tsx';
 
 export default function App() {
   const [user, setUser] = useState<AuthUser | null>(null);
@@ -49,6 +51,8 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [initializing, setInitializing] = useState(true);
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   // ปิดการเข้าถึงเส้นทางหน้าตั้งค่าระบบหรือตรวจสอบสถานะการเชื่อมต่อเดิมหากผู้ใช้พิมพ์ URL/Hash โดยตรง
   useEffect(() => {
@@ -101,13 +105,17 @@ export default function App() {
   }, []);
 
   async function handleLogout() {
+    setLoggingOut(true);
     try {
       await apiRequest('/auth/logout', { method: 'POST' });
     } catch {
       // ignore if already expired
+    } finally {
+      setLoggingOut(false);
+      setLogoutConfirmOpen(false);
+      setStoredToken(null);
+      setUser(null);
     }
-    setStoredToken(null);
-    setUser(null);
   }
 
   function handleLoginSuccess(loggedInUser: AuthUser, resolvedMode?: 'REAL' | 'DEMO') {
@@ -134,6 +142,7 @@ export default function App() {
   const isStaffOrAdmin = user.role === 'ADMIN' || user.role === 'RESPONSIBLE_STAFF';
 
   return (
+    <ToastProvider>
     <div className="min-h-screen bg-[#F8F7FC] flex flex-col lg:flex-row overflow-x-hidden">
       {/* Full-Height Left Navigation Rail (Desktop) & Drawer (Mobile/Tablet) */}
       <Sidebar
@@ -207,7 +216,7 @@ export default function App() {
 
             <button
               type="button"
-              onClick={handleLogout}
+              onClick={() => setLogoutConfirmOpen(true)}
               className="h-9 px-3 text-[13px] font-semibold text-[#292638] bg-white border border-[#E8E4EF] rounded-lg hover:bg-[#F1ECFA] hover:border-[#8066B5]/50 hover:text-[#4E3978] inline-flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               title="ออกจากระบบ"
             >
@@ -416,6 +425,19 @@ export default function App() {
           )}
         </div>
       </nav>
+
+      <ConfirmDialog
+        open={logoutConfirmOpen}
+        onCancel={() => !loggingOut && setLogoutConfirmOpen(false)}
+        onConfirm={handleLogout}
+        title="ยืนยันการออกจากระบบ"
+        description={`ต้องการออกจากระบบในชื่อบัญชี "${user.displayName}" ใช่หรือไม่?`}
+        confirmLabel={loggingOut ? 'กำลังออกจากระบบ...' : 'ออกจากระบบ'}
+        cancelLabel="ใช้งานต่อ"
+        variant="primary"
+        loading={loggingOut}
+      />
     </div>
+    </ToastProvider>
   );
 }
