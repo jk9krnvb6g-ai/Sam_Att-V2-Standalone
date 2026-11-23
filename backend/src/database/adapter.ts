@@ -382,15 +382,410 @@ function enqueueSqliteTransaction<T>(task: () => Promise<T>): Promise<T> {
   });
 }
 
-export async function checkPendingMigrationsReadOnly(): Promise<{
+export interface MigrationColumnSpec {
+  table: string;
+  column: string;
+  expectedType: string;
+  expectedNullable: boolean;
+  rawDefinition: string;
+}
+
+export interface ParsedMigrationImpact {
+  version: string;
+  filename: string;
+  checksum: string;
+  tablesCreated: string[];
+  columnsAdded: MigrationColumnSpec[];
+  affectedTables: string[];
+  statementCount: number;
+  hasDestructiveStatements: boolean;
+  destructiveWarnings: string[];
+  summaryText: string;
+}
+
+export interface LiveColumnMetadata {
+  name: string;
+  dataType: string;
+  columnType: string;
+  isNullable: boolean;
+}
+
+export interface ColumnVerificationItem {
+  table: string;
+  column: string;
+  expectedType: string;
+  actualType: string | null;
+  status: 'OK' | 'MISSING' | 'TYPE_MISMATCH';
+  detail?: string;
+}
+
+export interface SchemaVerificationResult {
+  ok: boolean;
+  verifiedTables: string[];
+  missingTables: string[];
+  verifiedColumns: ColumnVerificationItem[];
+  errors: string[];
+}
+
+export interface DetailedMigrationInspection {
   appliedVersions: string[];
   pendingFiles: string[];
-}> {
+  appliedMigrations: Array<{
+    version: string;
+    filename: string;
+    checksum: string;
+    fileChecksum: string | null;
+    checksumMatch: boolean;
+    appliedAt: string | null;
+  }>;
+  pendingDetails: Array<
+    ParsedMigrationImpact & {
+      partiallyApplied: boolean;
+      existingColumnsCount: number;
+      schemaConflicts: string[];
+    }
+  >;
+  checksumMismatches: Array<{
+    version: string;
+    filename: string;
+    recordedChecksum: string;
+    currentFileChecksum: string;
+  }>;
+  schemaVerification: SchemaVerificationResult;
+  hasPendingMigrations: boolean;
+  migrationApprovalRequired: boolean;
+}
+
+export interface RunMigrationsOptions {
+  approvedFiles?: string[];
+  migrationsDir?: string;
+  verifyChecksumStrict?: boolean;
+  verifySchemaPostApply?: boolean;
+  forceRunInProductionCli?: boolean;
+  simulateFailureAtStatement?: number;
+}
+
+function splitSqlStatements(rawSql: string): string[] {
+  return rawSql
+    .split(';')
+    .map((s) =>
+      s
+        .split('\n')
+        .filter((line) => !line.trim().startsWith('--'))
+        .join('\n')
+        .trim()
+    )
+    .filter((s) => s.length > 0);
+}
+
+function normalizeSqlTypeFamily(rawType: string): 'INT' | 'STRING' | 'DATE' | 'DATETIME' | 'TIME' | 'DECIMAL' | 'OTHER' {
+  const t = String(rawType || '').trim().toUpperCase();
+  if (/^(TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT)\b/.test(t)) return 'INT';
+  if (/^(VARCHAR|CHAR|TEXT|TINYTEXT|MEDIUMTEXT|LONGTEXT|NVARCHAR|CLOB)\b/.test(t)) return 'STRING';
+  if (/^(DATETIME|TIMESTAMP)\b/.test(t)) return 'DATETIME';
+  if (/^DATE\b/.test(t)) return 'DATE';
+  if (/^TIME\b/.test(t)) return 'TIME';
+  if (/^(DECIMAL|NUMERIC|FLOAT|DOUBLE|REAL)\b/.test(t)) return 'DECIMAL';
+  return 'OTHER';
+}
+
+export function isColumnTypeCompatible(
+  expectedType: string,
+  expectedNullable: boolean,
+  liveMeta: LiveColumnMetadata,
+  engine: 'mysql' | 'sqlite'
+): { compatible: boolean; reason?: string } {
+  const expectedFamily = normalizeSqlTypeFamily(expectedType);
+  const actualFamily = normalizeSqlTypeFamily(liveMeta.columnType || liveMeta.dataType);
+
+  let typeMatches = expectedFamily === actualFamily;
+  if (!typeMatches && engine === 'sqlite') {
+    // SQLite converts DATE/DATETIME/TIME/VARCHAR to TEXT or keeps declared affinity
+    if (
+      (expectedFamily === 'DATE' || expectedFamily === 'DATETIME' || expectedFamily === 'TIME') &&
+      actualFamily === 'STRING'
+    ) {
+      typeMatches = true;
+    }
+    if (expectedFamily === 'STRING' && actualFamily === 'STRING') {
+      typeMatches = true;
+    }
+  }
+
+  if (!typeMatches) {
+    return {
+      compatible: false,
+      reason: `ชนิดข้อมูลไม่ตรงกัน (คาดหวัง ${expectedType} [${expectedFamily}] แต่พบ ${liveMeta.columnType || liveMeta.dataType} [${actualFamily}])`,
+    };
+  }
+
+  // On MySQL, if VARCHAR(N) is expected, check capacity is not smaller than required
+  if (engine === 'mysql' && expectedFamily === 'STRING') {
+    const expLenMatch = expectedType.match(/VARCHAR\s*\(\s*(\d+)\s*\)/i);
+    const actLenMatch = (liveMeta.columnType || '').match(/VARCHAR\s*\(\s*(\d+)\s*\)/i);
+    if (expLenMatch && actLenMatch) {
+      const expLen = Number(expLenMatch[1]);
+      const actLen = Number(actLenMatch[1]);
+      if (actLen < expLen) {
+        return {
+          compatible: false,
+          reason: `ความยาวคอลัมน์สั้นกว่าที่กำหนด (คาดหวัง VARCHAR(${expLen}) แต่พบ VARCHAR(${actLen}))`,
+        };
+      }
+    }
+  }
+
+  // If migration requires nullable column (NULL), existing column must allow NULL
+  if (expectedNullable && !liveMeta.isNullable) {
+    return {
+      compatible: false,
+      reason: `คุณสมบัติ Nullability ไม่ตรงกัน (คาดหวัง NULL แต่คอลัมน์เดิมเป็น NOT NULL)`,
+    };
+  }
+
+  return { compatible: true };
+}
+
+export function parseMigrationSqlFile(filePath: string, filename: string): ParsedMigrationImpact {
+  const rawSql = fs.readFileSync(filePath, 'utf8');
+  const checksum = crypto.createHash('sha256').update(rawSql).digest('hex');
+  const verMatch = filename.match(/^(\d+)_/);
+  const version = verMatch ? verMatch[1] : filename;
+
+  const statements = splitSqlStatements(rawSql);
+  const tablesCreated: string[] = [];
+  const columnsAdded: MigrationColumnSpec[] = [];
+  const affectedTableSet = new Set<string>();
+  const destructiveWarnings: string[] = [];
+
+  for (const stmt of statements) {
+    if (/\bDROP\s+(TABLE|DATABASE|SCHEMA)\b/i.test(stmt)) {
+      destructiveWarnings.push(`ตรวจพบคำสั่ง DROP ที่ต้องห้าม: ${stmt.slice(0, 120)}`);
+    }
+    if (/\bTRUNCATE\s+TABLE?\b/i.test(stmt)) {
+      destructiveWarnings.push(`ตรวจพบคำสั่ง TRUNCATE ที่ต้องห้าม: ${stmt.slice(0, 120)}`);
+    }
+    if (/\bDELETE\s+FROM\s+`?raw_scans`?\b/i.test(stmt)) {
+      destructiveWarnings.push(`ตรวจพบคำสั่งลบข้อมูล raw_scans ที่ต้องห้าม: ${stmt.slice(0, 120)}`);
+    }
+
+    const createMatch = stmt.match(/^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?([a-zA-Z0-9_]+)`?/i);
+    if (createMatch) {
+      const tbl = createMatch[1];
+      if (!tablesCreated.includes(tbl)) tablesCreated.push(tbl);
+      affectedTableSet.add(tbl);
+      continue;
+    }
+
+    const alterAddMatch = stmt.match(
+      /^ALTER\s+TABLE\s+`?([a-zA-Z0-9_]+)`?\s+ADD\s+(?:COLUMN\s+)?`?([a-zA-Z0-9_]+)`?\s+(.+)$/i
+    );
+    if (alterAddMatch) {
+      const table = alterAddMatch[1];
+      const column = alterAddMatch[2];
+      const rawDefinition = alterAddMatch[3].trim();
+      const typeMatch = rawDefinition.match(/^([a-zA-Z]+(?:\s*\([^)]+\))?)/);
+      const expectedType = typeMatch ? typeMatch[1].toUpperCase().replace(/\s+/g, '') : 'UNKNOWN';
+      const expectedNullable = !/\bNOT\s+NULL\b/i.test(rawDefinition);
+      columnsAdded.push({
+        table,
+        column,
+        expectedType,
+        expectedNullable,
+        rawDefinition,
+      });
+      affectedTableSet.add(table);
+    }
+  }
+
+  const affectedTables = Array.from(affectedTableSet);
+  const parts: string[] = [];
+  if (tablesCreated.length > 0) {
+    parts.push(`สร้างตาราง ${tablesCreated.length} ตาราง (${tablesCreated.join(', ')})`);
+  }
+  if (columnsAdded.length > 0) {
+    parts.push(`เพิ่มคอลัมน์ ${columnsAdded.length} คอลัมน์ในตาราง ${affectedTables.join(', ')}`);
+  }
+  const summaryText = parts.length > 0 ? parts.join(' และ ') : `รันคำสั่ง SQL ${statements.length} รายการ`;
+
+  return {
+    version,
+    filename,
+    checksum,
+    tablesCreated,
+    columnsAdded,
+    affectedTables,
+    statementCount: statements.length,
+    hasDestructiveStatements: destructiveWarnings.length > 0,
+    destructiveWarnings,
+    summaryText,
+  };
+}
+
+export async function getTableColumnsMetadata(tableName: string): Promise<Map<string, LiveColumnMetadata>> {
+  const result = new Map<string, LiveColumnMetadata>();
+  if (!/^[a-zA-Z0-9_]+$/.test(tableName)) {
+    return result;
+  }
+
+  const cfg = loadConfig();
+  if (cfg.dbEngine === 'mysql') {
+    const pool = await getMysqlPool();
+    const [rows] = await pool.execute(
+      `SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?`,
+      [cfg.samAttDb.database, tableName]
+    );
+    for (const r of rows as Array<{
+      COLUMN_NAME: string;
+      DATA_TYPE: string;
+      COLUMN_TYPE: string;
+      IS_NULLABLE: string;
+    }>) {
+      result.set(String(r.COLUMN_NAME).toLowerCase(), {
+        name: String(r.COLUMN_NAME),
+        dataType: String(r.DATA_TYPE || ''),
+        columnType: String(r.COLUMN_TYPE || r.DATA_TYPE || ''),
+        isNullable: String(r.IS_NULLABLE || '').toUpperCase() === 'YES',
+      });
+    }
+    return result;
+  }
+
+  const db = getSqliteInstance();
+  const rows = db.prepare(`PRAGMA table_info("${tableName}")`).all() as Array<{
+    name: string;
+    type: string;
+    notnull: number;
+  }>;
+  for (const r of rows) {
+    result.set(String(r.name).toLowerCase(), {
+      name: String(r.name),
+      dataType: String(r.type || ''),
+      columnType: String(r.type || ''),
+      isNullable: Number(r.notnull) === 0,
+    });
+  }
+  return result;
+}
+
+async function listExistingTableNames(): Promise<Set<string>> {
+  const cfg = loadConfig();
+  const set = new Set<string>();
+  if (cfg.dbEngine === 'mysql') {
+    const pool = await getMysqlPool();
+    const [rows] = await pool.execute(
+      `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = ?`,
+      [cfg.samAttDb.database]
+    );
+    for (const r of rows as Array<{ TABLE_NAME: string }>) {
+      set.add(String(r.TABLE_NAME).toLowerCase());
+    }
+    return set;
+  }
+
+  const rows = await dbQuery<{ name: string }>(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+  );
+  for (const r of rows) {
+    set.add(String(r.name).toLowerCase());
+  }
+  return set;
+}
+
+export async function verifyMigrationSchemaPostApply(
+  impacts: ParsedMigrationImpact[]
+): Promise<SchemaVerificationResult> {
+  const cfg = loadConfig();
+  const engine: 'mysql' | 'sqlite' = cfg.dbEngine === 'mysql' ? 'mysql' : 'sqlite';
+  const existingTables = await listExistingTableNames();
+  const verifiedTables: string[] = [];
+  const missingTables: string[] = [];
+  const verifiedColumns: ColumnVerificationItem[] = [];
+  const errors: string[] = [];
+  const colCache = new Map<string, Map<string, LiveColumnMetadata>>();
+
+  for (const impact of impacts) {
+    for (const tbl of impact.tablesCreated) {
+      if (existingTables.has(tbl.toLowerCase())) {
+        if (!verifiedTables.includes(tbl)) verifiedTables.push(tbl);
+      } else {
+        if (!missingTables.includes(tbl)) missingTables.push(tbl);
+        errors.push(`ไม่พบตาราง '${tbl}' หลังรัน Migration ${impact.filename}`);
+      }
+    }
+
+    for (const colSpec of impact.columnsAdded) {
+      const tblLower = colSpec.table.toLowerCase();
+      if (!colCache.has(tblLower)) {
+        colCache.set(tblLower, await getTableColumnsMetadata(colSpec.table));
+      }
+      const cols = colCache.get(tblLower)!;
+      const live = cols.get(colSpec.column.toLowerCase());
+      if (!live) {
+        verifiedColumns.push({
+          table: colSpec.table,
+          column: colSpec.column,
+          expectedType: colSpec.expectedType,
+          actualType: null,
+          status: 'MISSING',
+          detail: `ไม่พบคอลัมน์ ${colSpec.table}.${colSpec.column}`,
+        });
+        errors.push(`ไม่พบคอลัมน์ ${colSpec.table}.${colSpec.column} (คาดหวัง ${colSpec.expectedType})`);
+        continue;
+      }
+
+      const compat = isColumnTypeCompatible(
+        colSpec.expectedType,
+        colSpec.expectedNullable,
+        live,
+        engine
+      );
+      if (!compat.compatible) {
+        verifiedColumns.push({
+          table: colSpec.table,
+          column: colSpec.column,
+          expectedType: colSpec.expectedType,
+          actualType: live.columnType || live.dataType,
+          status: 'TYPE_MISMATCH',
+          detail: compat.reason,
+        });
+        errors.push(`คอลัมน์ ${colSpec.table}.${colSpec.column}: ${compat.reason}`);
+      } else {
+        verifiedColumns.push({
+          table: colSpec.table,
+          column: colSpec.column,
+          expectedType: colSpec.expectedType,
+          actualType: live.columnType || live.dataType,
+          status: 'OK',
+        });
+      }
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    verifiedTables,
+    missingTables,
+    verifiedColumns,
+    errors,
+  };
+}
+
+export async function inspectMigrationsDetailedReadOnly(options?: {
+  migrationsDir?: string;
+}): Promise<DetailedMigrationInspection> {
   if (simulatedDown) {
     throw new DatabaseUnavailableError('Database unavailable during read-only migration check.');
   }
 
-  const migrationsDir = path.resolve(process.cwd(), 'database/migrations');
+  const cfg = loadConfig();
+  const engine: 'mysql' | 'sqlite' = cfg.dbEngine === 'mysql' ? 'mysql' : 'sqlite';
+  const migrationsDir = options?.migrationsDir
+    ? path.resolve(options.migrationsDir)
+    : path.resolve(process.cwd(), 'database/migrations');
+
   const allFiles = fs.existsSync(migrationsDir)
     ? fs
         .readdirSync(migrationsDir)
@@ -398,35 +793,169 @@ export async function checkPendingMigrationsReadOnly(): Promise<{
         .sort()
     : [];
 
-  let appliedVersions: string[] = [];
+  let appliedRows: Array<{
+    version: string;
+    filename: string;
+    checksum: string | null;
+    applied_at?: string | null;
+  }> = [];
+
   try {
-    const rows = await dbQuery<{ version: string; filename: string }>(
-      'SELECT version, filename FROM schema_migrations ORDER BY version ASC'
-    );
-    appliedVersions = rows.map((r) => String(r.version));
+    appliedRows = await dbQuery<{
+      version: string;
+      filename: string;
+      checksum: string | null;
+      applied_at?: string | null;
+    }>('SELECT version, filename, checksum, applied_at FROM schema_migrations ORDER BY version ASC');
   } catch {
-    appliedVersions = [];
+    appliedRows = [];
+  }
+
+  const parsedByFile = new Map<string, ParsedMigrationImpact>();
+  const parsedByVersion = new Map<string, ParsedMigrationImpact>();
+  for (const file of allFiles) {
+    const parsed = parseMigrationSqlFile(path.join(migrationsDir, file), file);
+    parsedByFile.set(file, parsed);
+    parsedByVersion.set(parsed.version, parsed);
+  }
+
+  const appliedVersions = appliedRows.map((r) => String(r.version));
+  const appliedSet = new Set<string>();
+  const appliedMigrations: DetailedMigrationInspection['appliedMigrations'] = [];
+  const checksumMismatches: DetailedMigrationInspection['checksumMismatches'] = [];
+  const appliedImpactsToVerify: ParsedMigrationImpact[] = [];
+
+  for (const row of appliedRows) {
+    const ver = String(row.version);
+    const fname = String(row.filename || '');
+    const recordedChecksum = String(row.checksum || '').trim();
+    appliedSet.add(ver);
+    if (fname) appliedSet.add(fname);
+
+    const parsed = parsedByFile.get(fname) || parsedByVersion.get(ver) || null;
+    const fileChecksum = parsed ? parsed.checksum : null;
+    const isPlaceholderChecksum =
+      !recordedChecksum ||
+      recordedChecksum === 'initial' ||
+      recordedChecksum === 'bootstrap' ||
+      recordedChecksum === 'legacy';
+    const checksumMatch =
+      !fileChecksum || isPlaceholderChecksum || recordedChecksum.toLowerCase() === fileChecksum.toLowerCase();
+
+    if (!checksumMatch && fileChecksum) {
+      checksumMismatches.push({
+        version: ver,
+        filename: fname || parsed?.filename || ver,
+        recordedChecksum,
+        currentFileChecksum: fileChecksum,
+      });
+    }
+
+    appliedMigrations.push({
+      version: ver,
+      filename: fname || parsed?.filename || ver,
+      checksum: recordedChecksum,
+      fileChecksum,
+      checksumMatch,
+      appliedAt: row.applied_at ? String(row.applied_at) : null,
+    });
+
+    if (parsed) {
+      appliedImpactsToVerify.push(parsed);
+    }
   }
 
   const pendingFiles = allFiles.filter((file) => {
     const match = file.match(/^(\d+)_/);
     const ver = match ? match[1] : file;
-    return !appliedVersions.includes(ver) && !appliedVersions.includes(file);
+    return !appliedSet.has(ver) && !appliedSet.has(file);
   });
+
+  const pendingDetails: DetailedMigrationInspection['pendingDetails'] = [];
+  const colCache = new Map<string, Map<string, LiveColumnMetadata>>();
+
+  for (const file of pendingFiles) {
+    const parsed = parsedByFile.get(file)!;
+    let existingColumnsCount = 0;
+    const schemaConflicts: string[] = [];
+
+    for (const colSpec of parsed.columnsAdded) {
+      const tblLower = colSpec.table.toLowerCase();
+      if (!colCache.has(tblLower)) {
+        try {
+          colCache.set(tblLower, await getTableColumnsMetadata(colSpec.table));
+        } catch {
+          colCache.set(tblLower, new Map());
+        }
+      }
+      const cols = colCache.get(tblLower)!;
+      const live = cols.get(colSpec.column.toLowerCase());
+      if (live) {
+        existingColumnsCount++;
+        const compat = isColumnTypeCompatible(
+          colSpec.expectedType,
+          colSpec.expectedNullable,
+          live,
+          engine
+        );
+        if (!compat.compatible) {
+          schemaConflicts.push(`${colSpec.table}.${colSpec.column}: ${compat.reason}`);
+        }
+      }
+    }
+
+    pendingDetails.push({
+      ...parsed,
+      partiallyApplied: existingColumnsCount > 0 && parsed.columnsAdded.length > 0,
+      existingColumnsCount,
+      schemaConflicts,
+    });
+  }
+
+  const schemaVerification =
+    appliedImpactsToVerify.length > 0
+      ? await verifyMigrationSchemaPostApply(appliedImpactsToVerify)
+      : { ok: true, verifiedTables: [], missingTables: [], verifiedColumns: [], errors: [] };
 
   return {
     appliedVersions,
     pendingFiles,
+    appliedMigrations,
+    pendingDetails,
+    checksumMismatches,
+    schemaVerification,
+    hasPendingMigrations: pendingFiles.length > 0,
+    migrationApprovalRequired: pendingFiles.length > 0,
   };
 }
 
-export async function runMigrations(): Promise<{ applied: string[]; totalTables: number }> {
+export async function checkPendingMigrationsReadOnly(): Promise<{
+  appliedVersions: string[];
+  pendingFiles: string[];
+}> {
+  const detailed = await inspectMigrationsDetailedReadOnly();
+  return {
+    appliedVersions: detailed.appliedVersions,
+    pendingFiles: detailed.pendingFiles,
+  };
+}
+
+export async function runMigrations(
+  options: RunMigrationsOptions = {}
+): Promise<{
+  applied: string[];
+  skipped: string[];
+  totalTables: number;
+  schemaVerification: SchemaVerificationResult;
+}> {
   if (simulatedDown) {
     throw new DatabaseUnavailableError('Database unavailable during migration check.');
   }
 
   const cfg = loadConfig();
-  const migrationsDir = path.resolve(process.cwd(), 'database/migrations');
+  const migrationsDir = options.migrationsDir
+    ? path.resolve(options.migrationsDir)
+    : path.resolve(process.cwd(), 'database/migrations');
   const migrationFiles = fs.existsSync(migrationsDir)
     ? fs
         .readdirSync(migrationsDir)
@@ -434,141 +963,229 @@ export async function runMigrations(): Promise<{ applied: string[]; totalTables:
         .sort()
     : [];
   const applied: string[] = [];
+  const skipped: string[] = [];
+  const appliedImpacts: ParsedMigrationImpact[] = [];
+  const verifyChecksumStrict = options.verifyChecksumStrict !== false;
+  const verifySchemaPostApply = options.verifySchemaPostApply !== false;
+
+  const inspectionBefore = await inspectMigrationsDetailedReadOnly({ migrationsDir });
+
+  // 1. ตรวจสอบ Checksum ของ Migration ที่เคยรันไปแล้ว (ป้องกันการแก้ไฟล์ย้อนหลัง)
+  if (verifyChecksumStrict && inspectionBefore.checksumMismatches.length > 0) {
+    const first = inspectionBefore.checksumMismatches[0];
+    const err = new Error(
+      `MIGRATION_CHECKSUM_MISMATCH: ไฟล์ Migration '${first.filename}' ที่เคยบันทึกใน schema_migrations ถูกแก้ไข (recorded=${first.recordedChecksum.slice(0, 12)}, current=${first.currentFileChecksum.slice(0, 12)})`
+    ) as Error & { code?: string };
+    err.code = 'MIGRATION_CHECKSUM_MISMATCH';
+    throw err;
+  }
+
+  // 2. ตรวจสอบ Approval Allowlist (ผูกกับรายการไฟล์ที่ ADMIN อนุมัติจริงเท่านั้น)
+  const pendingFiles = inspectionBefore.pendingFiles;
+  for (const file of migrationFiles) {
+    if (!pendingFiles.includes(file)) {
+      skipped.push(file);
+    }
+  }
+
+  if (options.approvedFiles && pendingFiles.length > 0) {
+    const normalizedApproved = new Set(
+      options.approvedFiles.map((f) => path.basename(String(f || '').trim()))
+    );
+    const unapproved = pendingFiles.filter((f) => !normalizedApproved.has(path.basename(f)));
+    if (unapproved.length > 0) {
+      const err = new Error(
+        `MIGRATION_APPROVAL_MISMATCH: พบไฟล์ Migration ที่ไม่ได้อยู่ในรายการอนุมัติ (${unapproved.join(', ')})`
+      ) as Error & { code?: string };
+      err.code = 'MIGRATION_APPROVAL_MISMATCH';
+      throw err;
+    }
+  }
+
+  // 3. ตรวจสอบคำสั่งอันตรายต้องห้าม (DROP / TRUNCATE / DELETE raw_scans) ก่อนเริ่มรัน
+  for (const file of pendingFiles) {
+    const impact = parseMigrationSqlFile(path.join(migrationsDir, file), file);
+    if (impact.hasDestructiveStatements) {
+      const err = new Error(
+        `FORBIDDEN_DESTRUCTIVE_MIGRATION: ปฏิเสธการรันไฟล์ '${file}' เนื่องจากพบคำสั่งทำลายข้อมูล (${impact.destructiveWarnings.join('; ')})`
+      ) as Error & { code?: string };
+      err.code = 'FORBIDDEN_DESTRUCTIVE_MIGRATION';
+      throw err;
+    }
+  }
+
+  const verifyDuplicateColumnSafe = async (
+    stmt: string,
+    engine: 'mysql' | 'sqlite'
+  ): Promise<boolean> => {
+    const alterAddMatch = stmt.match(
+      /^ALTER\s+TABLE\s+`?([a-zA-Z0-9_]+)`?\s+ADD\s+(?:COLUMN\s+)?`?([a-zA-Z0-9_]+)`?\s+(.+)$/i
+    );
+    if (!alterAddMatch) return false;
+    const table = alterAddMatch[1];
+    const column = alterAddMatch[2];
+    const rawDef = alterAddMatch[3].trim();
+    const typeMatch = rawDef.match(/^([a-zA-Z]+(?:\s*\([^)]+\))?)/);
+    const expectedType = typeMatch ? typeMatch[1].toUpperCase().replace(/\s+/g, '') : 'UNKNOWN';
+    const expectedNullable = !/\bNOT\s+NULL\b/i.test(rawDef);
+
+    const cols = await getTableColumnsMetadata(table);
+    const live = cols.get(column.toLowerCase());
+    if (!live) return false;
+
+    const compat = isColumnTypeCompatible(expectedType, expectedNullable, live, engine);
+    if (!compat.compatible) {
+      const err = new Error(
+        `MIGRATION_COLUMN_TYPE_MISMATCH: คอลัมน์ ${table}.${column} มีอยู่แล้วแต่โครงสร้างไม่ตรงตาม Migration (${compat.reason})`
+      ) as Error & { code?: string };
+      err.code = 'MIGRATION_COLUMN_TYPE_MISMATCH';
+      throw err;
+    }
+    return true;
+  };
 
   if (cfg.dbEngine === 'mysql') {
     const pool = await getMysqlPool();
-    const appliedSet = new Set<string>();
-    try {
-      const [rows] = await pool.execute('SELECT version, filename FROM schema_migrations');
-      for (const r of rows as Array<{ version: string; filename: string }>) {
-        appliedSet.add(String(r.version));
-        appliedSet.add(String(r.filename));
-      }
-    } catch {
-      // schema_migrations does not exist yet
-    }
-
-    const pendingFiles = migrationFiles.filter((file) => {
-      const match = file.match(/^(\d+)_/);
-      const ver = match ? match[1] : file;
-      return !appliedSet.has(ver) && !appliedSet.has(file);
-    });
-
     if (pendingFiles.length === 0) {
       const [tbls] = await pool.query('SHOW TABLES');
-      return { applied: [], totalTables: (tbls as unknown[]).length };
+      return {
+        applied: [],
+        skipped,
+        totalTables: (tbls as unknown[]).length,
+        schemaVerification: inspectionBefore.schemaVerification,
+      };
     }
 
-    const isExplicitMigrateCli = process.argv.some((arg) => arg.includes('cli-migrate'));
+    const isExplicitMigrateCli =
+      options.forceRunInProductionCli === true ||
+      process.argv.some((arg) => arg.includes('cli-migrate'));
     if (cfg.nodeEnv === 'production' && process.env.SAM_ATT_AUTO_MIGRATE !== 'true' && !isExplicitMigrateCli) {
       console.log(
         '[Sam_Att DB] Production safety policy: Skipping automatic DDL migration during server startup. Run `npm run db:migrate` with admin approval when schema changes are needed.'
       );
       const [tbls] = await pool.query('SHOW TABLES');
-      return { applied: [], totalTables: (tbls as unknown[]).length };
+      return {
+        applied: [],
+        skipped,
+        totalTables: (tbls as unknown[]).length,
+        schemaVerification: inspectionBefore.schemaVerification,
+      };
     }
 
     for (const file of pendingFiles) {
-      const match = file.match(/^(\d+)_/);
-      const ver = match ? match[1] : file;
-      const rawSql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
-      const checksum = crypto.createHash('sha256').update(rawSql).digest('hex');
+      const filePath = path.join(migrationsDir, file);
+      const impact = parseMigrationSqlFile(filePath, file);
+      const rawSql = fs.readFileSync(filePath, 'utf8');
+      const statements = splitSqlStatements(rawSql);
 
-      const statements = rawSql
-        .split(';')
-        .map((s) =>
-          s
-            .split('\n')
-            .filter((line) => !line.trim().startsWith('--'))
-            .join('\n')
-            .trim()
-        )
-        .filter((s) => s.length > 0);
-
-      for (const stmt of statements) {
+      for (let idx = 0; idx < statements.length; idx++) {
+        const stmt = statements[idx];
+        if (options.simulateFailureAtStatement !== undefined && idx === options.simulateFailureAtStatement) {
+          throw new Error(`SIMULATED_MIGRATION_STATEMENT_FAILURE: ล้มเหลวที่คำสั่งลำดับ ${idx + 1} ของ ${file}`);
+        }
         try {
           await pool.query(stmt);
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
           const errno = (err as { errno?: number })?.errno;
           if (/^ALTER\s+TABLE\b/i.test(stmt) && (errno === 1060 || /Duplicate column name/i.test(msg))) {
-            continue;
+            const safe = await verifyDuplicateColumnSafe(stmt, 'mysql');
+            if (safe) continue;
           }
+          throw err;
+        }
+      }
+
+      if (verifySchemaPostApply) {
+        const verification = await verifyMigrationSchemaPostApply([impact]);
+        if (!verification.ok) {
+          const err = new Error(
+            `POST_MIGRATION_SCHEMA_VERIFICATION_FAILED: ตรวจสอบโครงสร้างหลังรัน ${file} ไม่ผ่าน (${verification.errors.join('; ')})`
+          ) as Error & { code?: string };
+          err.code = 'POST_MIGRATION_SCHEMA_VERIFICATION_FAILED';
           throw err;
         }
       }
 
       const [existingAfter] = await pool.execute(
         'SELECT version FROM schema_migrations WHERE version = ?',
-        [ver]
+        [impact.version]
       );
       if ((existingAfter as unknown[]).length === 0) {
         await pool.execute(
           'INSERT INTO schema_migrations (version, filename, checksum) VALUES (?, ?, ?)',
-          [ver, file, checksum]
+          [impact.version, file, impact.checksum]
         );
         applied.push(file);
+        appliedImpacts.push(impact);
       }
     }
 
+    const finalVerification =
+      appliedImpacts.length > 0
+        ? await verifyMigrationSchemaPostApply(appliedImpacts)
+        : inspectionBefore.schemaVerification;
     const [tbls] = await pool.query('SHOW TABLES');
-    return { applied, totalTables: (tbls as unknown[]).length };
+    return { applied, skipped, totalTables: (tbls as unknown[]).length, schemaVerification: finalVerification };
   }
 
   const db = getSqliteInstance();
-  const appliedSet = new Set<string>();
-  try {
-    const existingRows = await dbQuery<{ version: string; filename: string }>(
-      'SELECT version, filename FROM schema_migrations'
-    );
-    for (const r of existingRows) {
-      appliedSet.add(String(r.version));
-      appliedSet.add(String(r.filename));
-    }
-  } catch {
-    // schema_migrations does not exist yet
-  }
-
-  for (const file of migrationFiles) {
-    const match = file.match(/^(\d+)_/);
-    const ver = match ? match[1] : file;
-    if (appliedSet.has(ver) || appliedSet.has(file)) {
-      continue;
-    }
-
-    const rawSql = fs.readFileSync(path.join(migrationsDir, file), 'utf8');
-    const checksum = crypto.createHash('sha256').update(rawSql).digest('hex');
+  for (const file of pendingFiles) {
+    const filePath = path.join(migrationsDir, file);
+    const impact = parseMigrationSqlFile(filePath, file);
+    const rawSql = fs.readFileSync(filePath, 'utf8');
     const sqliteStatements = convertMysqlDdlToSqliteStatements(rawSql);
 
-    for (const stmt of sqliteStatements) {
+    for (let idx = 0; idx < sqliteStatements.length; idx++) {
+      const stmt = sqliteStatements[idx];
+      if (options.simulateFailureAtStatement !== undefined && idx === options.simulateFailureAtStatement) {
+        throw new Error(`SIMULATED_MIGRATION_STATEMENT_FAILURE: ล้มเหลวที่คำสั่งลำดับ ${idx + 1} ของ ${file}`);
+      }
       try {
         db.exec(stmt);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         if (/^ALTER\s+TABLE\b/i.test(stmt) && /duplicate column name/i.test(msg)) {
-          continue;
+          const safe = await verifyDuplicateColumnSafe(stmt, 'sqlite');
+          if (safe) continue;
         }
+        throw err;
+      }
+    }
+
+    if (verifySchemaPostApply) {
+      const verification = await verifyMigrationSchemaPostApply([impact]);
+      if (!verification.ok) {
+        const err = new Error(
+          `POST_MIGRATION_SCHEMA_VERIFICATION_FAILED: ตรวจสอบโครงสร้างหลังรัน ${file} ไม่ผ่าน (${verification.errors.join('; ')})`
+        ) as Error & { code?: string };
+        err.code = 'POST_MIGRATION_SCHEMA_VERIFICATION_FAILED';
         throw err;
       }
     }
 
     const existing = await dbQuery<{ version: string }>(
       'SELECT version FROM schema_migrations WHERE version = ?',
-      [ver]
+      [impact.version]
     );
     if (existing.length === 0) {
       await dbExecute(
         'INSERT INTO schema_migrations (version, filename, checksum) VALUES (?, ?, ?)',
-        [ver, file, checksum]
+        [impact.version, file, impact.checksum]
       );
       applied.push(file);
+      appliedImpacts.push(impact);
     }
   }
 
+  const finalVerification =
+    appliedImpacts.length > 0
+      ? await verifyMigrationSchemaPostApply(appliedImpacts)
+      : inspectionBefore.schemaVerification;
   const tables = await dbQuery<{ name: string }>(
     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
   );
-  return { applied, totalTables: tables.length };
+  return { applied, skipped, totalTables: tables.length, schemaVerification: finalVerification };
 }
 
 /**
@@ -578,62 +1195,70 @@ export async function runMigrations(): Promise<{ applied: string[]; totalTables:
  *   เครื่องสแกนนิ้วจริงของ รพ.สามชุก (หมายเลข 1, 2, 3) และตารางเวลาซิงก์อัตโนมัติ (00:00, 08:00)
  * - หากตาราง users ยังว่างเปล่า จะสร้างบัญชีผู้ดูแลระบบเริ่มต้น 'admin' (โดยไม่ผูกกับบุคลากรจำลอง SAM-P001 ในโหมด REAL)
  * - ตรวจสอบและซ่อมแซมข้อความภาษาไทยของข้อมูลตั้งต้นที่อาจเพี้ยน (Mojibake เช่น "เธเธนเน...") จากการรัน SQL บน Windows ที่ไม่ได้ระบุ UTF-8
+ * - หมายเหตุ Production Safety: ห้ามรัน DDL ALTER TABLE อัตโนมัติในโหมด production ระหว่าง Server Startup
  */
 export async function ensureBaselineSystemCatalog(): Promise<void> {
-  // 0. Safe additive schema upgrades for existing databases (MySQL / SQLite)
-  const additiveAlterStatements = [
-    "ALTER TABLE personnel_type_rules ADD COLUMN default_start_time VARCHAR(5) NOT NULL DEFAULT '08:00'",
-    "ALTER TABLE personnel_type_rules ADD COLUMN default_end_time VARCHAR(5) NOT NULL DEFAULT '16:00'",
-    "ALTER TABLE personnel_type_rules ADD COLUMN default_cutoff_time VARCHAR(5) NOT NULL DEFAULT '11:00'",
-    "ALTER TABLE personnel_type_rules ADD COLUMN effective_from DATE NOT NULL DEFAULT '2026-01-01'",
-    'ALTER TABLE personnel_type_rules ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1',
-    "ALTER TABLE sync_runs ADD COLUMN sync_scope_mode VARCHAR(32) NOT NULL DEFAULT 'ALL'",
-    'ALTER TABLE sync_runs ADD COLUMN filter_from_bkk VARCHAR(32) NULL',
-    'ALTER TABLE sync_runs ADD COLUMN filter_to_bkk VARCHAR(32) NULL',
-    'ALTER TABLE sync_runs ADD COLUMN filter_strategy VARCHAR(48) NULL',
-    'ALTER TABLE sync_runs ADD COLUMN matched_in_range_count INT NOT NULL DEFAULT 0',
-    'ALTER TABLE sync_runs ADD COLUMN filtered_out_count INT NOT NULL DEFAULT 0',
-    'ALTER TABLE sync_runs ADD COLUMN failed_events_count INT NOT NULL DEFAULT 0',
-    // Migration 002 additive columns (Attendance Matching Engine ATT-01..ATT-16)
-    'ALTER TABLE shifts ADD COLUMN checkin_window_after_min INT NOT NULL DEFAULT 240',
-    'ALTER TABLE shifts ADD COLUMN checkout_window_before_min INT NOT NULL DEFAULT 180',
-    "ALTER TABLE attendance ADD COLUMN attendance_status VARCHAR(32) NOT NULL DEFAULT 'COMPLETE'",
-    'ALTER TABLE attendance ADD COLUMN evaluated_start_time VARCHAR(32) NULL',
-    'ALTER TABLE attendance ADD COLUMN evaluated_end_time VARCHAR(32) NULL',
-    'ALTER TABLE attendance ADD COLUMN early_checkout_indicator TINYINT(1) NOT NULL DEFAULT 0',
-    'ALTER TABLE attendance ADD COLUMN early_checkout_minutes INT NOT NULL DEFAULT 0',
-    'ALTER TABLE attendance ADD COLUMN review_reason VARCHAR(500) NULL',
-    'ALTER TABLE attendance ADD COLUMN reviewed_by VARCHAR(64) NULL',
-    'ALTER TABLE attendance ADD COLUMN reviewed_at DATETIME NULL',
-    'ALTER TABLE attendance ADD COLUMN matching_rule VARCHAR(128) NULL',
-    'ALTER TABLE attendance ADD COLUMN processed_at DATETIME NULL',
-    'ALTER TABLE attendance ADD COLUMN leave_id INT NULL',
-    'ALTER TABLE attendance ADD COLUMN leave_type VARCHAR(32) NULL',
-    'ALTER TABLE attendance ADD COLUMN leave_start_time VARCHAR(5) NULL',
-    'ALTER TABLE attendance ADD COLUMN leave_end_time VARCHAR(5) NULL',
-    'ALTER TABLE attendance_notes ADD COLUMN needs_re_review TINYINT(1) NOT NULL DEFAULT 0',
-    // Migration 003 additive columns (Historical Import, Mapping Audit & Sync Stats)
-    'ALTER TABLE sync_runs ADD COLUMN matched_scans_count INT NOT NULL DEFAULT 0',
-    'ALTER TABLE sync_runs ADD COLUMN conflict_scans_count INT NOT NULL DEFAULT 0',
-    'ALTER TABLE sync_runs ADD COLUMN attendance_created_count INT NOT NULL DEFAULT 0',
-    'ALTER TABLE sync_runs ADD COLUMN attendance_updated_count INT NOT NULL DEFAULT 0',
-    'ALTER TABLE sync_runs ADD COLUMN machine_results_json TEXT NULL',
-    'ALTER TABLE sync_runs ADD COLUMN import_year_month VARCHAR(7) NULL',
-    'ALTER TABLE fingerprint_mappings ADD COLUMN original_effective_from DATE NULL',
-    'ALTER TABLE fingerprint_mappings ADD COLUMN retroactive_adjusted_by VARCHAR(64) NULL',
-    'ALTER TABLE fingerprint_mappings ADD COLUMN retroactive_adjusted_at DATETIME NULL',
-    'ALTER TABLE fingerprint_mappings ADD COLUMN retroactive_reason VARCHAR(500) NULL',
-    'ALTER TABLE fingerprint_mappings ADD COLUMN updated_at DATETIME NULL',
-  ];
-  for (const alterSql of additiveAlterStatements) {
-    try {
-      await dbExecute(alterSql);
-    } catch {
-      // Column already exists
+  const cfg = loadConfig();
+  const isExplicitMigrateCli = process.argv.some((arg) => arg.includes('cli-migrate'));
+  const allowAdditiveStartupDdl =
+    cfg.nodeEnv !== 'production' ||
+    isExplicitMigrateCli ||
+    process.env.SAM_ATT_AUTO_MIGRATE === 'true';
+
+  if (allowAdditiveStartupDdl) {
+    // 0. Safe additive schema upgrades for dev/test or explicit CLI migrate
+    const additiveAlterStatements = [
+      "ALTER TABLE personnel_type_rules ADD COLUMN default_start_time VARCHAR(5) NOT NULL DEFAULT '08:00'",
+      "ALTER TABLE personnel_type_rules ADD COLUMN default_end_time VARCHAR(5) NOT NULL DEFAULT '16:00'",
+      "ALTER TABLE personnel_type_rules ADD COLUMN default_cutoff_time VARCHAR(5) NOT NULL DEFAULT '11:00'",
+      "ALTER TABLE personnel_type_rules ADD COLUMN effective_from DATE NOT NULL DEFAULT '2026-01-01'",
+      'ALTER TABLE personnel_type_rules ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1',
+      "ALTER TABLE sync_runs ADD COLUMN sync_scope_mode VARCHAR(32) NOT NULL DEFAULT 'ALL'",
+      'ALTER TABLE sync_runs ADD COLUMN filter_from_bkk VARCHAR(32) NULL',
+      'ALTER TABLE sync_runs ADD COLUMN filter_to_bkk VARCHAR(32) NULL',
+      'ALTER TABLE sync_runs ADD COLUMN filter_strategy VARCHAR(48) NULL',
+      'ALTER TABLE sync_runs ADD COLUMN matched_in_range_count INT NOT NULL DEFAULT 0',
+      'ALTER TABLE sync_runs ADD COLUMN filtered_out_count INT NOT NULL DEFAULT 0',
+      'ALTER TABLE sync_runs ADD COLUMN failed_events_count INT NOT NULL DEFAULT 0',
+      // Migration 002 additive columns (Attendance Matching Engine ATT-01..ATT-16)
+      'ALTER TABLE shifts ADD COLUMN checkin_window_after_min INT NOT NULL DEFAULT 240',
+      'ALTER TABLE shifts ADD COLUMN checkout_window_before_min INT NOT NULL DEFAULT 180',
+      "ALTER TABLE attendance ADD COLUMN attendance_status VARCHAR(32) NOT NULL DEFAULT 'COMPLETE'",
+      'ALTER TABLE attendance ADD COLUMN evaluated_start_time VARCHAR(32) NULL',
+      'ALTER TABLE attendance ADD COLUMN evaluated_end_time VARCHAR(32) NULL',
+      'ALTER TABLE attendance ADD COLUMN early_checkout_indicator TINYINT(1) NOT NULL DEFAULT 0',
+      'ALTER TABLE attendance ADD COLUMN early_checkout_minutes INT NOT NULL DEFAULT 0',
+      'ALTER TABLE attendance ADD COLUMN review_reason VARCHAR(500) NULL',
+      'ALTER TABLE attendance ADD COLUMN reviewed_by VARCHAR(64) NULL',
+      'ALTER TABLE attendance ADD COLUMN reviewed_at DATETIME NULL',
+      'ALTER TABLE attendance ADD COLUMN matching_rule VARCHAR(128) NULL',
+      'ALTER TABLE attendance ADD COLUMN processed_at DATETIME NULL',
+      'ALTER TABLE attendance ADD COLUMN leave_id INT NULL',
+      'ALTER TABLE attendance ADD COLUMN leave_type VARCHAR(32) NULL',
+      'ALTER TABLE attendance ADD COLUMN leave_start_time VARCHAR(5) NULL',
+      'ALTER TABLE attendance ADD COLUMN leave_end_time VARCHAR(5) NULL',
+      'ALTER TABLE attendance_notes ADD COLUMN needs_re_review TINYINT(1) NOT NULL DEFAULT 0',
+      // Migration 003 additive columns (Historical Import, Mapping Audit & Sync Stats)
+      'ALTER TABLE sync_runs ADD COLUMN matched_scans_count INT NOT NULL DEFAULT 0',
+      'ALTER TABLE sync_runs ADD COLUMN conflict_scans_count INT NOT NULL DEFAULT 0',
+      'ALTER TABLE sync_runs ADD COLUMN attendance_created_count INT NOT NULL DEFAULT 0',
+      'ALTER TABLE sync_runs ADD COLUMN attendance_updated_count INT NOT NULL DEFAULT 0',
+      'ALTER TABLE sync_runs ADD COLUMN machine_results_json TEXT NULL',
+      'ALTER TABLE sync_runs ADD COLUMN import_year_month VARCHAR(7) NULL',
+      'ALTER TABLE fingerprint_mappings ADD COLUMN original_effective_from DATE NULL',
+      'ALTER TABLE fingerprint_mappings ADD COLUMN retroactive_adjusted_by VARCHAR(64) NULL',
+      'ALTER TABLE fingerprint_mappings ADD COLUMN retroactive_adjusted_at DATETIME NULL',
+      'ALTER TABLE fingerprint_mappings ADD COLUMN retroactive_reason VARCHAR(500) NULL',
+      'ALTER TABLE fingerprint_mappings ADD COLUMN updated_at DATETIME NULL',
+    ];
+    for (const alterSql of additiveAlterStatements) {
+      try {
+        await dbExecute(alterSql);
+      } catch {
+        // Column already exists
+      }
     }
   }
-
-  const cfg = loadConfig();
   if (cfg.dbEngine === 'mysql') {
     await dbExecute(`
       CREATE TABLE IF NOT EXISTS personnel_type_rule_history (

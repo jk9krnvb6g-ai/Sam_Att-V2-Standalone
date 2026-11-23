@@ -4,7 +4,8 @@ import { nowBkkString } from '../../utils/crypto.ts';
 export type CentralJobType =
   | 'HOSOFFICE_PERSONNEL_SYNC'
   | 'HOSOFFICE_LIVE_PUSH'
-  | 'SCANNER_MANUAL_SYNC';
+  | 'SCANNER_MANUAL_SYNC'
+  | 'DEPLOYMENT_RUN';
 
 export type CentralJobStatus =
   | 'PENDING'
@@ -21,6 +22,16 @@ export type CentralJobStage =
   | 'PROCESSING_ATTENDANCE'
   | 'SYNCING_PERSONNEL'
   | 'PUSHING_HOSOFFICE'
+  | 'PREFLIGHT'
+  | 'CHECKING_GITHUB'
+  | 'AWAITING_MIGRATION_APPROVAL'
+  | 'BACKING_UP'
+  | 'PULLING_CODE'
+  | 'INSTALLING_DEPS'
+  | 'BUILDING_AND_TESTING'
+  | 'RUNNING_MIGRATION'
+  | 'RESTARTING_SERVICE'
+  | 'HEALTH_CHECK'
   | 'COMPLETED'
   | 'PARTIAL_SUCCESS'
   | 'FAILED';

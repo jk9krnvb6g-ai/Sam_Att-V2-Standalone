@@ -35,13 +35,22 @@ export class ApiClientError extends Error {
   public readonly code: string;
   public readonly requestId?: string;
   public readonly failClosed?: boolean;
+  public readonly data?: any;
 
-  constructor(status: number, code: string, message: string, requestId?: string, failClosed?: boolean) {
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    requestId?: string,
+    failClosed?: boolean,
+    data?: any
+  ) {
     super(message);
     this.status = status;
     this.code = code;
     this.requestId = requestId;
     this.failClosed = failClosed;
+    this.data = data;
   }
 }
 
@@ -146,7 +155,8 @@ export async function apiRequest<T = any>(
       errData.error || errData.code || `HTTP_${res.status}`,
       errData.message || `เกิดข้อผิดพลาดในการเชื่อมต่อ (${res.status})`,
       errData.requestId,
-      Boolean(errData.failClosed)
+      Boolean(errData.failClosed),
+      errData
     );
   }
 

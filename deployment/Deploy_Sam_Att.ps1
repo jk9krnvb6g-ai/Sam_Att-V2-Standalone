@@ -4,13 +4,13 @@
 .DESCRIPTION
   Production deployment script for Sam_Att V2 Standalone from GitHub (origin/main) on Windows Server + IIS.
   - Pure 7-bit ASCII source file to guarantee 100% compatibility with Windows PowerShell 5.1 (without BOM issues).
-  - Step 1: Preflight Check (Git repo, branch, clean working tree, Node/npm, disk space, .env REAL/mysql, IIS, Port 4101 owner)
-  - Step 2: GitHub Update (git fetch & git pull --ff-only; forbids git reset --hard / git clean -fd; gates migrations)
-  - Step 3: Backup (Timestamped backup of dist/ and core configuration with SHA-256 manifest)
+  - Step 1: Preflight Check (Git repo, branch, clean working tree, Node/npm, disk space, .env REAL/mysql, IIS, Port 4101 owner, external backup dir)
+  - Step 2: GitHub & Migration Inspection (git fetch, detect pending migrations, enforce MIGRATION_APPROVAL_REQUIRED bound to commit + files)
+  - Step 3: Pre-Update Backup & Git Pull (Verified MySQL samchuk_attendance_v2 dump + dist/config outside Git repo BEFORE git pull --ff-only)
   - Step 4: Install Dependencies (npm ci / npm install)
-  - Step 5: Typecheck / Test / Build (npm run typecheck, isolated sandbox npm test, npm run build -> dist/index.html)
+  - Step 5: Typecheck / Test / Build & Approved Database Migration (tsc, sandbox npm test, vite build, cli-migrate + post-migration schema verification)
   - Step 6: IIS / Backend Update (Isolated to Sam_Att on Port 4101 only; never touches Procurement or runs iisreset)
-  - Step 7: Health Check & Automatic Safe Rollback (https://localhost:4101/Sam_Att/ and /api/Sam_Att/health)
+  - Step 7: Health Check & Migration-Aware Safe Rollback (https://localhost:4101/Sam_Att/ and /api/Sam_Att/health)
 #>
 [CmdletBinding()]
 param(
@@ -20,6 +20,9 @@ param(
   [int]$Port = 4101,
   [switch]$CheckOnly,
   [switch]$ApproveMigrations,
+  [string]$ApprovedCommit = "",
+  [string]$ApprovedMigrations = "",
+  [string]$BackupRootDir = "",
   [switch]$NonInteractive,
   [switch]$SkipTests,
   [string]$MockEnvFile = ""
@@ -29,7 +32,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 # ==============================================================================
-# 0. Resolve Application Directory & Logging Paths
+# 0. Resolve Application Directory & External Backup Paths
 # ==============================================================================
 if ([string]::IsNullOrWhiteSpace($AppDir)) {
   $ScriptDir = $PSScriptRoot
@@ -47,7 +50,13 @@ if ([string]::IsNullOrWhiteSpace($AppDir)) {
 $AppDir = [System.IO.Path]::GetFullPath($AppDir)
 
 $LogsDir = Join-Path $AppDir "logs"
-$BackupsRootDir = Join-Path $AppDir "backups"
+if (-not [string]::IsNullOrWhiteSpace($BackupRootDir)) {
+  $BackupsRootDir = [System.IO.Path]::GetFullPath($BackupRootDir)
+} elseif (-not [string]::IsNullOrWhiteSpace($env:SAM_ATT_BACKUP_DIR)) {
+  $BackupsRootDir = [System.IO.Path]::GetFullPath($env:SAM_ATT_BACKUP_DIR)
+} else {
+  $BackupsRootDir = "C:\SamAttBackups"
+}
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $LogFilePath = Join-Path $LogsDir "deploy_sam_att_$Timestamp.log"
 
@@ -327,26 +336,158 @@ Write-Host ""
 Write-DeployLog -Message "Starting Sam_Att V2 Standalone Deployment in $AppDir (CheckOnly=$CheckOnly)"
 
 $State = [ordered]@{
-  CurrentStep           = 0
-  StepName              = "Initialization"
-  CommitBefore          = ""
-  CommitAfter           = ""
-  RemoteCommit          = ""
-  GitPulled             = $false
-  BackupCreated         = $false
-  BackupDir             = ""
-  ScannerExePath        = ""
-  ScannerExeSha256      = ""
-  IisRoutingMode        = "STANDALONE_DIRECT_4101"
-  IisStaticTargetDir    = ""
-  BackendProcessMode    = "STANDALONE_NODE_TSX"
-  BackendServiceName    = ""
-  BackendPm2Name        = ""
-  VerifiedSamAttPid     = 0
-  BackendRestarted      = $false
-  ExpectedDbEngine      = "mysql"
-  ExpectedDbName        = "samchuk_attendance_v2"
-  ExpectedDbHost        = "10.1.0.201"
+  CurrentStep                = 0
+  StepName                   = "Initialization"
+  CommitBefore               = ""
+  CommitAfter                = ""
+  RemoteCommit               = ""
+  GitPulled                  = $false
+  BackupCreated              = $false
+  BackupDir                  = ""
+  BackupSqlPath              = ""
+  BackupSqlSha256            = ""
+  PendingMigrations          = @()
+  AppliedMigrations          = @()
+  DatabaseMigrationAttempted = $false
+  DatabaseMigrationApplied   = $false
+  RequiresManualDbRestore    = $false
+  ScannerExePath             = ""
+  ScannerExeSha256           = ""
+  IisRoutingMode             = "STANDALONE_DIRECT_4101"
+  IisStaticTargetDir         = ""
+  BackendProcessMode         = "STANDALONE_NODE_TSX"
+  BackendServiceName         = ""
+  BackendPm2Name             = ""
+  VerifiedSamAttPid          = 0
+  BackendRestarted           = $false
+  ExpectedDbEngine           = "mysql"
+  ExpectedDbName             = "samchuk_attendance_v2"
+  ExpectedDbHost             = "10.1.0.201"
+  ExpectedDbPort             = 3306
+  ExpectedDbUser             = ""
+  ExpectedDbPassword         = ""
+  HosOfficeDbUser            = ""
+}
+
+function Find-MysqlDumpExecutable {
+  $Cmd = Get-Command mysqldump -ErrorAction SilentlyContinue
+  if ($null -ne $Cmd) {
+    return $Cmd.Source
+  }
+  $Candidates = @(
+    "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqldump.exe",
+    "C:\Program Files\MySQL\MySQL Server 8.4\bin\mysqldump.exe",
+    "C:\Program Files\MariaDB 10.11\bin\mysqldump.exe",
+    "C:\Program Files\MariaDB 11.4\bin\mysqldump.exe",
+    "C:\xampp\mysql\bin\mysqldump.exe"
+  )
+  foreach ($Cand in $Candidates) {
+    if (Test-Path $Cand) {
+      return $Cand
+    }
+  }
+  return $null
+}
+
+function Set-RestrictedBackupAcl {
+  param([string]$TargetPath)
+  if ($env:OS -like "*Windows*" -and (Test-Path $TargetPath)) {
+    try {
+      $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+      & icacls $TargetPath /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" "${CurrentUser}:(OI)(CI)F" 2>$null | Out-Null
+    } catch {
+      Write-DeployLog -Message "Warning: Could not tighten ACL on $TargetPath" -Level "WARN"
+    }
+  }
+}
+
+function New-VerifiedMySqlBackup {
+  param(
+    [string]$TargetBackupDir,
+    [string]$DbHost,
+    [int]$DbPort,
+    [string]$DbName,
+    [string]$DbUser,
+    [string]$DbPassword,
+    [string]$HosOfficeUser
+  )
+
+  if ([string]::IsNullOrWhiteSpace($DbUser) -or [string]::IsNullOrWhiteSpace($DbPassword)) {
+    throw "BACKUP_FAILED_DB_CREDENTIALS_MISSING: SAM_ATT_DB_USER or SAM_ATT_DB_PASSWORD is missing"
+  }
+  if (-not [string]::IsNullOrWhiteSpace($HosOfficeUser) -and ($DbUser -ieq $HosOfficeUser) -and ($DbName -ine "samchuk_attendance_v2")) {
+    throw "BACKUP_FAILED_FORBIDDEN_HOSOFFICE_USER: Refusing to run backup with HOSOffice read-only account"
+  }
+  if ($DbName -imatch "hosoffice") {
+    throw "BACKUP_FAILED_FORBIDDEN_HOSOFFICE_DB: Refusing to dump or touch HOSOffice database"
+  }
+
+  $SqlDumpPath = Join-Path $TargetBackupDir "${DbName}_${Timestamp}.sql"
+  if ($null -ne $MockConfig) {
+    $MockSql = "-- MySQL dump (isolated mock verification)`n-- Database: $DbName`nCREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR(32) PRIMARY KEY);`n-- Dump completed on $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`n"
+    Set-Content -Path $SqlDumpPath -Value $MockSql -Encoding UTF8 -ErrorAction Stop
+  } else {
+    $MysqlDumpExe = Find-MysqlDumpExecutable
+    if ([string]::IsNullOrWhiteSpace($MysqlDumpExe)) {
+      throw "BACKUP_FAILED_NO_MYSQLDUMP: mysqldump executable not found in PATH or standard MySQL directories. Aborting before any code or schema change."
+    }
+
+    # Write temporary defaults-extra-file so password NEVER appears in CLI arguments or process list
+    $TmpCnf = Join-Path $env:TEMP "sam_att_my_backup_$Timestamp`_$([guid]::NewGuid().ToString('N').Substring(0,8)).cnf"
+    try {
+      $EscapedPass = $DbPassword.Replace('\', '\\').Replace('"', '\"')
+      $CnfLines = @(
+        "[client]",
+        "host=$DbHost",
+        "port=$DbPort",
+        "user=$DbUser",
+        "password=`"$EscapedPass`""
+      )
+      Set-Content -Path $TmpCnf -Value ($CnfLines -join "`r`n") -Encoding ASCII -ErrorAction Stop
+      Set-RestrictedBackupAcl -TargetPath $TmpCnf
+
+      Write-DeployLog -Message "Running real mysqldump for database '$DbName' on ${DbHost}:${DbPort} into $SqlDumpPath..."
+      $DumpRes = Invoke-NativeCli -Executable $MysqlDumpExe -Arguments @(
+        "--defaults-extra-file=$TmpCnf",
+        "--single-transaction",
+        "--routines",
+        "--triggers",
+        "--quick",
+        "--hex-blob",
+        "--result-file=$SqlDumpPath",
+        $DbName
+      )
+      if ($DumpRes.ExitCode -ne 0) {
+        throw "BACKUP_FAILED_MYSQLDUMP_EXIT_CODE: mysqldump exited with code $($DumpRes.ExitCode): $($DumpRes.Output)"
+      }
+    } finally {
+      if (Test-Path $TmpCnf) {
+        Remove-Item -Path $TmpCnf -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
+
+  if (-not (Test-Path $SqlDumpPath)) {
+    throw "BACKUP_FAILED_SQL_DUMP_MISSING: SQL dump file was not created at $SqlDumpPath"
+  }
+  $DumpInfo = Get-Item $SqlDumpPath
+  if ($DumpInfo.Length -le 64) {
+    throw "BACKUP_FAILED_SQL_DUMP_EMPTY: SQL dump file is empty or too small ($($DumpInfo.Length) bytes)"
+  }
+  $DumpPreviewHead = (Get-Content -Path $SqlDumpPath -TotalCount 60 -ErrorAction SilentlyContinue) -join "`n"
+  $DumpPreviewTail = (Get-Content -Path $SqlDumpPath -Tail 20 -ErrorAction SilentlyContinue) -join "`n"
+  if (-not (($DumpPreviewHead -match "CREATE TABLE|MySQL dump|MariaDB dump") -and ($DumpPreviewTail -match "Dump completed|SET|UNLOCK|COMMIT|CREATE TABLE"))) {
+    throw "BACKUP_FAILED_SQL_DUMP_CORRUPT: SQL dump integrity markers missing in $SqlDumpPath"
+  }
+
+  $SqlSha = (Get-FileHash -Path $SqlDumpPath -Algorithm SHA256).Hash.ToLower()
+  Set-Content -Path "$SqlDumpPath.sha256" -Value $SqlSha -Encoding ASCII -ErrorAction Stop
+  Write-DeployLog -Message "Verified MySQL backup: $SqlDumpPath ($($DumpInfo.Length) bytes, SHA256=$SqlSha)"
+  return [PSCustomObject]@{
+    SqlPath   = $SqlDumpPath
+    SizeBytes = $DumpInfo.Length
+    Sha256    = $SqlSha
+  }
 }
 
 function Invoke-SafeRollback {
@@ -414,7 +555,18 @@ function Invoke-SafeRollback {
       Pop-Location
     }
 
-    # 3. Verify Health API or Restart Sam_Att backend process only if needed (never touch Procurement or IIS)
+    # 3. Migration-Aware Safety Check: NEVER auto-DROP or auto-downgrade database schema!
+    if ($State.DatabaseMigrationApplied -or $State.DatabaseMigrationAttempted) {
+      $State.RequiresManualDbRestore = $true
+      Write-Host "  [WARNING] DATABASE SCHEMA MIGRATION WAS ALREADY ATTEMPTED OR APPLIED." -ForegroundColor Yellow
+      Write-Host "  [WARNING] Automatic database downgrade / DROP TABLE is strictly forbidden." -ForegroundColor Yellow
+      Write-Host "  [ACTION]  Verified SQL Backup : $($State.BackupSqlPath)" -ForegroundColor Yellow
+      Write-Host "  [ACTION]  Restore Command     : powershell -ExecutionPolicy Bypass -File `"$AppDir\scripts\restore-test.ps1`" -BackupFolder `"$($State.BackupDir)`"" -ForegroundColor Yellow
+      Write-DeployLog -Message "MANUAL_DB_RESTORE_REQUIRED: Application files were reverted, but database migration had started/completed. Admin must inspect DB and restore from $($State.BackupSqlPath) if incompatible." -Level "WARN"
+      return $false
+    }
+
+    # 4. Verify Health API or Restart Sam_Att backend process only if needed (never touch Procurement or IIS)
     $VerifiedHealth = $null
     if ($null -ne $MockConfig) {
       if ($State.BackendRestarted) {
@@ -658,6 +810,12 @@ try {
     $State.ExpectedDbEngine = $DbEngineVal
     $State.ExpectedDbName = $EnvMap["SAM_ATT_DB_NAME"]
     $State.ExpectedDbHost = $EnvMap["SAM_ATT_DB_HOST"]
+    $State.ExpectedDbPort = [int]$EnvMap["SAM_ATT_DB_PORT"]
+    $State.ExpectedDbUser = $EnvMap["SAM_ATT_DB_USER"]
+    $State.ExpectedDbPassword = $EnvMap["SAM_ATT_DB_PASSWORD"]
+    if ($EnvMap.ContainsKey("HOSOFFICE_DB_USER")) {
+      $State.HosOfficeDbUser = $EnvMap["HOSOFFICE_DB_USER"]
+    }
 
     # Record ScannerReader EXE SHA-256 to guarantee it is never modified
     $ScannerRel = if ($EnvMap.ContainsKey("SCANNER_READER_EXE_PATH") -and -not [string]::IsNullOrWhiteSpace($EnvMap["SCANNER_READER_EXE_PATH"])) {
@@ -757,13 +915,17 @@ try {
       }
     }
 
-    # 1.8 Verify Backup directory is writable
+    # 1.8 Verify External Backup directory is OUTSIDE Git repository and writable
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["simulateBackupDirUnwritable"] -and $MockConfig.simulateBackupDirUnwritable -eq $true) {
       throw "PREFLIGHT_BACKUP_DIR_UNWRITABLE: Backup directory $BackupsRootDir is not writable"
+    }
+    if ($null -eq $MockConfig -and $BackupsRootDir.StartsWith($AppDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "PREFLIGHT_BACKUP_DIR_INSIDE_GIT: Backup directory '$BackupsRootDir' must be outside the Git repository '$AppDir' (use C:\SamAttBackups or SAM_ATT_BACKUP_DIR)"
     }
     if (-not (Test-Path $BackupsRootDir)) {
       New-Item -ItemType Directory -Path $BackupsRootDir -Force -ErrorAction Stop | Out-Null
     }
+    Set-RestrictedBackupAcl -TargetPath $BackupsRootDir
   } finally {
     Pop-Location
   }
@@ -771,7 +933,7 @@ try {
   Write-StepResult -StepNo 1 -TotalSteps 7 -Label "Preflight Check" -Status "PASS"
 
   # ============================================================================
-  # STEP 2 - GitHub Update
+  # STEP 2 - GitHub & Migration Inspection (NO CHANGES APPLIED YET)
   # ============================================================================
   $State.CurrentStep = 2
   $State.StepName = "GitHub Update"
@@ -798,19 +960,72 @@ try {
     Write-DeployLog -Message "Commit Before Update : $($State.CommitBefore)"
     Write-DeployLog -Message "Remote Target Commit : $($State.RemoteCommit)"
 
-    $PendingMigrations = @()
+    $PendingMigrationSet = New-Object System.Collections.Generic.List[string]
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["pendingMigrations"]) {
-      $PendingMigrations = @($MockConfig.pendingMigrations)
-    } elseif ($State.CommitBefore -ne $State.RemoteCommit) {
-      $DiffRes = Invoke-NativeCli -Executable "git" -Arguments @("diff", "--name-only", "$($State.CommitBefore)..$($State.RemoteCommit)", "--", "database/migrations/")
-      if (-not [string]::IsNullOrWhiteSpace($DiffRes.Output)) {
-        $PendingMigrations = $DiffRes.Output -split "`r?`n"
+      foreach ($M in @($MockConfig.pendingMigrations)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$M)) {
+          $Leaf = [System.IO.Path]::GetFileName([string]$M)
+          if (-not $PendingMigrationSet.Contains($Leaf)) { $PendingMigrationSet.Add($Leaf) | Out-Null }
+        }
+      }
+    } else {
+      if ($State.CommitBefore -ne $State.RemoteCommit) {
+        $DiffRes = Invoke-NativeCli -Executable "git" -Arguments @("diff", "--name-only", "$($State.CommitBefore)..$($State.RemoteCommit)", "--", "database/migrations/")
+        if (-not [string]::IsNullOrWhiteSpace($DiffRes.Output)) {
+          foreach ($Line in ($DiffRes.Output -split "`r?`n")) {
+            $TrimmedLine = $Line.Trim()
+            if ($TrimmedLine -like "*.sql") {
+              $Leaf = [System.IO.Path]::GetFileName($TrimmedLine)
+              if (-not $PendingMigrationSet.Contains($Leaf)) { $PendingMigrationSet.Add($Leaf) | Out-Null }
+            }
+          }
+        }
+      }
+      # Also inspect live database schema_migrations via read-only cli-migrate --check-only
+      $CheckMigRes = Invoke-NativeCli -Executable "npx" -Arguments @("tsx", "backend/src/database/cli-migrate.ts", "--check-only")
+      if ($CheckMigRes.ExitCode -eq 2) {
+        throw "MIGRATION_CHECKSUM_MISMATCH: Existing applied migration checksum mismatch detected. Aborting before pull."
+      }
+      if ($CheckMigRes.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($CheckMigRes.Output)) {
+        try {
+          $LastJsonLine = ($CheckMigRes.Output -split "`r?`n" | Where-Object { $_.Trim().StartsWith("{") } | Select-Object -Last 1)
+          if (-not [string]::IsNullOrWhiteSpace($LastJsonLine)) {
+            $MigStatusObj = $LastJsonLine | ConvertFrom-Json
+            if ($null -ne $MigStatusObj.PSObject.Properties["pendingFiles"]) {
+              foreach ($Pf in @($MigStatusObj.pendingFiles)) {
+                $Leaf = [System.IO.Path]::GetFileName([string]$Pf)
+                if (-not [string]::IsNullOrWhiteSpace($Leaf) -and (-not $PendingMigrationSet.Contains($Leaf))) {
+                  $PendingMigrationSet.Add($Leaf) | Out-Null
+                }
+              }
+            }
+          }
+        } catch {
+          Write-DeployLog -Message "Warning: Could not parse cli-migrate --check-only JSON output" -Level "WARN"
+        }
       }
     }
 
-    if ($PendingMigrations.Count -gt 0 -and (-not $ApproveMigrations)) {
+    $PendingMigrations = @($PendingMigrationSet | Sort-Object)
+    $State.PendingMigrations = $PendingMigrations
+
+    if ($PendingMigrations.Count -gt 0) {
       $MigList = ($PendingMigrations -join ", ")
-      throw "MIGRATION_APPROVAL_REQUIRED: Database migration changes detected ($MigList). Automatic migration is forbidden. Please review and run with -ApproveMigrations."
+      if (-not $ApproveMigrations) {
+        throw "MIGRATION_APPROVAL_REQUIRED: Database migration changes detected ($MigList). Automatic migration is forbidden. Please review impact and approve with -ApproveMigrations."
+      }
+      if (-not [string]::IsNullOrWhiteSpace($ApprovedCommit) -and ($ApprovedCommit.Trim() -ne $State.RemoteCommit)) {
+        throw "MIGRATION_APPROVAL_MISMATCH: ApprovedCommit ($ApprovedCommit) does not match RemoteCommit ($($State.RemoteCommit)). Re-approval is required."
+      }
+      if (-not [string]::IsNullOrWhiteSpace($ApprovedMigrations)) {
+        $ApprovedList = @($ApprovedMigrations -split "," | ForEach-Object { [System.IO.Path]::GetFileName($_.Trim()) } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+        $ExpectedKey = ($PendingMigrations -join ",")
+        $ApprovedKey = ($ApprovedList -join ",")
+        if ($ExpectedKey -ne $ApprovedKey) {
+          throw "MIGRATION_APPROVAL_MISMATCH: Approved migrations ($ApprovedKey) do not match detected pending migrations ($ExpectedKey)."
+        }
+      }
+      Write-DeployLog -Message "Admin migration approval verified for commit $($State.RemoteCommit): $MigList"
     }
 
     if ($CheckOnly) {
@@ -818,26 +1033,15 @@ try {
       Write-Host ""
       Write-Host "----------------------------------------" -ForegroundColor Cyan
       Write-Host " CHECK-ONLY MODE COMPLETED (NO CHANGES)" -ForegroundColor Cyan
-      Write-Host " Current Commit : $($State.CommitBefore)"
-      Write-Host " Remote Commit  : $($State.RemoteCommit)"
-      Write-Host " IIS Routing    : $($State.IisRoutingMode)"
-      Write-Host " Process Mode   : $($State.BackendProcessMode)"
+      Write-Host " Current Commit     : $($State.CommitBefore)"
+      Write-Host " Remote Commit      : $($State.RemoteCommit)"
+      Write-Host " Pending Migrations : $(if ($PendingMigrations.Count -gt 0) { $PendingMigrations -join ', ' } else { 'NONE' })"
+      Write-Host " Backup Root        : $BackupsRootDir"
+      Write-Host " IIS Routing        : $($State.IisRoutingMode)"
+      Write-Host " Process Mode       : $($State.BackendProcessMode)"
       Write-Host "----------------------------------------" -ForegroundColor Cyan
       exit 0
     }
-
-    if ($null -eq $MockConfig) {
-      $PullRes = Invoke-NativeCli -Executable "git" -Arguments @("pull", "--ff-only", $Remote, $Branch)
-      if ($PullRes.ExitCode -ne 0) {
-        throw "GIT_PULL_FAILED: git pull --ff-only failed (automatic git reset --hard is forbidden): $($PullRes.Output)"
-      }
-      $AfterHeadRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "HEAD")
-      $State.CommitAfter = $AfterHeadRes.Output
-    } else {
-      $State.CommitAfter = $State.RemoteCommit
-    }
-    $State.GitPulled = $true
-    Write-DeployLog -Message "Git pull completed: $($State.CommitBefore) -> $($State.CommitAfter)"
   } finally {
     Pop-Location
   }
@@ -845,19 +1049,34 @@ try {
   Write-StepResult -StepNo 2 -TotalSteps 7 -Label "GitHub Update" -Status "PASS"
 
   # ============================================================================
-  # STEP 3 - Backup
+  # STEP 3 - Pre-Update Verified Backup (OUTSIDE GIT REPO) & Git Pull
   # ============================================================================
   $State.CurrentStep = 3
   $State.StepName = "Backup"
 
   if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["simulateBackupFailure"] -and $MockConfig.simulateBackupFailure -eq $true) {
-    throw "BACKUP_FAILED: Failed to create pre-deployment backup. Aborting deployment."
+    throw "BACKUP_FAILED: Failed to create pre-deployment database/release backup before git pull. Aborting deployment."
   }
 
   $BackupDir = Join-Path $BackupsRootDir "deploy_backup_$Timestamp"
   New-Item -ItemType Directory -Path $BackupDir -Force -ErrorAction Stop | Out-Null
+  Set-RestrictedBackupAcl -TargetPath $BackupDir
   $State.BackupDir = $BackupDir
 
+  # 3.1 Real MySQL database backup BEFORE git pull or any schema modification
+  $DbBackupResult = New-VerifiedMySqlBackup `
+    -TargetBackupDir $BackupDir `
+    -DbHost $State.ExpectedDbHost `
+    -DbPort $State.ExpectedDbPort `
+    -DbName $State.ExpectedDbName `
+    -DbUser $State.ExpectedDbUser `
+    -DbPassword $State.ExpectedDbPassword `
+    -HosOfficeUser $State.HosOfficeDbUser
+
+  $State.BackupSqlPath = $DbBackupResult.SqlPath
+  $State.BackupSqlSha256 = $DbBackupResult.Sha256
+
+  # 3.2 Snapshot current dist/ and configuration files BEFORE git pull
   $DistDir = Join-Path $AppDir "dist"
   if (Test-Path $DistDir) {
     Copy-Item -Path $DistDir -Destination (Join-Path $BackupDir "dist") -Recurse -Force -ErrorAction Stop
@@ -870,18 +1089,20 @@ try {
     }
   }
 
-  # Remove any legacy .ts files inside backups/ from earlier runs so tsc never scans them
-  Get-ChildItem -Path $BackupsRootDir -Filter "*.ts" -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-
   $BackupManifest = [ordered]@{
     serviceName          = "Sam_Att V2 Standalone"
     backupTimestamp      = $Timestamp
     commitBefore         = $State.CommitBefore
-    commitAfter          = $State.CommitAfter
+    targetCommit         = $State.RemoteCommit
+    databaseName         = $State.ExpectedDbName
+    sqlDumpFileName      = (Split-Path $DbBackupResult.SqlPath -Leaf)
+    sqlDumpSizeBytes     = $DbBackupResult.SizeBytes
+    sqlDumpSha256        = $DbBackupResult.Sha256
     iisRoutingMode       = $State.IisRoutingMode
     backendProcessMode   = $State.BackendProcessMode
     scannerExeSha256     = $State.ScannerExeSha256
     appDirectory         = $AppDir
+    restoreCommand       = "powershell -ExecutionPolicy Bypass -File `"$AppDir\scripts\restore-test.ps1`" -BackupFolder `"$BackupDir`""
   }
   $ManifestPath = Join-Path $BackupDir "backup-manifest.json"
   ($BackupManifest | ConvertTo-Json -Depth 5) | Set-Content -Path $ManifestPath -Encoding UTF8 -ErrorAction Stop
@@ -891,7 +1112,29 @@ try {
   $ManifestHash = (Get-FileHash -Path $ManifestPath -Algorithm SHA256).Hash.ToLower()
   Set-Content -Path "$ManifestPath.sha256" -Value $ManifestHash -Encoding ASCII -ErrorAction Stop
   $State.BackupCreated = $true
-  Write-DeployLog -Message "Created verified pre-deployment backup at $BackupDir (Manifest SHA256=$ManifestHash)"
+  Write-DeployLog -Message "Created verified pre-update backup at $BackupDir (SQL SHA256=$($DbBackupResult.Sha256), Manifest SHA256=$ManifestHash)"
+
+  # 3.3 Execute git pull --ff-only ONLY AFTER verified backup succeeds
+  Push-Location $AppDir
+  try {
+    if ($null -eq $MockConfig) {
+      $PullRes = Invoke-NativeCli -Executable "git" -Arguments @("pull", "--ff-only", $Remote, $Branch)
+      if ($PullRes.ExitCode -ne 0) {
+        throw "GIT_PULL_FAILED: git pull --ff-only failed (automatic git reset --hard is forbidden): $($PullRes.Output)"
+      }
+      $AfterHeadRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "HEAD")
+      $State.CommitAfter = $AfterHeadRes.Output
+    } else {
+      if ($null -ne $MockConfig.PSObject.Properties["simulateGitPullFailure"] -and $MockConfig.simulateGitPullFailure -eq $true) {
+        throw "GIT_PULL_FAILED: Simulated git pull --ff-only failure"
+      }
+      $State.CommitAfter = $State.RemoteCommit
+    }
+    $State.GitPulled = $true
+    Write-DeployLog -Message "Git pull completed safely after backup: $($State.CommitBefore) -> $($State.CommitAfter)"
+  } finally {
+    Pop-Location
+  }
 
   Write-StepResult -StepNo 3 -TotalSteps 7 -Label "Backup" -Status "PASS"
 
@@ -1015,6 +1258,45 @@ try {
         throw "SCANNER_EXE_MODIFIED_VIOLATION: ScannerReader EXE checksum changed unexpectedly"
       }
     }
+
+    # 5.4 Re-verify and Execute Approved Database Migrations + Post-Migration Schema Verification
+    if ($State.PendingMigrations.Count -gt 0) {
+      if (-not $ApproveMigrations) {
+        throw "MIGRATION_APPROVAL_REQUIRED: Refusing to execute database migrations without explicit -ApproveMigrations approval"
+      }
+      $ApprovedCsv = ($State.PendingMigrations -join ",")
+      $State.DatabaseMigrationAttempted = $true
+      if ($null -ne $MockConfig) {
+        if ($null -ne $MockConfig.PSObject.Properties["simulateMigrationFailure"] -and $MockConfig.simulateMigrationFailure -eq $true) {
+          throw "MIGRATION_EXECUTION_FAILED: Simulated database migration error"
+        }
+        $State.DatabaseMigrationApplied = $true
+        $State.AppliedMigrations = @($State.PendingMigrations)
+      } else {
+        Write-DeployLog -Message "Executing approved database migrations via cli-migrate.ts ($ApprovedCsv)..."
+        $MigRunRes = Invoke-NativeCli -Executable "npx" -Arguments @(
+          "tsx",
+          "backend/src/database/cli-migrate.ts",
+          "--approved-migrations=$ApprovedCsv"
+        )
+        if ($MigRunRes.ExitCode -ne 0) {
+          throw "MIGRATION_EXECUTION_FAILED: Database migration failed (ExitCode=$($MigRunRes.ExitCode)). Backend will NOT be restarted with new code:`n$($MigRunRes.Output)"
+        }
+        $State.DatabaseMigrationApplied = $true
+        $State.AppliedMigrations = @($State.PendingMigrations)
+
+        Write-DeployLog -Message "Running post-migration schema & schema_migrations verification..."
+        $VerifySchemaRes = Invoke-NativeCli -Executable "npx" -Arguments @(
+          "tsx",
+          "backend/src/database/cli-migrate.ts",
+          "--verify-schema"
+        )
+        if ($VerifySchemaRes.ExitCode -ne 0) {
+          throw "POST_MIGRATION_SCHEMA_VERIFICATION_FAILED: Schema verification failed after migration:`n$($VerifySchemaRes.Output)"
+        }
+        Write-DeployLog -Message "Post-migration schema verification PASSED."
+      }
+    }
   } finally {
     Pop-Location
   }
@@ -1039,7 +1321,7 @@ try {
   Write-StepResult -StepNo 6 -TotalSteps 7 -Label "IIS / Backend Update" -Status "PASS"
 
   # ============================================================================
-  # STEP 7 - Health Check
+  # STEP 7 - Health Check & Functional Smoke Verification
   # ============================================================================
   $State.CurrentStep = 7
   $State.StepName = "Health Check"
@@ -1064,13 +1346,17 @@ try {
   Write-Host "MySQL          : $($HealthOutcome.MysqlStatus)"
   Write-Host "Database       : $($HealthOutcome.DatabaseName)"
   Write-Host "Port           : $($HealthOutcome.Port)"
+  Write-Host "BackupDir      : $($State.BackupDir)"
+  Write-Host "BackupSql      : $($State.BackupSqlPath)"
+  Write-Host "BackupSqlSha   : $($State.BackupSqlSha256)"
+  Write-Host "Migrations     : $(if ($State.AppliedMigrations.Count -gt 0) { $State.AppliedMigrations -join ', ' } else { 'NONE' })"
   if ($State.CommitBefore -ne "" -and $State.CommitAfter -ne "") {
     Write-Host "Commit         : $($State.CommitBefore.Substring(0, [Math]::Min(8, $State.CommitBefore.Length))) -> $($State.CommitAfter.Substring(0, [Math]::Min(8, $State.CommitAfter.Length)))"
   }
   Write-Host "----------------------------------------" -ForegroundColor Cyan
   Write-Host ""
   Write-Host "DEPLOYMENT SUCCESS" -ForegroundColor Green
-  Write-DeployLog -Message "DEPLOYMENT SUCCESS on Port $Port (Database=$($HealthOutcome.DatabaseName), Commit=$($State.CommitAfter))"
+  Write-DeployLog -Message "DEPLOYMENT SUCCESS on Port $Port (Database=$($HealthOutcome.DatabaseName), Commit=$($State.CommitAfter), BackupDir=$($State.BackupDir))"
   exit 0
 
 } catch {
@@ -1082,7 +1368,7 @@ try {
   Write-Host "ERROR [$($State.StepName)]: $ErrMessage" -ForegroundColor Red
   Write-DeployLog -Message "FAILED at Step $($State.CurrentStep) ($($State.StepName)): $ErrMessage" -Level "ERROR"
 
-  if ($State.CurrentStep -ge 4 -or $State.GitPulled) {
+  if ($State.CurrentStep -ge 4 -or $State.GitPulled -or $State.DatabaseMigrationAttempted) {
     $RolledBack = Invoke-SafeRollback -FailureReason $ErrMessage
     if ($RolledBack) {
       Write-Host ""
@@ -1090,7 +1376,12 @@ try {
       exit 1
     } else {
       Write-Host ""
-      Write-Host "DEPLOYMENT CRITICAL - ROLLBACK FAILED (MANUAL INTERVENTION REQUIRED)" -ForegroundColor Red
+      if ($State.RequiresManualDbRestore) {
+        Write-Host "DEPLOYMENT FAILED - CODE REVERTED BUT ADMIN DB RESTORE REQUIRED" -ForegroundColor Red
+        Write-Host "BackupSqlPath  : $($State.BackupSqlPath)" -ForegroundColor Yellow
+      } else {
+        Write-Host "DEPLOYMENT CRITICAL - ROLLBACK FAILED (MANUAL INTERVENTION REQUIRED)" -ForegroundColor Red
+      }
       exit 2
     }
   }
