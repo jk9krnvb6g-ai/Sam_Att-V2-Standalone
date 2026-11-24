@@ -44,6 +44,16 @@ import {
   failCentralJob,
   type CentralJobType,
 } from '../jobs/tracker.ts';
+import {
+  checkGitHubUpdateReadOnly,
+  clearGitHubUpdateCache,
+  diagnoseDeploymentFailure,
+  evaluateDeploymentReadiness,
+  getGitHubRepoConfig,
+  getGitHubUpdateSummaryReadOnly,
+  readInstalledPackageVersion,
+  sanitizeDeploymentSecrets,
+} from '../deployment/github-update.ts';
 
 export const settingsRouter = Router();
 
@@ -80,9 +90,7 @@ export function setDeploymentGitInspectorForTests(inspector: DeploymentGitInspec
 }
 
 function sanitizeDeploymentOutput(text: string): string {
-  return String(text || '')
-    .replace(/(PASSWORD|SECRET|TOKEN|API_KEY|MYSQL_PWD)\s*=\s*([^\s;&"]+)/gi, '$1=***REDACTED***')
-    .replace(/(--password|-p)\s*=?\s*([^\s;&"]+)/gi, '$1=***REDACTED***');
+  return sanitizeDeploymentSecrets(text);
 }
 
 function parseDeployOutputMetadata(stdout: string): {
@@ -516,15 +524,27 @@ settingsRouter.get(
   async (_req, res, next) => {
     try {
       const cfg = loadConfig();
-      const history = await dbQuery('SELECT * FROM deployment_history ORDER BY id DESC LIMIT 15');
+      const repoCfg = getGitHubRepoConfig();
+      const pkgVersion = readInstalledPackageVersion();
+      const history = await dbQuery('SELECT * FROM deployment_history ORDER BY id DESC LIMIT 25');
       res.json({
         serviceName: 'SamAttV2Standalone',
         serviceWrapper: 'WinSW (Windows Service Wrapper)',
         architecture: 'STANDALONE_SINGLE_PORT_HTTPS',
         httpsPort: cfg.port,
-        currentVersion: '2.0.0-standalone',
-        targetNodeVersion: '26.13.1',
+        currentVersion: `${pkgVersion}-standalone`,
+        packageVersion: pkgVersion,
+        targetNodeVersion: '>=22.0.0',
         runtimeNodeVersion: process.version,
+        osPlatform: process.platform,
+        isWindowsServer: process.platform === 'win32',
+        repository: {
+          owner: repoCfg.owner,
+          name: repoCfg.name,
+          fullName: `${repoCfg.owner}/${repoCfg.name}`,
+          branch: repoCfg.branch,
+          htmlUrl: `https://github.com/${repoCfg.owner}/${repoCfg.name}`,
+        },
         isolatedFromProcurementAndGateway: true,
         inProgress: isDeploymentInProgress() || batDeploymentRunning,
         activeJob: getActiveJobByType('DEPLOYMENT_RUN'),
@@ -532,9 +552,24 @@ settingsRouter.get(
         uiLiveProductionDeployEnabled: true,
         backupRootPolicy: process.env.SAM_ATT_BACKUP_DIR || 'C:\\SamAttBackups (นอก Git Repository)',
         uiDeployNotice:
-          'ทำงานผ่านกลไก Sam_Att Safe Deployment: ตรวจสอบ Migration -> สำรอง MySQL samchuk_attendance_v2 นอก Git Repo ก่อน git pull -> Build/Test -> รัน Migration ที่ ADMIN อนุมัติ -> ตรวจ Schema -> Restart เฉพาะ Sam_Att บนพอร์ต 4101 โดยไม่แตะต้อง Procurement',
+          'ทำงานผ่านกลไก Sam_Att Safe Deployment: ตรวจสอบ GitHub & Migration -> สำรอง MySQL samchuk_attendance_v2 นอก Git Repo ก่อน git pull -> Build/Test -> รัน Migration ที่ ADMIN อนุมัติ -> ตรวจ Schema -> Restart เฉพาะ Sam_Att บนพอร์ต 4101 โดยไม่แตะต้อง Procurement',
         history,
       });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+settingsRouter.get(
+  '/deployment/update-summary',
+  requireAuth,
+  requireRoles('ADMIN'),
+  async (req, res, next) => {
+    try {
+      const forceRefresh = req.query.refresh === 'true' || req.query.refresh === '1';
+      const summary = await getGitHubUpdateSummaryReadOnly({ forceRefresh });
+      res.json(summary);
     } catch (err) {
       next(err);
     }
@@ -576,19 +611,48 @@ settingsRouter.post(
   async (_req, res, next) => {
     try {
       const cfg = loadConfig();
-      const [dbInspection, gitState] = await Promise.all([
+      const [dbInspection, gitState, githubCheck] = await Promise.all([
         inspectMigrationsDetailedReadOnly(),
         inspectGitDeploymentState(true),
+        checkGitHubUpdateReadOnly({ forceRefresh: true }),
       ]);
       const combinedPending = mergePendingMigrations(dbInspection, gitState);
+      const readiness = evaluateDeploymentReadiness({
+        githubCheck,
+        dbInspection,
+        combinedPendingMigrations: combinedPending,
+        deploymentInProgress: isDeploymentInProgress() || batDeploymentRunning,
+      });
+
+      const resolvedCurrentCommit =
+        gitState.currentCommit !== 'unknown'
+          ? gitState.currentCommit
+          : githubCheck.installed.commitSha;
+      const resolvedTargetCommit =
+        gitState.targetCommit !== 'unknown'
+          ? gitState.targetCommit
+          : githubCheck.remote.targetCommitSha;
+      const hasUpdates =
+        githubCheck.status === 'UPDATE_AVAILABLE' ||
+        gitState.hasUpdates ||
+        combinedPending.length > 0;
 
       res.json({
-        currentVersion: '2.0.0-standalone',
-        currentCommit: gitState.currentCommit,
-        targetCommit: gitState.targetCommit,
-        branch: gitState.branch,
-        hasUpdates: gitState.hasUpdates || combinedPending.length > 0,
-        gitWarning: gitState.warning || null,
+        currentVersion: `${githubCheck.installed.version}-standalone`,
+        packageVersion: githubCheck.installed.version,
+        currentCommit: resolvedCurrentCommit,
+        targetCommit: resolvedTargetCommit,
+        branch: githubCheck.repository.branch,
+        hasUpdates,
+        gitWarning: gitState.warning || githubCheck.remote.errorMessage || null,
+        versionStatus: githubCheck.status,
+        statusLabelThai: githubCheck.statusLabelThai,
+        statusDescriptionThai: githubCheck.statusDescriptionThai,
+        releaseAvailability: githubCheck.releaseAvailability,
+        github: githubCheck,
+        changelog: githubCheck.changelog,
+        readiness,
+        checkedAt: githubCheck.checkedAt,
         appliedMigrations: dbInspection.appliedMigrations,
         pendingMigrations: combinedPending,
         pendingMigrationDetails: dbInspection.pendingDetails,
@@ -602,16 +666,18 @@ settingsRouter.post(
           databaseTarget: cfg.samAttDb.database,
         },
         availableRelease: {
-          version: '2.0.0-standalone',
-          commitSha: gitState.targetCommit,
+          version:
+            githubCheck.remote.latestReleaseTag || `${githubCheck.installed.version}-standalone`,
+          commitSha: resolvedTargetCommit,
           status:
             combinedPending.length > 0
               ? 'MIGRATION_APPROVAL_REQUIRED'
-              : gitState.hasUpdates
+              : githubCheck.status === 'UPDATE_AVAILABLE' || gitState.hasUpdates
                 ? 'UPDATE_AVAILABLE'
-                : 'UP_TO_DATE',
+                : githubCheck.status,
           releaseNotes:
-            'Sam_Att V2 Standalone รุ่นเสถียร แยกออกจาก Central API Gateway อย่างสมบูรณ์ ใช้ HTTPS Port 4101 เดียวกันทั้ง Frontend และ API',
+            githubCheck.changelog.sourceLabelThai ||
+            'ตรวจสอบจาก GitHub Repository จริง (jk9krnvb6g-ai/Sam_Att-V2-Standalone)',
         },
       });
     } catch (err) {
@@ -938,10 +1004,10 @@ settingsRouter.post(
         return;
       }
 
-      // 1. ตรวจสอบ Migration ที่ค้างอยู่และสถานะ Git ก่อนเริ่มรันสคริปต์จริงเสมอ
+      // 1. ตรวจสอบ Migration ที่ค้างอยู่และสถานะ Git ล่าสุด (fetchRemote=true เพื่อป้องกัน stale-ref mismatch กับ Deploy_Sam_Att.ps1)
       const [dbInspection, gitState] = await Promise.all([
         inspectMigrationsDetailedReadOnly(),
-        inspectGitDeploymentState(false),
+        inspectGitDeploymentState(!customGitInspector),
       ]);
 
       if (dbInspection.checksumMismatches.length > 0) {
@@ -1078,17 +1144,18 @@ settingsRouter.post(
         );
       }
 
-      const windowsScriptPath = 'C:\\inetpub\\wwwroot\\Sam_Att\\deployment\\Deploy_Sam_Att.bat';
       const localScriptPath = path.resolve(process.cwd(), 'deployment', 'Deploy_Sam_Att.bat');
-      const resolvedScriptPath = fs.existsSync(windowsScriptPath)
-        ? windowsScriptPath
-        : localScriptPath;
+      const windowsScriptPath = 'C:\\inetpub\\wwwroot\\Sam_Att\\deployment\\Deploy_Sam_Att.bat';
+      const resolvedScriptPath = fs.existsSync(localScriptPath)
+        ? localScriptPath
+        : windowsScriptPath;
+      const resolvedPs1Path = path.join(path.dirname(resolvedScriptPath), 'Deploy_Sam_Att.ps1');
 
       if (!fs.existsSync(resolvedScriptPath) && !customDeployBatRunner) {
         res.status(404).json({
           status: 'FAILED',
           error: 'DEPLOY_SCRIPT_NOT_FOUND',
-          message: `ไม่พบไฟล์สคริปต์อัปเดตที่กำหนด (${windowsScriptPath})`,
+          message: `ไม่พบไฟล์สคริปต์อัปเดตที่กำหนด (${localScriptPath})`,
           requestId: req.requestId,
         });
         return;
@@ -1109,7 +1176,7 @@ settingsRouter.post(
           stage: 'BACKING_UP',
           currentStep: migrationApprovalRecorded
             ? `กำลังสำรองข้อมูลและรันสคริปต์อัปเดตพร้อม Migration ที่อนุมัติ (${combinedPending.join(', ')})...`
-            : 'กำลังสำรองข้อมูลและรันสคริปต์ Deploy_Sam_Att.bat...',
+            : 'กำลังสำรองข้อมูลและรันสคริปต์ Deploy_Sam_Att...',
           processedCount: 2,
           totalCount: 7,
         });
@@ -1119,16 +1186,39 @@ settingsRouter.post(
         if (customDeployBatRunner) {
           batResult = await customDeployBatRunner(resolvedScriptPath, cliArgs);
         } else if (process.platform === 'win32') {
+          const appRootDir = path.dirname(path.dirname(resolvedScriptPath));
+          const childEnv: NodeJS.ProcessEnv = {
+            ...process.env,
+            SAM_ATT_NO_PAUSE: '1',
+          };
+          if (migrationApprovalRecorded) {
+            childEnv.SAM_ATT_APPROVED_COMMIT = expectedTargetCommit;
+            childEnv.SAM_ATT_APPROVED_MIGRATIONS = combinedPending.join(',');
+          }
+
+          // Invoke PowerShell directly on Windows when Deploy_Sam_Att.ps1 exists to prevent cmd.exe comma/quote splitting
+          const useDirectPowerShell = fs.existsSync(resolvedPs1Path);
+          const execBinary = useDirectPowerShell ? 'powershell.exe' : 'cmd.exe';
+          const execArgs = useDirectPowerShell
+            ? [
+                '-NoProfile',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-File',
+                resolvedPs1Path,
+                '-AppDir',
+                appRootDir,
+                ...cliArgs,
+              ]
+            : ['/c', resolvedScriptPath, ...cliArgs];
+
           batResult = await new Promise<DeployBatResult>((resolve) => {
             execFile(
-              'cmd.exe',
-              ['/c', resolvedScriptPath, ...cliArgs],
+              execBinary,
+              execArgs,
               {
-                cwd: path.dirname(path.dirname(resolvedScriptPath)),
-                env: {
-                  ...process.env,
-                  SAM_ATT_NO_PAUSE: '1',
-                },
+                cwd: appRootDir,
+                env: childEnv,
                 timeout: 600000,
                 maxBuffer: 16 * 1024 * 1024,
                 windowsHide: true,
@@ -1144,13 +1234,25 @@ settingsRouter.post(
                   exitCode,
                   stdout: String(stdout || ''),
                   stderr: String(stderr || (err ? err.message : '')),
-                  scriptPath: resolvedScriptPath,
+                  scriptPath: useDirectPowerShell ? resolvedPs1Path : resolvedScriptPath,
                   durationMs: Date.now() - startTime,
                 });
               }
             );
           });
         } else {
+          const nonWinDiagnostics = {
+            failedStep: 'ขั้นตอนที่ 1/7: ตรวจสอบสภาพแวดล้อมเซิร์ฟเวอร์',
+            errorCode: 'UNSUPPORTED_OS_ENVIRONMENT',
+            detectedCause: `สภาพแวดล้อมปัจจุบันเป็น ${process.platform} ซึ่งไม่สามารถรันสคริปต์ Windows PowerShell / Deploy_Sam_Att.bat ได้`,
+            remediationSteps: [
+              'ดำเนินการอัปเดตบนเครื่องเซิร์ฟเวอร์ Windows Server ที่ติดตั้งระบบ Sam_Att V2 Standalone จริง',
+            ],
+            exitCode: 1,
+            rolledBack: false,
+            requiresAdminDatabaseRestore: false,
+            httpStatus: 501,
+          };
           failCentralJob(job.jobId, {
             errorCode: 'UNSUPPORTED_OS_ENVIRONMENT',
             errorMessage:
@@ -1162,6 +1264,7 @@ settingsRouter.post(
             error: 'UNSUPPORTED_OS_ENVIRONMENT',
             jobId: job.jobId,
             scriptPath: resolvedScriptPath,
+            diagnostics: nonWinDiagnostics,
             message:
               'การรันไฟล์ Deploy_Sam_Att.bat รองรับเฉพาะบนเครื่อง Windows Server เท่านั้น (สภาพแวดล้อมปัจจุบันไม่สามารถเรียก cmd.exe ได้)',
             requestId: req.requestId,
@@ -1173,9 +1276,24 @@ settingsRouter.post(
         const safeStderr = sanitizeDeploymentOutput(batResult.stderr);
         const parsedMeta = parseDeployOutputMetadata(`${safeStdout}\n${safeStderr}`);
         const success = batResult.exitCode === 0;
-        const releaseVersion = '2.0.0-standalone';
+        const releaseVersion = `${readInstalledPackageVersion()}-standalone`;
         const statusText = success ? 'SUCCESS' : 'FAILED';
         const recordedCommit = parsedMeta.commitAfter || expectedTargetCommit || 'unknown';
+        const diagnostics = success
+          ? null
+          : diagnoseDeploymentFailure({
+              exitCode: batResult.exitCode,
+              stdout: safeStdout,
+              stderr: safeStderr,
+              requiresAdminDatabaseRestore: parsedMeta.requiresAdminDatabaseRestore,
+              migrationApprovalRequired: parsedMeta.migrationApprovalRequired,
+            });
+
+        const historyNotes = success
+          ? safeStdout.slice(-900)
+          : sanitizeDeploymentOutput(
+              `[${diagnostics!.errorCode}] ${diagnostics!.failedStep} — ${diagnostics!.detectedCause}\n${safeStdout}\n${safeStderr}`
+            ).slice(-950);
 
         const insertRes = await dbExecute(
           `INSERT INTO deployment_history
@@ -1189,7 +1307,7 @@ settingsRouter.post(
             statusText,
             parsedMeta.backupDir ? parsedMeta.backupDir.slice(0, 255) : null,
             success ? 1 : 0,
-            safeStdout.slice(-900),
+            historyNotes,
             req.user!.username,
           ]
         );
@@ -1205,9 +1323,7 @@ settingsRouter.post(
           result: success ? 'SUCCESS' : 'FAILURE',
           errorCode: success
             ? null
-            : parsedMeta.migrationApprovalRequired
-              ? 'MIGRATION_APPROVAL_REQUIRED'
-              : `EXIT_CODE_${batResult.exitCode}`,
+            : diagnostics?.errorCode || `EXIT_CODE_${batResult.exitCode}`,
           detail: {
             jobId: job.jobId,
             scriptPath: batResult.scriptPath,
@@ -1219,37 +1335,41 @@ settingsRouter.post(
             migrationsApproved: migrationApprovalRecorded ? combinedPending : [],
             migrationsApplied: parsedMeta.migrationsApplied,
             requiresAdminDatabaseRestore: parsedMeta.requiresAdminDatabaseRestore,
+            failedStep: diagnostics?.failedStep || null,
+            detectedCause: diagnostics?.detectedCause || null,
           },
         });
 
-        if (!success) {
+        if (!success && diagnostics) {
           const errCode = parsedMeta.migrationApprovalRequired
             ? 'MIGRATION_APPROVAL_REQUIRED'
             : parsedMeta.requiresAdminDatabaseRestore
               ? 'MANUAL_DB_RESTORE_REQUIRED'
-              : 'DEPLOYMENT_EXECUTION_FAILED';
+              : diagnostics.errorCode === 'DEPLOYMENT_EXECUTION_FAILED'
+                ? 'DEPLOYMENT_EXECUTION_FAILED'
+                : diagnostics.errorCode;
           const errMsg = parsedMeta.migrationApprovalRequired
             ? 'ตรวจพบ Database Migration ที่ต้องได้รับอนุมัติจากผู้ดูแลระบบก่อนดำเนินการ (MIGRATION_APPROVAL_REQUIRED)'
             : parsedMeta.requiresAdminDatabaseRestore
               ? `การอัปเดตไม่สำเร็จหลังเริ่มรัน Migration (Exit Code: ${batResult.exitCode}) ระบบได้ย้อนซอร์สโค้ดแล้ว แต่ผู้ดูแลระบบต้องตรวจสอบและกู้คืนฐานข้อมูลด้วยตนเองหากจำเป็น`
-              : `การอัปเดตระบบไม่สำเร็จ (Exit Code: ${batResult.exitCode})`;
+              : `${diagnostics.detectedCause} (Exit Code: ${batResult.exitCode})`;
 
           failCentralJob(job.jobId, {
             errorCode: errCode,
             errorMessage: errMsg,
-            currentStep: parsedMeta.requiresAdminDatabaseRestore
-              ? 'ต้องดำเนินการเพิ่มเติม (ตรวจสอบ/กู้คืนฐานข้อมูล)'
-              : 'การอัปเดตระบบไม่สำเร็จ',
+            currentStep: diagnostics.failedStep,
             resultSummary: {
               deploymentId: insertRes.insertId,
               exitCode: batResult.exitCode,
+              failedStep: diagnostics.failedStep,
+              errorCode: diagnostics.errorCode,
               backupDir: parsedMeta.backupDir,
               backupSqlPath: parsedMeta.backupSqlPath,
-              requiresAdminDatabaseRestore: parsedMeta.requiresAdminDatabaseRestore,
+              requiresAdminDatabaseRestore: diagnostics.requiresAdminDatabaseRestore,
             },
           });
 
-          res.status(parsedMeta.migrationApprovalRequired ? 409 : 422).json({
+          res.status(diagnostics.httpStatus).json({
             status: 'FAILED',
             error: errCode,
             jobId: job.jobId,
@@ -1258,7 +1378,8 @@ settingsRouter.post(
             scriptPath: batResult.scriptPath,
             backupDir: parsedMeta.backupDir,
             backupSqlPath: parsedMeta.backupSqlPath,
-            requiresAdminDatabaseRestore: parsedMeta.requiresAdminDatabaseRestore,
+            requiresAdminDatabaseRestore: diagnostics.requiresAdminDatabaseRestore,
+            diagnostics,
             output: safeStdout,
             errorOutput: safeStderr,
             message: errMsg,
@@ -1266,6 +1387,8 @@ settingsRouter.post(
           });
           return;
         }
+
+        clearGitHubUpdateCache();
 
         completeCentralJob(job.jobId, {
           status: 'SUCCESS',

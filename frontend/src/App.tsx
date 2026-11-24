@@ -53,6 +53,7 @@ export default function App() {
   const [initializing, setInitializing] = useState(true);
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [hasSystemUpdate, setHasSystemUpdate] = useState(false);
 
   // ปิดการเข้าถึงเส้นทางหน้าตั้งค่าระบบหรือตรวจสอบสถานะการเชื่อมต่อเดิมหากผู้ใช้พิมพ์ URL/Hash โดยตรง
   useEffect(() => {
@@ -104,6 +105,27 @@ export default function App() {
     restoreSession();
   }, []);
 
+  // ตรวจสอบเวอร์ชันแบบเบา (Read-Only) เฉพาะผู้ดูแลระบบ (ADMIN) หนึ่งครั้งต่อเซสชัน เพื่อแสดงแถบแจ้งเตือนเล็กที่เมนูอัปเดตระบบ
+  useEffect(() => {
+    if (!user || user.role !== 'ADMIN') {
+      setHasSystemUpdate(false);
+      return;
+    }
+    let cancelled = false;
+    apiRequest<{ hasUpdateAvailable?: boolean }>('/deployment/update-summary')
+      .then((summary) => {
+        if (!cancelled) {
+          setHasSystemUpdate(Boolean(summary?.hasUpdateAvailable));
+        }
+      })
+      .catch(() => {
+        // Silent fail — never interrupt ADMIN workflow with nag popups
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user]);
+
   async function handleLogout() {
     setLoggingOut(true);
     try {
@@ -113,6 +135,7 @@ export default function App() {
     } finally {
       setLoggingOut(false);
       setLogoutConfirmOpen(false);
+      setHasSystemUpdate(false);
       setStoredToken(null);
       setUser(null);
     }
@@ -153,6 +176,7 @@ export default function App() {
         onCloseMobile={() => setMobileMenuOpen(false)}
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
+        updateAvailableBadge={hasSystemUpdate}
       />
 
       {/* Right Main Column: Optional DEMO Banner + Sticky Top Bar + Workspace Content */}
@@ -313,6 +337,7 @@ export default function App() {
               mode="deployment"
               userRole={user.role}
               onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              onUpdateBadgeChange={setHasSystemUpdate}
             />
           )}
           {activeView === 'workflowGuide' && (

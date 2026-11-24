@@ -27,6 +27,7 @@ if "%SAM_ATT_SKIP_ADMIN_CHECK%"=="" (
     net session >nul 2>&1
     if not "!ERRORLEVEL!"=="0" (
         echo ========================================================================
+        echo [ERROR] PREFLIGHT_ADMIN_PRIVILEGE_REQUIRED: Administrator privileges are required.
         echo [WARNING] Please right-click Deploy_Sam_Att.bat and select:
         echo           "Run as administrator"
         echo ========================================================================

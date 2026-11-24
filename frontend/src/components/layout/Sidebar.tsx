@@ -246,6 +246,7 @@ export function Sidebar({
   onCloseMobile,
   collapsed = false,
   onToggleCollapse,
+  updateAvailableBadge = false,
 }: {
   user: AuthUser;
   activeView: NavViewKey;
@@ -254,6 +255,7 @@ export function Sidebar({
   onCloseMobile: () => void;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
+  updateAvailableBadge?: boolean;
 }) {
   function handleSelect(key: NavViewKey) {
     onSelectView(key);
@@ -371,10 +373,26 @@ export function Sidebar({
                           }`}
                         />
                         {!collapsed && (
-                          <span className="text-[14px] leading-snug whitespace-nowrap truncate">
+                          <span className="text-[14px] leading-snug whitespace-nowrap truncate flex-1">
                             {item.label}
                           </span>
                         )}
+                        {item.key === 'deployment' &&
+                          user.role === 'ADMIN' &&
+                          updateAvailableBadge &&
+                          (!collapsed ? (
+                            <span
+                              aria-label="มีเวอร์ชันใหม่บน GitHub"
+                              className="px-1.5 py-0.5 rounded bg-[#8066B5] text-white text-[10.5px] font-semibold leading-none shrink-0"
+                            >
+                              ใหม่
+                            </span>
+                          ) : (
+                            <span
+                              aria-label="มีเวอร์ชันใหม่บน GitHub"
+                              className="absolute top-1.5 right-2 w-2 h-2 rounded-full bg-[#8066B5]"
+                            />
+                          ))}
                       </button>
                     );
                   })}
