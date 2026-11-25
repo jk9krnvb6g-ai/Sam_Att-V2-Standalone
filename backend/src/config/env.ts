@@ -14,8 +14,12 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { generateCryptographicSecret } from '../utils/crypto.ts';
+
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+const PROJECT_ROOT_DIR = path.resolve(MODULE_DIR, '..', '..', '..');
 
 export function isAutomatedTestRuntime(): boolean {
   return (
@@ -26,9 +30,49 @@ export function isAutomatedTestRuntime(): boolean {
   );
 }
 
-// ห้ามโหลดไฟล์ .env ของ Production เข้าสู่โปรเซส Automated Test เด็ดขาด เพื่อป้องกันการเชื่อมต่อฐานข้อมูลจริง (10.1.0.201 / HOSOffice)
+export function resolveDotEnvFilePath(): string {
+  const explicitEnvPath = process.env.SAM_ATT_ENV_PATH?.trim();
+  if (explicitEnvPath) {
+    const resolved = path.resolve(explicitEnvPath);
+    if (isAutomatedTestRuntime()) {
+      const normalizedTmp = path.resolve(os.tmpdir());
+      if (!resolved.startsWith(normalizedTmp + path.sep) && resolved !== normalizedTmp) {
+        throw new Error('UNSAFE_TEST_ENV_PATH: SAM_ATT_ENV_PATH must reside inside os.tmpdir() during automated tests');
+      }
+    }
+    return resolved;
+  }
+
+  const cwdEnv = path.resolve(process.cwd(), '.env');
+  const cwdPkg = path.resolve(process.cwd(), 'package.json');
+  if (fs.existsSync(cwdEnv) || fs.existsSync(cwdPkg)) {
+    return cwdEnv;
+  }
+  return path.join(PROJECT_ROOT_DIR, '.env');
+}
+
+export function reloadEnvConfig(options: { override?: boolean } = {}): string | null {
+  const override = Boolean(options.override);
+  const envPath = resolveDotEnvFilePath();
+
+  // ห้ามโหลดไฟล์ .env ของ Production เข้าสู่โปรเซส Automated Test เว้นแต่ระบุ SAM_ATT_ENV_PATH ชั่วคราวใน os.tmpdir()
+  if (isAutomatedTestRuntime() && !process.env.SAM_ATT_ENV_PATH?.trim()) {
+    if (!process.env.NODE_ENV) {
+      process.env.NODE_ENV = 'test';
+    }
+    return null;
+  }
+
+  if (fs.existsSync(envPath)) {
+    dotenv.config({ path: envPath, override, quiet: true });
+  } else if (!isAutomatedTestRuntime()) {
+    dotenv.config({ override, quiet: true });
+  }
+  return envPath;
+}
+
 if (!isAutomatedTestRuntime()) {
-  dotenv.config();
+  reloadEnvConfig({ override: false });
 } else if (!process.env.NODE_ENV) {
   process.env.NODE_ENV = 'test';
 }
@@ -95,7 +139,9 @@ export interface AppConfig {
     apiBaseUrl: string;
     token: string;
     tokenConfigured: boolean;
+    tokenMaskedHint: string | null;
     timeoutMs: number;
+    cacheTtlMs: number;
   };
 }
 
@@ -164,6 +210,118 @@ function isValidConfiguredSecret(val: string | undefined, minLength: number): bo
   const trimmed = val.trim();
   if (INVALID_SECRET_PLACEHOLDERS.has(trimmed)) return false;
   return trimmed.length >= minLength;
+}
+
+export function maskTokenHint(rawToken: string | undefined | null): string | null {
+  const token = (rawToken || '').trim();
+  if (!token || INVALID_SECRET_PLACEHOLDERS.has(token)) {
+    return null;
+  }
+  if (token.length <= 8) {
+    return `${'*'.repeat(Math.max(4, token.length - 2))}${token.slice(-2)}`;
+  }
+  const prefixMatch = token.match(/^(github_pat_|gh[pous]_|pat_)/);
+  const prefix = prefixMatch ? prefixMatch[1] : '';
+  const tail = token.slice(-4);
+  return `${prefix}••••••••${tail}`;
+}
+
+export function validateGitHubTokenFormat(rawToken: string): { valid: boolean; token: string; reason?: string } {
+  if (typeof rawToken !== 'string') {
+    return { valid: false, token: '', reason: 'กรุณาระบุค่า GITHUB_TOKEN ที่เป็นข้อความ' };
+  }
+  if (/[\r\n\0]/.test(rawToken)) {
+    return { valid: false, token: '', reason: 'GITHUB_TOKEN ต้องไม่มีอักขระขึ้นบรรทัดใหม่หรือ Null Byte' };
+  }
+  const trimmed = rawToken.trim();
+  if (!trimmed) {
+    return { valid: false, token: '', reason: 'GITHUB_TOKEN ต้องไม่เป็นค่าว่าง' };
+  }
+  if (/\s/.test(trimmed) || /["'`=$\\]/.test(trimmed)) {
+    return { valid: false, token: '', reason: 'GITHUB_TOKEN ต้องไม่มีช่องว่างหรืออักขระต้องห้าม' };
+  }
+  if (INVALID_SECRET_PLACEHOLDERS.has(trimmed)) {
+    return { valid: false, token: '', reason: 'GITHUB_TOKEN ต้องไม่ใช่ค่า Placeholder' };
+  }
+  if (trimmed.length < 8 || trimmed.length > 300) {
+    return { valid: false, token: '', reason: 'ความยาวของ GITHUB_TOKEN ไม่ถูกต้อง (ต้องอยู่ระหว่าง 8 ถึง 300 ตัวอักษร)' };
+  }
+  return { valid: true, token: trimmed };
+}
+
+/**
+ * บันทึกหรืออัปเดต GITHUB_TOKEN ลงในไฟล์ .env ของฝั่ง Server และโหลดค่าใหม่เข้า process.env ทันที
+ */
+export function persistGitHubTokenToEnvFile(rawToken: string | null): {
+  envFilePath: string;
+  tokenConfigured: boolean;
+  tokenMaskedHint: string | null;
+} {
+  if (isAutomatedTestRuntime() && !process.env.SAM_ATT_ENV_PATH?.trim()) {
+    throw new Error('UNSAFE_TEST_ENV_PATH: SAM_ATT_ENV_PATH must be set inside os.tmpdir() before persisting .env during tests');
+  }
+
+  let cleanToken = '';
+  if (rawToken !== null) {
+    const check = validateGitHubTokenFormat(rawToken);
+    if (!check.valid) {
+      throw new Error(`INVALID_GITHUB_TOKEN_FORMAT: ${check.reason || 'รูปแบบ GITHUB_TOKEN ไม่ถูกต้อง'}`);
+    }
+    cleanToken = check.token;
+  }
+
+  const envFilePath = resolveDotEnvFilePath();
+  const envDir = path.dirname(envFilePath);
+  if (!fs.existsSync(envDir)) {
+    fs.mkdirSync(envDir, { recursive: true });
+  }
+
+  const existingContent = fs.existsSync(envFilePath) ? fs.readFileSync(envFilePath, 'utf8') : '';
+  const eol = existingContent.includes('\r\n') ? '\r\n' : process.platform === 'win32' ? '\r\n' : '\n';
+  const lines = existingContent ? existingContent.split(/\r?\n/) : [];
+
+  let updated = false;
+  const nextLines = lines.map((line) => {
+    if (/^\s*(?:export\s+)?GITHUB_TOKEN\s*=/.test(line)) {
+      updated = true;
+      return `GITHUB_TOKEN=${cleanToken}`;
+    }
+    return line;
+  });
+
+  if (!updated) {
+    if (nextLines.length > 0 && nextLines[nextLines.length - 1] !== '') {
+      // keep clean separation before appending
+    } else if (nextLines.length > 0 && nextLines[nextLines.length - 1] === '') {
+      nextLines.pop();
+    }
+    nextLines.push(`GITHUB_TOKEN=${cleanToken}`);
+  }
+
+  const finalText = nextLines.join(eol).replace(/(?:\r?\n)*$/, '') + eol;
+  fs.writeFileSync(envFilePath, finalText, { encoding: 'utf8', mode: 0o600 });
+  try {
+    fs.chmodSync(envFilePath, 0o600);
+  } catch {
+    // ignore on Windows / platforms without POSIX chmod
+  }
+
+  // Reload .env เข้า process.env ด้วย override: true (หากอยู่ใน test จะ reload เมื่อตั้ง SAM_ATT_ENV_PATH เท่านั้น)
+  if (!isAutomatedTestRuntime() || process.env.SAM_ATT_ENV_PATH?.trim()) {
+    dotenv.config({ path: envFilePath, override: true, quiet: true });
+  }
+
+  if (cleanToken) {
+    process.env.GITHUB_TOKEN = cleanToken;
+  } else {
+    delete process.env.GITHUB_TOKEN;
+  }
+
+  return {
+    envFilePath,
+    tokenConfigured: Boolean(cleanToken),
+    tokenMaskedHint: maskTokenHint(cleanToken),
+  };
 }
 
 // ขีดจำกัดที่ปลอดภัยสำหรับ Buffer และ Timeout ของ ScannerSyncCli.exe / ScannerReader.exe
@@ -383,7 +541,9 @@ export function loadConfig(): AppConfig {
         apiBaseUrl: 'https://api.github.com',
         token: tokenConfigured ? rawToken : '',
         tokenConfigured,
+        tokenMaskedHint: tokenConfigured ? maskTokenHint(rawToken) : null,
         timeoutMs: parseBoundedPositiveInteger(process.env.GITHUB_API_TIMEOUT_MS, 10000, 2000, 30000),
+        cacheTtlMs: parseBoundedPositiveInteger(process.env.GITHUB_CACHE_TTL_MS, 10 * 60 * 1000, 60 * 1000, 60 * 60 * 1000),
       };
     })(),
   };

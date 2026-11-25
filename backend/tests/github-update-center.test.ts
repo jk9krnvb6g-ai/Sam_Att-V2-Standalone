@@ -649,6 +649,416 @@ test('GitHub Update Center, Thai Changelog, RBAC & 422 Diagnostics Suite', async
       const bat = fs.readFileSync(path.resolve(process.cwd(), 'deployment', 'Deploy_Sam_Att.bat'), 'utf8');
       assert.ok(bat.includes('PREFLIGHT_ADMIN_PRIVILEGE_REQUIRED'));
     });
+
+    // -----------------------------------------------------------------------
+    // 9. GITHUB_TOKEN Authorization Header, User-Agent & Anonymous Fallback
+    // -----------------------------------------------------------------------
+    await t.test('9. Sends Bearer GITHUB_TOKEN & User-Agent: Sam-Att-Updater when configured, and falls back to anonymous calls cleanly', async () => {
+      const sha = '5555222233334444555566667777888899990005';
+      const prevToken = process.env.GITHUB_TOKEN;
+      const recordedHeaders: Array<Record<string, string>> = [];
+
+      setDeploymentGitInspectorForTests(async () => ({
+        available: true,
+        branch: 'main',
+        currentCommit: sha,
+        targetCommit: sha,
+        hasUpdates: false,
+        gitMigrationFiles: [],
+      }));
+
+      setGitHubFetcherForTests(async (url, headers): Promise<GitHubHttpResponse> => {
+        recordedHeaders.push({ ...headers });
+        if (url.endsWith('/commits/main')) {
+          return {
+            status: 200,
+            ok: true,
+            json: { sha, commit: { message: 'chore: token test' } },
+            headers: {
+              'x-ratelimit-limit': headers.Authorization ? '5000' : '60',
+              'x-ratelimit-remaining': headers.Authorization ? '4999' : '59',
+              'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 1800),
+            },
+          };
+        }
+        if (url.includes('/releases')) {
+          return { status: 200, ok: true, json: [] };
+        }
+        return { status: 404, ok: false, json: {} };
+      });
+
+      try {
+        // 9a. With GITHUB_TOKEN
+        const testTok = 'ghp_1234567890abcdefABCDEF1234567890xy';
+        process.env.GITHUB_TOKEN = testTok;
+        clearGitHubUpdateCacheForTests();
+
+        const authRes = await apiCall('/api/Sam_Att/deployment/check-updates?force=true', {
+          method: 'POST',
+          token: adminToken,
+          body: { force: true },
+        });
+        assert.equal(authRes.status, 200);
+        assert.equal(authRes.data.githubReachable, true);
+        assert.equal(authRes.data.tokenConfigured, true);
+        assert.ok(authRes.data.tokenMaskedHint?.includes('90xy'));
+        assert.equal(authRes.data.rateLimit?.limit, 5000);
+        assert.ok(!JSON.stringify(authRes.data).includes(testTok), 'Raw GITHUB_TOKEN must never leak to response');
+
+        assert.ok(recordedHeaders.length >= 1);
+        assert.equal(recordedHeaders[0]['User-Agent'], 'Sam-Att-Updater');
+        assert.equal(recordedHeaders[0].Authorization, `Bearer ${testTok}`);
+
+        // 9b. Without GITHUB_TOKEN (Anonymous Fallback)
+        recordedHeaders.length = 0;
+        delete process.env.GITHUB_TOKEN;
+        clearGitHubUpdateCacheForTests();
+
+        const anonRes = await apiCall('/api/Sam_Att/deployment/check-updates?force=true', {
+          method: 'POST',
+          token: adminToken,
+          body: { force: true },
+        });
+        assert.equal(anonRes.status, 200);
+        assert.equal(anonRes.data.githubReachable, true);
+        assert.equal(anonRes.data.tokenConfigured, false);
+        assert.equal(anonRes.data.tokenMaskedHint, null);
+        assert.equal(anonRes.data.rateLimit?.limit, 60);
+        assert.ok(recordedHeaders.length >= 1);
+        assert.equal(recordedHeaders[0]['User-Agent'], 'Sam-Att-Updater');
+        assert.equal(recordedHeaders[0].Authorization, undefined);
+      } finally {
+        if (prevToken !== undefined) {
+          process.env.GITHUB_TOKEN = prevToken;
+        } else {
+          delete process.env.GITHUB_TOKEN;
+        }
+        setGitHubFetcherForTests(null);
+        setDeploymentGitInspectorForTests(null);
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // 10. In-Memory Cache (10 min), ?force=true Bypass & ETag / 304 Support
+    // -----------------------------------------------------------------------
+    await t.test('10. Caches results on normal page refresh, bypasses on ?force=true, and reuses ETag 304 payloads', async () => {
+      const sha = '6666222233334444555566667777888899990006';
+      let fetchCount = 0;
+      let commitCalls = 0;
+      const seenIfNoneMatch: Array<string | undefined> = [];
+
+      setDeploymentGitInspectorForTests(async () => ({
+        available: true,
+        branch: 'main',
+        currentCommit: sha,
+        targetCommit: sha,
+        hasUpdates: false,
+        gitMigrationFiles: [],
+      }));
+
+      setGitHubFetcherForTests(async (url, headers): Promise<GitHubHttpResponse> => {
+        fetchCount += 1;
+        if (url.endsWith('/commits/main')) {
+          commitCalls += 1;
+          seenIfNoneMatch.push(headers['If-None-Match']);
+          if (commitCalls === 1) {
+            return {
+              status: 200,
+              ok: true,
+              json: { sha, commit: { message: 'feat: initial cached commit' } },
+              headers: {
+                etag: 'W/"etag-commit-main-v1"',
+                'x-ratelimit-limit': '60',
+                'x-ratelimit-remaining': '58',
+              },
+            };
+          }
+          assert.equal(headers['If-None-Match'], 'W/"etag-commit-main-v1"');
+          return {
+            status: 304,
+            ok: false,
+            json: null,
+            headers: {
+              etag: 'W/"etag-commit-main-v1"',
+              'x-ratelimit-limit': '60',
+              'x-ratelimit-remaining': '58',
+            },
+          };
+        }
+        if (url.includes('/releases')) {
+          return { status: 200, ok: true, json: [], headers: { etag: '"etag-rel-v1"' } };
+        }
+        return { status: 404, ok: false, json: {} };
+      });
+
+      try {
+        // Call 1 (populate cache)
+        const r1 = await apiCall('/api/Sam_Att/deployment/check-updates', {
+          method: 'POST',
+          token: adminToken,
+          body: { force: false },
+        });
+        assert.equal(r1.status, 200);
+        assert.equal(r1.data.fromCache, false);
+        const callsAfterFirst = fetchCount;
+        assert.equal(commitCalls, 1);
+
+        // Call 2 (normal page refresh without ?force=true -> hits in-memory cache, zero GitHub API calls!)
+        const r2 = await apiCall('/api/Sam_Att/deployment/check-updates', {
+          method: 'POST',
+          token: adminToken,
+          body: { force: false },
+        });
+        assert.equal(r2.status, 200);
+        assert.equal(r2.data.fromCache, true);
+        assert.equal(fetchCount, callsAfterFirst, 'Cached page reload must not invoke GitHub API');
+
+        // Call 3 (manual ?force=true -> bypasses in-memory cache, sends If-None-Match & accepts 304)
+        const r3 = await apiCall('/api/Sam_Att/deployment/check-updates?force=true', {
+          method: 'POST',
+          token: adminToken,
+          body: { force: true },
+        });
+        assert.equal(r3.status, 200);
+        assert.equal(r3.data.fromCache, false);
+        assert.equal(r3.data.status, 'UP_TO_DATE');
+        assert.equal(r3.data.targetCommit, sha);
+        assert.equal(commitCalls, 2);
+        assert.equal(seenIfNoneMatch[1], 'W/"etag-commit-main-v1"');
+      } finally {
+        setGitHubFetcherForTests(null);
+        setDeploymentGitInspectorForTests(null);
+        clearGitHubUpdateCacheForTests();
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // 11. Granular GitHub Error Classification (401, 403/429 Reset Time, 404, Timeout, Network)
+    // -----------------------------------------------------------------------
+    await t.test('11. Classifies 401, 403/429 with x-ratelimit-reset, 404, Timeout, and Network failures accurately', async () => {
+      const sha = '7777222233334444555566667777888899990007';
+      setDeploymentGitInspectorForTests(async () => ({
+        available: true,
+        branch: 'main',
+        currentCommit: sha,
+        targetCommit: sha,
+        hasUpdates: false,
+        gitMigrationFiles: [],
+      }));
+
+      try {
+        // 11a. 401 Unauthorized
+        setGitHubFetcherForTests(async () => ({
+          status: 401,
+          ok: false,
+          json: { message: 'Bad credentials' },
+        }));
+        const res401 = await apiCall('/api/Sam_Att/deployment/check-updates?force=true', {
+          method: 'POST',
+          token: adminToken,
+        });
+        assert.equal(res401.data.githubReachable, false);
+        assert.equal(res401.data.githubErrorCode, 'GITHUB_UNAUTHORIZED');
+        assert.ok(res401.data.githubError.includes('401'));
+
+        // 11b. 429 Too Many Requests with x-ratelimit-reset
+        const resetSec = 1795600000;
+        setGitHubFetcherForTests(async () => ({
+          status: 429,
+          ok: false,
+          json: { message: 'API rate limit exceeded' },
+          headers: {
+            'x-ratelimit-limit': '60',
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': String(resetSec),
+          },
+        }));
+        const res429 = await apiCall('/api/Sam_Att/deployment/check-updates?force=true', {
+          method: 'POST',
+          token: adminToken,
+        });
+        assert.equal(res429.data.githubReachable, false);
+        assert.equal(res429.data.githubErrorCode, 'GITHUB_RATE_LIMITED');
+        assert.equal(res429.data.rateLimit?.resetEpochSec, resetSec);
+        assert.ok(res429.data.rateLimit?.resetAtThai);
+        assert.ok(res429.data.githubError.includes(res429.data.rateLimit.resetAtThai));
+
+        // 11c. 404 Not Found (missing repo / missing repo scope for Private Repo)
+        setGitHubFetcherForTests(async () => ({
+          status: 404,
+          ok: false,
+          json: { message: 'Not Found' },
+        }));
+        const res404 = await apiCall('/api/Sam_Att/deployment/check-updates?force=true', {
+          method: 'POST',
+          token: adminToken,
+        });
+        assert.equal(res404.data.githubReachable, false);
+        assert.equal(res404.data.githubErrorCode, 'GITHUB_NOT_FOUND');
+        assert.ok(res404.data.githubError.includes('404'));
+        assert.ok(res404.data.remediationThai.includes('repo'));
+
+        // 11d. Timeout (AbortError)
+        setGitHubFetcherForTests(async () => {
+          const err = new Error('The operation was aborted due to timeout');
+          err.name = 'AbortError';
+          throw err;
+        });
+        const resTimeout = await apiCall('/api/Sam_Att/deployment/check-updates?force=true', {
+          method: 'POST',
+          token: adminToken,
+        });
+        assert.equal(resTimeout.data.githubReachable, false);
+        assert.equal(resTimeout.data.githubErrorCode, 'GITHUB_TIMEOUT');
+        assert.ok(resTimeout.data.githubError.includes('Firewall') || resTimeout.data.remediationThai.includes('Firewall'));
+
+        // 11e. Network Error (ENOTFOUND / ECONNREFUSED)
+        setGitHubFetcherForTests(async () => {
+          throw new Error('getaddrinfo ENOTFOUND api.github.com');
+        });
+        const resNet = await apiCall('/api/Sam_Att/deployment/check-updates?force=true', {
+          method: 'POST',
+          token: adminToken,
+        });
+        assert.equal(resNet.data.githubReachable, false);
+        assert.equal(resNet.data.githubErrorCode, 'GITHUB_NETWORK_ERROR');
+        assert.ok(resNet.data.remediationThai.includes('api.github.com'));
+      } finally {
+        setGitHubFetcherForTests(null);
+        setDeploymentGitInspectorForTests(null);
+        clearGitHubUpdateCacheForTests();
+      }
+    });
+
+    // -----------------------------------------------------------------------
+    // 12. Admin UI GITHUB_TOKEN Persistence (.env), RBAC, Validation & Hot Reload
+    // -----------------------------------------------------------------------
+    await t.test('12. Persists GITHUB_TOKEN to isolated .env with RBAC, injection validation, hot reload & zero secret leakage', async () => {
+      const tempEnvFile = path.join(os.tmpdir(), `sam_att_test_env_${TEST_RUN_ID}.env`);
+      const prevEnvPath = process.env.SAM_ATT_ENV_PATH;
+      const prevToken = process.env.GITHUB_TOKEN;
+      const sha = '8888222233334444555566667777888899990008';
+
+      fs.writeFileSync(
+        tempEnvFile,
+        'NODE_ENV=test\nSAM_ATT_DB_HOST=127.0.0.1\nGITHUB_TOKEN=\n',
+        'utf8'
+      );
+      process.env.SAM_ATT_ENV_PATH = tempEnvFile;
+      delete process.env.GITHUB_TOKEN;
+
+      setDeploymentGitInspectorForTests(async () => ({
+        available: true,
+        branch: 'main',
+        currentCommit: sha,
+        targetCommit: sha,
+        hasUpdates: false,
+        gitMigrationFiles: [],
+      }));
+      setGitHubFetcherForTests(async (url, headers): Promise<GitHubHttpResponse> => {
+        if (url.endsWith('/commits/main')) {
+          return {
+            status: 200,
+            ok: true,
+            json: { sha, commit: { message: 'chore: hot reload check' } },
+            headers: {
+              'x-ratelimit-limit': headers.Authorization ? '5000' : '60',
+              'x-ratelimit-remaining': headers.Authorization ? '4998' : '59',
+            },
+          };
+        }
+        if (url.includes('/releases')) {
+          return { status: 200, ok: true, json: [] };
+        }
+        return { status: 404, ok: false, json: {} };
+      });
+
+      try {
+        // 12a. Non-ADMIN RBAC blocked
+        for (const nonAdminTok of [staffToken, generalToken]) {
+          const forbidden = await apiCall('/api/Sam_Att/deployment/github-token', {
+            method: 'POST',
+            token: nonAdminTok,
+            body: { token: 'ghp_1234567890abcdefghijklmnop' },
+          });
+          assert.equal(forbidden.status, 403);
+        }
+
+        // 12b. Blocks newline / injection / placeholder tokens
+        const injRes = await apiCall('/api/Sam_Att/deployment/github-token', {
+          method: 'POST',
+          token: adminToken,
+          body: { token: 'ghp_validprefix\nJWT_SECRET=hacked_secret' },
+        });
+        assert.equal(injRes.status, 400);
+        assert.equal(injRes.data.error, 'INVALID_GITHUB_TOKEN_FORMAT');
+        assert.ok(!fs.readFileSync(tempEnvFile, 'utf8').includes('hacked_secret'));
+
+        // 12c. Valid ADMIN save persists .env, hot-reloads process.env, re-verifies GitHub & masks audit log
+        const validNewToken = 'github_pat_11AAABBB0000111122223333_XYZ987';
+        const saveRes = await apiCall('/api/Sam_Att/deployment/github-token', {
+          method: 'POST',
+          token: adminToken,
+          body: { token: validNewToken },
+        });
+        assert.equal(saveRes.status, 200);
+        assert.equal(saveRes.data.success, true);
+        assert.equal(saveRes.data.tokenConfigured, true);
+        assert.ok(saveRes.data.tokenMaskedHint?.includes('Z987'));
+        assert.equal(saveRes.data.checkResult.githubReachable, true);
+        assert.equal(saveRes.data.checkResult.rateLimit?.limit, 5000);
+        assert.equal(process.env.GITHUB_TOKEN, validNewToken);
+
+        const savedEnvText = fs.readFileSync(tempEnvFile, 'utf8');
+        assert.ok(savedEnvText.includes('SAM_ATT_DB_HOST=127.0.0.1'), 'Existing .env keys must remain intact');
+        assert.ok(savedEnvText.includes(`GITHUB_TOKEN=${validNewToken}`));
+
+        // Zero raw token leakage in HTTP response or audit_logs
+        assert.ok(!JSON.stringify(saveRes.data).includes(validNewToken));
+        const auditRows = await dbQuery<{ action: string; target_id: string; detail_json: string }>(
+          "SELECT action, target_id, detail_json FROM audit_logs WHERE action = 'GITHUB_TOKEN_UPDATED' ORDER BY id DESC LIMIT 1"
+        );
+        assert.equal(auditRows.length, 1);
+        assert.ok(!JSON.stringify(auditRows[0]).includes(validNewToken));
+
+        // 12d. Clear GITHUB_TOKEN cleanly
+        const clearRes = await apiCall('/api/Sam_Att/deployment/github-token', {
+          method: 'POST',
+          token: adminToken,
+          body: { clear: true },
+        });
+        assert.equal(clearRes.status, 200);
+        assert.equal(clearRes.data.cleared, true);
+        assert.equal(clearRes.data.tokenConfigured, false);
+        assert.equal(clearRes.data.tokenMaskedHint, null);
+        assert.equal(clearRes.data.checkResult.rateLimit?.limit, 60);
+        assert.equal(process.env.GITHUB_TOKEN, undefined);
+
+        const clearedEnvText = fs.readFileSync(tempEnvFile, 'utf8');
+        assert.ok(clearedEnvText.includes('SAM_ATT_DB_HOST=127.0.0.1'));
+        assert.ok(/GITHUB_TOKEN=\s*(?:\r?\n|$)/.test(clearedEnvText));
+        assert.ok(!clearedEnvText.includes(validNewToken));
+      } finally {
+        if (prevEnvPath !== undefined) {
+          process.env.SAM_ATT_ENV_PATH = prevEnvPath;
+        } else {
+          delete process.env.SAM_ATT_ENV_PATH;
+        }
+        if (prevToken !== undefined) {
+          process.env.GITHUB_TOKEN = prevToken;
+        } else {
+          delete process.env.GITHUB_TOKEN;
+        }
+        setGitHubFetcherForTests(null);
+        setDeploymentGitInspectorForTests(null);
+        clearGitHubUpdateCacheForTests();
+        try {
+          fs.rmSync(tempEnvFile, { force: true });
+        } catch {
+          // ignore
+        }
+      }
+    });
   } finally {
     await closeServer();
     try {

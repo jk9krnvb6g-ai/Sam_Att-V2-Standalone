@@ -20,10 +20,13 @@ import {
   Clock,
   Database,
   ExternalLink,
+  Eye,
+  EyeOff,
   GitBranch,
   GitCommitHorizontal,
   History,
   Info,
+  KeyRound,
   Loader2,
   Lock,
   PanelRightOpen,
@@ -32,6 +35,8 @@ import {
   ShieldAlert,
   ShieldCheck,
   Terminal,
+  Trash2,
+  WifiOff,
   Wrench,
   XCircle,
 } from 'lucide-react';
@@ -203,6 +208,13 @@ export function DeploymentUpdateCenter({
   const [migrationAdminPassword, setMigrationAdminPassword] = useState('');
   const [migrationModalError, setMigrationModalError] = useState<string | null>(null);
 
+  // GitHub Token configuration state (Admin-only .env persistence)
+  const [tokenPanelOpen, setTokenPanelOpen] = useState(false);
+  const [tokenInput, setTokenInput] = useState('');
+  const [showTokenInput, setShowTokenInput] = useState(false);
+  const [savingToken, setSavingToken] = useState(false);
+  const [tokenFormError, setTokenFormError] = useState<string | null>(null);
+
   // History Detail Drawer
   const [selectedHistoryRow, setSelectedHistoryRow] = useState<any | null>(null);
 
@@ -212,13 +224,19 @@ export function DeploymentUpdateCenter({
     try {
       const [statusRes, checkRes] = await Promise.all([
         apiRequest('/deployment/status'),
-        apiRequest('/deployment/check-updates', { method: 'POST' }).catch(() => null),
+        apiRequest('/deployment/check-updates', {
+          method: 'POST',
+          body: JSON.stringify({ force: false }),
+        }).catch(() => null),
       ]);
       setDeployStatus(statusRes);
       if (checkRes) {
         setCheckResult(checkRes);
         if (checkRes.readiness) {
           setReadiness(checkRes.readiness);
+        }
+        if (checkRes.githubReachable === false && (checkRes.githubErrorCode === 'GITHUB_RATE_LIMITED' || checkRes.githubErrorCode === 'GITHUB_UNAUTHORIZED' || checkRes.githubErrorCode === 'GITHUB_NOT_FOUND')) {
+          setTokenPanelOpen(true);
         }
       } else {
         const readRes = await apiRequest<DeploymentReadinessReport>('/deployment/readiness').catch(() => null);
@@ -247,7 +265,10 @@ export function DeploymentUpdateCenter({
     try {
       const [statusRes, checkRes] = await Promise.all([
         apiRequest('/deployment/status'),
-        apiRequest('/deployment/check-updates', { method: 'POST' }),
+        apiRequest('/deployment/check-updates?force=true', {
+          method: 'POST',
+          body: JSON.stringify({ force: true }),
+        }),
       ]);
       setDeployStatus(statusRes);
       setCheckResult(checkRes);
@@ -257,9 +278,16 @@ export function DeploymentUpdateCenter({
       onNotificationChange?.();
 
       if (!checkRes.githubReachable) {
+        if (
+          checkRes.githubErrorCode === 'GITHUB_RATE_LIMITED' ||
+          checkRes.githubErrorCode === 'GITHUB_UNAUTHORIZED' ||
+          checkRes.githubErrorCode === 'GITHUB_NOT_FOUND'
+        ) {
+          setTokenPanelOpen(true);
+        }
         showToast({
           type: 'error',
-          title: 'เชื่อมต่อ GitHub ไม่สำเร็จ',
+          title: checkRes.statusLabelThai || 'เชื่อมต่อ GitHub ไม่สำเร็จ',
           message: checkRes.githubError || 'ไม่สามารถดึงข้อมูลจาก GitHub ได้ในขณะนี้',
         });
       } else if (checkRes.pendingMigrations?.length > 0) {
@@ -289,6 +317,106 @@ export function DeploymentUpdateCenter({
       }
     } finally {
       setCheckingUpdates(false);
+    }
+  }
+
+  async function handleSaveGitHubToken(e: React.FormEvent) {
+    e.preventDefault();
+    setTokenFormError(null);
+    const trimmed = tokenInput.trim();
+    if (!trimmed) {
+      setTokenFormError('กรุณากรอก GITHUB_TOKEN (เช่น ghp_... หรือ github_pat_...) ก่อนบันทึก');
+      return;
+    }
+    setSavingToken(true);
+    try {
+      const res = await apiRequest<any>('/deployment/github-token', {
+        method: 'POST',
+        body: JSON.stringify({ token: trimmed }),
+      });
+      setTokenInput('');
+      setShowTokenInput(false);
+      setDeployStatus((prev: any) => ({
+        ...(prev || {}),
+        tokenConfigured: Boolean(res.tokenConfigured),
+        tokenMaskedHint: res.tokenMaskedHint || null,
+        envFileExists: true,
+      }));
+      if (res.checkResult) {
+        setCheckResult(res.checkResult);
+      }
+      if (res.readiness) {
+        setReadiness(res.readiness);
+      }
+      onNotificationChange?.();
+
+      if (res.checkResult?.githubReachable) {
+        setNotice(res.message || 'บันทึก GITHUB_TOKEN และเชื่อมต่อ GitHub สำเร็จแล้ว');
+        setTokenPanelOpen(false);
+        showToast({
+          type: 'success',
+          title: 'บันทึก GITHUB_TOKEN สำเร็จ',
+          message: 'โหลดค่าใหม่และเชื่อมต่อ GitHub API เรียบร้อยแล้ว (โควตา 5,000 ครั้ง/ชั่วโมง)',
+        });
+      } else {
+        setTokenFormError(
+          res.checkResult?.githubError ||
+            'บันทึก GITHUB_TOKEN ลงไฟล์ .env แล้ว แต่การเชื่อมต่อ GitHub ยังไม่สำเร็จ'
+        );
+        showToast({
+          type: 'warning',
+          title: 'บันทึก Token แล้ว แต่ยังเชื่อมต่อ GitHub ไม่ผ่าน',
+          message: res.checkResult?.statusLabelThai || 'กรุณาตรวจสอบ Token หรือเครือข่ายเซิร์ฟเวอร์',
+        });
+      }
+    } catch (err) {
+      if (err instanceof ApiClientError) {
+        setTokenFormError(err.message);
+        showToast({ type: 'error', title: 'ไม่สามารถบันทึก GITHUB_TOKEN ได้', message: err.message });
+      } else {
+        setTokenFormError('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์เพื่อบันทึก GITHUB_TOKEN ได้');
+      }
+    } finally {
+      setSavingToken(false);
+    }
+  }
+
+  async function handleClearGitHubToken() {
+    setTokenFormError(null);
+    setSavingToken(true);
+    try {
+      const res = await apiRequest<any>('/deployment/github-token', {
+        method: 'POST',
+        body: JSON.stringify({ clear: true }),
+      });
+      setTokenInput('');
+      setShowTokenInput(false);
+      setDeployStatus((prev: any) => ({
+        ...(prev || {}),
+        tokenConfigured: false,
+        tokenMaskedHint: null,
+      }));
+      if (res.checkResult) {
+        setCheckResult(res.checkResult);
+      }
+      if (res.readiness) {
+        setReadiness(res.readiness);
+      }
+      onNotificationChange?.();
+      setNotice('ล้างค่า GITHUB_TOKEN จากไฟล์ .env เรียบร้อยแล้ว (สลับกลับเป็นโหมดสาธารณะ 60 ครั้ง/ชั่วโมง)');
+      showToast({
+        type: 'info',
+        title: 'ล้างค่า GITHUB_TOKEN แล้ว',
+        message: 'ระบบใช้การตรวจสอบแบบไม่ระบุตัวตน (เฉพาะ Public Repository)',
+      });
+    } catch (err) {
+      if (err instanceof ApiClientError) {
+        setTokenFormError(err.message);
+      } else {
+        setTokenFormError('ไม่สามารถล้างค่า GITHUB_TOKEN ได้');
+      }
+    } finally {
+      setSavingToken(false);
     }
   }
 
@@ -456,6 +584,13 @@ export function DeploymentUpdateCenter({
 
   const diagnostic: DeploymentFailureDiagnostic | null = deployResult?.diagnostic || null;
 
+  const tokenConfigured: boolean = Boolean(
+    checkResult?.tokenConfigured ?? deployStatus?.tokenConfigured
+  );
+  const tokenMaskedHint: string | null =
+    checkResult?.tokenMaskedHint ?? deployStatus?.tokenMaskedHint ?? null;
+  const rateLimit = checkResult?.rateLimit || null;
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -475,7 +610,7 @@ export function DeploymentUpdateCenter({
                 className={`w-4 h-4 ${checkingUpdates ? 'animate-spin' : ''}`}
                 aria-hidden="true"
               />
-              <span>{checkingUpdates ? 'กำลังตรวจสอบ...' : 'ตรวจสอบเวอร์ชันอีกครั้ง'}</span>
+              <span>{checkingUpdates ? 'กำลังตรวจสอบ...' : 'ตรวจสอบเวอร์ชันล่าสุดใหม่'}</span>
             </button>
             <button
               type="button"
@@ -509,15 +644,20 @@ export function DeploymentUpdateCenter({
       <NotificationBanner message={notice} onClose={() => setNotice(null)} />
 
       {/* ===================================================================
-          ส่วน A: สถานะเวอร์ชัน (Version Status)
+          ส่วน A: สถานะเวอร์ชัน (Version Status & GitHub Token / Cache)
          =================================================================== */}
       <section aria-labelledby="section-version-status" className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <h2 id="section-version-status" className="text-[16px] font-bold text-[#292638]">
               1. สถานะเวอร์ชันและการเชื่อมต่อ GitHub
             </h2>
             <StatusBadge tone={statusBadge.tone}>{statusBadge.label}</StatusBadge>
+            {checkResult?.fromCache && (
+              <StatusBadge tone="info">
+                จาก Cache เซิร์ฟเวอร์ (ไม่เสียโควตา)
+              </StatusBadge>
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-3 text-[12.5px] text-[#777287]">
             <a
@@ -540,18 +680,179 @@ export function DeploymentUpdateCenter({
           </div>
         </div>
 
-        {/* GitHub Unreachable Explicit Alert */}
+        {/* Auth Mode, Rate Limit Quota & Cache Status Strip + Token Setup Toggle */}
+        <div className="p-3.5 sm:px-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3 text-[13px]">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[#5B556B]">
+            <span className="inline-flex items-center gap-1.5">
+              <KeyRound className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+              <span className="font-semibold text-[#292638]">สิทธิ์เชื่อมต่อ GitHub:</span>
+              {tokenConfigured ? (
+                <StatusBadge tone="success">
+                  ตั้งค่า GITHUB_TOKEN แล้ว (5,000 ครั้ง/ชม.{tokenMaskedHint ? ` · ${tokenMaskedHint}` : ''})
+                </StatusBadge>
+              ) : (
+                <StatusBadge tone="warning">
+                  โหมดไม่ระบุตัวตน (60 ครั้ง/ชม.)
+                </StatusBadge>
+              )}
+            </span>
+
+            {rateLimit && (rateLimit.limit !== null || rateLimit.remaining !== null) && (
+              <span className="font-mono text-[12.5px] text-[#4E3978]">
+                โควตาคงเหลือ: {rateLimit.remaining ?? '?'} / {rateLimit.limit ?? '?'}
+                {rateLimit.resetAtThai ? ` · รีเซ็ต ${rateLimit.resetAtThai}` : ''}
+              </span>
+            )}
+
+            {checkResult?.cacheTtlMinutes && (
+              <span className="text-[12px] text-[#777287]">
+                แคชอัตโนมัติ {checkResult.cacheTtlMinutes} นาที + ETag (ประหยัดโควตาเมื่อรีเฟรชหน้า)
+              </span>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => {
+              setTokenFormError(null);
+              setTokenPanelOpen((prev) => !prev);
+            }}
+            className="ent-btn-secondary h-8 px-3 text-[12.5px] shrink-0 self-start lg:self-auto"
+          >
+            <KeyRound className="w-3.5 h-3.5 text-[#8066B5]" aria-hidden="true" />
+            <span>
+              {tokenPanelOpen
+                ? 'ซ่อนการตั้งค่า GITHUB_TOKEN'
+                : tokenConfigured
+                  ? 'เปลี่ยน / ล้าง GITHUB_TOKEN'
+                  : 'ตั้งค่า GITHUB_TOKEN'}
+            </span>
+          </button>
+        </div>
+
+        {/* GitHub Unreachable Explicit Alert with Distinct Cause & Remediation */}
         {checkResult && checkResult.githubReachable === false && (
           <div
             role="alert"
-            className="p-4 sm:p-5 rounded-xl bg-[#FDF2F4] border border-[#E5B8BF] text-[#8E2837] space-y-1.5"
+            className="p-4 sm:p-5 rounded-xl bg-[#FDF2F4] border border-[#E5B8BF] text-[#8E2837] space-y-2.5"
           >
-            <div className="flex items-center gap-2 font-bold text-[14.5px]">
-              <XCircle className="w-5 h-5 shrink-0" aria-hidden="true" />
-              <span>ไม่สามารถเชื่อมต่อ GitHub เพื่อตรวจสอบเวอร์ชันล่าสุดได้ ({checkResult.githubErrorCode})</span>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 font-bold text-[14.5px]">
+                {checkResult.githubErrorCode === 'GITHUB_TIMEOUT' ||
+                checkResult.githubErrorCode === 'GITHUB_NETWORK_ERROR' ? (
+                  <WifiOff className="w-5 h-5 shrink-0" aria-hidden="true" />
+                ) : (
+                  <XCircle className="w-5 h-5 shrink-0" aria-hidden="true" />
+                )}
+                <span>
+                  {checkResult.statusLabelThai || 'ไม่สามารถเชื่อมต่อ GitHub เพื่อตรวจสอบเวอร์ชันล่าสุดได้'}
+                  {checkResult.githubErrorCode ? ` (${checkResult.githubErrorCode})` : ''}
+                </span>
+              </div>
+              {rateLimit?.resetAtThai && checkResult.githubErrorCode === 'GITHUB_RATE_LIMITED' && (
+                <StatusBadge tone="warning">รีเซ็ตโควตาเวลา {rateLimit.resetAtThai}</StatusBadge>
+              )}
             </div>
             <p className="text-[13.5px] leading-relaxed">{checkResult.githubError}</p>
+            {checkResult.remediationThai && (
+              <div className="text-[13px] bg-white/80 border border-[#E5B8BF]/60 rounded-lg px-3.5 py-2.5 text-[#4E3978]">
+                <span className="font-bold">แนวทางแก้ไข: </span>
+                {checkResult.remediationThai}
+              </div>
+            )}
           </div>
+        )}
+
+        {/* Admin UI Form to Save / Update / Clear GITHUB_TOKEN directly into Server .env */}
+        {tokenPanelOpen && (
+          <form
+            onSubmit={handleSaveGitHubToken}
+            className="p-4 sm:p-5 rounded-xl bg-white border border-[#D8CEEA] shadow-xs space-y-3.5"
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div>
+                <h3 className="text-[14.5px] font-bold text-[#292638] flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+                  <span>ตั้งค่า GITHUB_TOKEN (บันทึกลงไฟล์ .env ฝั่ง Server และโหลดทันที)</span>
+                </h3>
+                <p className="text-[12.5px] text-[#777287] mt-0.5">
+                  ใช้สิทธิ์แบบอ่านอย่างเดียว (<span className="font-mono">Contents: Read-only</span> หรือ{' '}
+                  <span className="font-mono">repo</span> สำหรับ Private Repository) เพื่อเพิ่มโควตาเป็น 5,000 ครั้ง/ชั่วโมง — Token จะถูกเก็บเฉพาะฝั่ง Server ไม่ส่งกลับไปยังเบราว์เซอร์
+                </p>
+              </div>
+            </div>
+
+            {tokenFormError && (
+              <div
+                role="alert"
+                className="p-3 rounded-lg bg-[#FDF2F4] border border-[#E5B8BF] text-[#8E2837] text-[13px]"
+              >
+                {tokenFormError}
+              </div>
+            )}
+
+            <div className="flex flex-col sm:flex-row gap-2.5 items-stretch sm:items-end">
+              <div className="flex-1">
+                <label htmlFor="github-token-input" className="ent-label">
+                  GitHub Personal Access Token (GITHUB_TOKEN)
+                </label>
+                <div className="relative">
+                  <input
+                    id="github-token-input"
+                    type={showTokenInput ? 'text' : 'password'}
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={tokenInput}
+                    onChange={(e) => setTokenInput(e.target.value)}
+                    placeholder={
+                      tokenConfigured
+                        ? `กำลังใช้งาน (${tokenMaskedHint || 'ตั้งค่าแล้ว'}) — วาง Token ใหม่เพื่อแทนที่`
+                        : 'วาง Token เช่น github_pat_... หรือ ghp_...'
+                    }
+                    className="ent-input w-full pr-10 font-mono text-[13px]"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowTokenInput((prev) => !prev)}
+                    aria-label={showTokenInput ? 'ซ่อน Token' : 'แสดง Token'}
+                    className="absolute inset-y-0 right-0 px-3 flex items-center text-[#777287] hover:text-[#292638]"
+                  >
+                    {showTokenInput ? (
+                      <EyeOff className="w-4 h-4" aria-hidden="true" />
+                    ) : (
+                      <Eye className="w-4 h-4" aria-hidden="true" />
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="submit"
+                  disabled={savingToken || !tokenInput.trim()}
+                  className="ent-btn-primary whitespace-nowrap"
+                >
+                  {savingToken ? (
+                    <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+                  ) : (
+                    <KeyRound className="w-4 h-4" aria-hidden="true" />
+                  )}
+                  <span>{savingToken ? 'กำลังบันทึก...' : 'บันทึกและตรวจสอบทันที'}</span>
+                </button>
+                {tokenConfigured && (
+                  <button
+                    type="button"
+                    disabled={savingToken}
+                    onClick={handleClearGitHubToken}
+                    className="ent-btn-secondary whitespace-nowrap text-[#8E2837]"
+                  >
+                    <Trash2 className="w-4 h-4" aria-hidden="true" />
+                    <span>ล้าง Token</span>
+                  </button>
+                )}
+              </div>
+            </div>
+          </form>
         )}
 
         <MetricStrip
@@ -906,7 +1207,7 @@ export function DeploymentUpdateCenter({
               className="ent-btn-secondary"
             >
               <RefreshCw className={`w-4 h-4 ${checkingUpdates ? 'animate-spin' : ''}`} aria-hidden="true" />
-              <span>ตรวจสอบเวอร์ชัน</span>
+              <span>ตรวจสอบเวอร์ชันล่าสุดใหม่</span>
             </button>
             <button
               type="button"

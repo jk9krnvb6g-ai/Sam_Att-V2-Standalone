@@ -14,7 +14,12 @@ import path from 'path';
 import { execFile } from 'child_process';
 import mysql from 'mysql2/promise';
 import { Router } from 'express';
-import { loadConfig, validateProductionConfig } from '../../config/env.ts';
+import {
+  loadConfig,
+  persistGitHubTokenToEnvFile,
+  resolveDotEnvFilePath,
+  validateProductionConfig,
+} from '../../config/env.ts';
 import {
   dbExecute,
   dbQuery,
@@ -46,6 +51,7 @@ import {
 } from '../jobs/tracker.ts';
 import {
   checkGitHubUpdates,
+  clearGitHubUpdateCache,
   diagnoseDeploymentFailure,
   evaluateDeploymentReadiness,
   hasCustomGitHubFetcherForTests,
@@ -550,6 +556,9 @@ settingsRouter.get(
         repositoryUrl: `https://github.com/${cfg.github.repo}`,
         branch: cfg.github.branch,
         tokenConfigured: cfg.github.tokenConfigured,
+        tokenMaskedHint: cfg.github.tokenMaskedHint,
+        cacheTtlMinutes: Math.max(1, Math.round(cfg.github.cacheTtlMs / 60000)),
+        envFileExists: fs.existsSync(resolveDotEnvFilePath()),
         platform: process.platform,
         targetNodeVersion: '>=22.0.0',
         runtimeNodeVersion: process.version,
@@ -607,6 +616,12 @@ settingsRouter.get(
         githubReachable: gh.githubReachable,
         githubError: gh.githubError,
         githubErrorCode: gh.githubErrorCode,
+        remediationThai: gh.remediationThai,
+        tokenConfigured: gh.tokenConfigured,
+        tokenMaskedHint: gh.tokenMaskedHint,
+        fromCache: gh.fromCache,
+        cacheExpiresAt: gh.cacheExpiresAt,
+        rateLimit: gh.rateLimit,
       });
     } catch (err) {
       next(err);
@@ -697,9 +712,15 @@ settingsRouter.post(
   async (req, res, next) => {
     try {
       const cfg = loadConfig();
+      const forceRefresh =
+        req.query.force === '1' ||
+        req.query.force === 'true' ||
+        req.body?.force === true ||
+        req.body?.force === 'true';
+
       const [dbInspection, gitState] = await Promise.all([
         inspectMigrationsDetailedReadOnly(),
-        inspectGitDeploymentState(true),
+        inspectGitDeploymentState(forceRefresh),
       ]);
 
       const skipExternalGithubInLegacyMockTest =
@@ -708,7 +729,7 @@ settingsRouter.post(
       let githubCheck: GitHubVersionCheckResult | null = null;
       if (!skipExternalGithubInLegacyMockTest) {
         githubCheck = await checkGitHubUpdates({
-          forceRefresh: true,
+          forceRefresh,
           overrideGit: customGitInspector
             ? {
                 available: gitState.available,
@@ -768,6 +789,8 @@ settingsRouter.post(
           commitsBehind: githubCheck?.commitsBehind || 0,
           pendingMigrations: combinedPending,
           canDeploy: readiness.canDeploy,
+          forceRefresh,
+          fromCache: Boolean(githubCheck?.fromCache),
         },
       });
 
@@ -799,6 +822,14 @@ settingsRouter.post(
         githubReachable: githubCheck ? githubCheck.githubReachable : true,
         githubError: githubCheck?.githubError || null,
         githubErrorCode: githubCheck?.githubErrorCode || null,
+        remediationThai: githubCheck?.remediationThai || null,
+        tokenConfigured: githubCheck ? githubCheck.tokenConfigured : cfg.github.tokenConfigured,
+        tokenMaskedHint: githubCheck ? githubCheck.tokenMaskedHint : cfg.github.tokenMaskedHint,
+        fromCache: githubCheck ? githubCheck.fromCache : false,
+        cacheExpiresAt: githubCheck?.cacheExpiresAt || null,
+        cacheTtlMinutes:
+          githubCheck?.cacheTtlMinutes || Math.max(1, Math.round(cfg.github.cacheTtlMs / 60000)),
+        rateLimit: githubCheck?.rateLimit || null,
         commitsBehind: githubCheck?.commitsBehind || 0,
         commitsAhead: githubCheck?.commitsAhead || 0,
         latestCommitDate: githubCheck?.latestCommitDate || null,
@@ -835,6 +866,169 @@ settingsRouter.post(
             githubCheck?.changelog?.noticeThai ||
             'ตรวจสอบข้อมูลจาก GitHub Repository โดยตรง',
         },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+settingsRouter.post(
+  '/deployment/github-token',
+  requireAuth,
+  requireRoles('ADMIN'),
+  async (req, res, next) => {
+    try {
+      const isClear = req.body?.clear === true;
+      const rawToken = typeof req.body?.token === 'string' ? req.body.token : '';
+
+      if (!isClear && !rawToken.trim()) {
+        res.status(400).json({
+          error: 'INVALID_GITHUB_TOKEN_FORMAT',
+          message: 'กรุณากรอก GITHUB_TOKEN ก่อนบันทึก',
+        });
+        return;
+      }
+
+      let persisted: {
+        envFilePath: string;
+        tokenConfigured: boolean;
+        tokenMaskedHint: string | null;
+      };
+      try {
+        persisted = persistGitHubTokenToEnvFile(isClear ? null : rawToken);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'INVALID_GITHUB_TOKEN_FORMAT';
+        res.status(400).json({
+          error: 'INVALID_GITHUB_TOKEN_FORMAT',
+          message: sanitizeDeploymentLog(msg.replace(/^INVALID_GITHUB_TOKEN_FORMAT:\s*/i, ''), [rawToken]),
+        });
+        return;
+      }
+
+      // ล้าง In-memory Cache & ETag Cache ทันทีเพื่อให้ตรวจสอบใหม่ด้วย Token ล่าสุด
+      clearGitHubUpdateCache();
+
+      const [dbInspection, gitState] = await Promise.all([
+        inspectMigrationsDetailedReadOnly(),
+        inspectGitDeploymentState(true),
+      ]);
+
+      const skipExternalGithubInLegacyMockTest =
+        process.env.NODE_ENV === 'test' && Boolean(customGitInspector) && !hasCustomGitHubFetcherForTests();
+
+      let githubCheck: GitHubVersionCheckResult | null = null;
+      if (!skipExternalGithubInLegacyMockTest) {
+        githubCheck = await checkGitHubUpdates({
+          forceRefresh: true,
+          overrideGit: customGitInspector
+            ? {
+                available: gitState.available,
+                branch: gitState.branch,
+                currentCommit: gitState.currentCommit,
+                warning: gitState.warning,
+              }
+            : undefined,
+        });
+      }
+
+      const combinedPending = Array.from(
+        new Set([
+          ...mergePendingMigrations(dbInspection, gitState),
+          ...(githubCheck?.compareMigrationFiles || []),
+        ])
+      ).sort();
+
+      const readiness = evaluateDeploymentReadiness({
+        actorRole: req.user!.role,
+        githubCheck,
+        dbInspection,
+        combinedPendingMigrations: combinedPending,
+        hasCustomDeployRunner: Boolean(customDeployBatRunner),
+      });
+
+      await writeAuditLog({
+        requestId: req.requestId,
+        actorUsername: req.user!.username,
+        actorRole: req.user!.role,
+        ipAddress: req.ip || '127.0.0.1',
+        action: isClear ? 'GITHUB_TOKEN_CLEARED' : 'GITHUB_TOKEN_UPDATED',
+        targetType: 'DEPLOYMENT',
+        targetId: persisted.tokenMaskedHint || 'NONE',
+        result: githubCheck && !githubCheck.githubReachable ? 'FAILURE' : 'SUCCESS',
+        errorCode: githubCheck?.githubErrorCode || null,
+        detail: {
+          tokenConfigured: persisted.tokenConfigured,
+          tokenMaskedHint: persisted.tokenMaskedHint,
+          githubReachable: githubCheck ? githubCheck.githubReachable : null,
+          githubErrorCode: githubCheck?.githubErrorCode || null,
+        },
+      });
+
+      const cfg = loadConfig();
+      res.json({
+        success: true,
+        cleared: isClear,
+        tokenConfigured: persisted.tokenConfigured,
+        tokenMaskedHint: persisted.tokenMaskedHint,
+        message: isClear
+          ? 'ล้างค่า GITHUB_TOKEN ในไฟล์ .env และรีโหลดค่าฝั่ง Server เรียบร้อยแล้ว'
+          : githubCheck?.githubReachable
+            ? 'บันทึก GITHUB_TOKEN ลงไฟล์ .env รีโหลดค่า และเชื่อมต่อ GitHub API สำเร็จแล้ว'
+            : 'บันทึก GITHUB_TOKEN ลงไฟล์ .env และรีโหลดค่าแล้ว แต่การเชื่อมต่อ GitHub API ยังพบข้อผิดพลาด',
+        checkResult: githubCheck
+          ? {
+              repository: cfg.github.repo,
+              repositoryUrl: `https://github.com/${cfg.github.repo}`,
+              checkedAt: githubCheck.checkedAt,
+              currentVersion: githubCheck.installedVersion,
+              installedVersion: githubCheck.installedVersion,
+              installedReleaseTag: githubCheck.installedReleaseTag,
+              latestVersion: githubCheck.latestVersion,
+              latestRelease: githubCheck.latestRelease,
+              currentCommit: githubCheck.currentCommit,
+              currentCommitShort: githubCheck.currentCommitShort,
+              targetCommit: githubCheck.targetCommit,
+              targetCommitShort: githubCheck.targetCommitShort,
+              branch: githubCheck.branch,
+              status: githubCheck.status,
+              statusLabelThai: githubCheck.statusLabelThai,
+              hasUpdates: githubCheck.hasUpdates || combinedPending.length > 0,
+              githubReachable: githubCheck.githubReachable,
+              githubError: githubCheck.githubError,
+              githubErrorCode: githubCheck.githubErrorCode,
+              remediationThai: githubCheck.remediationThai,
+              tokenConfigured: persisted.tokenConfigured,
+              tokenMaskedHint: persisted.tokenMaskedHint,
+              fromCache: githubCheck.fromCache,
+              cacheExpiresAt: githubCheck.cacheExpiresAt,
+              cacheTtlMinutes: githubCheck.cacheTtlMinutes,
+              rateLimit: githubCheck.rateLimit,
+              commitsBehind: githubCheck.commitsBehind,
+              commitsAhead: githubCheck.commitsAhead,
+              latestCommitDate: githubCheck.latestCommitDate,
+              latestCommitMessage: githubCheck.latestCommitMessage,
+              latestCommitAuthor: githubCheck.latestCommitAuthor,
+              localGitAvailable: githubCheck.localGitAvailable,
+              workingTreeClean: githubCheck.workingTreeClean,
+              dirtyFiles: githubCheck.dirtyFiles,
+              changelog: githubCheck.changelog,
+              readiness,
+              appliedMigrations: dbInspection.appliedMigrations,
+              pendingMigrations: combinedPending,
+              pendingMigrationDetails: dbInspection.pendingDetails,
+              checksumMismatches: dbInspection.checksumMismatches,
+              schemaVerification: dbInspection.schemaVerification,
+              migrationApprovalRequired: combinedPending.length > 0,
+              backupPolicy: {
+                backupBeforeGitPull: true,
+                storedOutsideGitRepo: true,
+                defaultBackupRoot: process.env.SAM_ATT_BACKUP_DIR || 'C:\\SamAttBackups',
+                databaseTarget: cfg.samAttDb.database,
+              },
+            }
+          : null,
+        readiness,
       });
     } catch (err) {
       next(err);
