@@ -238,6 +238,12 @@ export function getNavBreadcrumb(view: NavViewKey): {
   };
 }
 
+export interface SidebarUpdateBadge {
+  hasUpdate: boolean;
+  label?: string;
+  githubReachable?: boolean;
+}
+
 export function Sidebar({
   user,
   activeView,
@@ -246,7 +252,7 @@ export function Sidebar({
   onCloseMobile,
   collapsed = false,
   onToggleCollapse,
-  updateAvailableBadge = false,
+  updateBadge,
 }: {
   user: AuthUser;
   activeView: NavViewKey;
@@ -255,7 +261,7 @@ export function Sidebar({
   onCloseMobile: () => void;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
-  updateAvailableBadge?: boolean;
+  updateBadge?: SidebarUpdateBadge | null;
 }) {
   function handleSelect(key: NavViewKey) {
     onSelectView(key);
@@ -377,22 +383,23 @@ export function Sidebar({
                             {item.label}
                           </span>
                         )}
-                        {item.key === 'deployment' &&
-                          user.role === 'ADMIN' &&
-                          updateAvailableBadge &&
-                          (!collapsed ? (
+                        {user.role === 'ADMIN' && item.key === 'deployment' && updateBadge?.hasUpdate && (
+                          collapsed ? (
                             <span
-                              aria-label="มีเวอร์ชันใหม่บน GitHub"
-                              className="px-1.5 py-0.5 rounded bg-[#8066B5] text-white text-[10.5px] font-semibold leading-none shrink-0"
+                              aria-label="มีเวอร์ชันใหม่พร้อมอัปเดต"
+                              title={updateBadge.label || 'มีเวอร์ชันใหม่พร้อมอัปเดต'}
+                              className="absolute top-2 right-2 w-2 h-2 rounded-full bg-[#8066B5]"
+                            />
+                          ) : (
+                            <span
+                              aria-label="มีเวอร์ชันใหม่พร้อมอัปเดต"
+                              title={updateBadge.label || 'มีเวอร์ชันใหม่พร้อมอัปเดต'}
+                              className="px-1.5 py-0.5 rounded text-[11px] font-bold bg-[#8066B5] text-white shrink-0"
                             >
                               ใหม่
                             </span>
-                          ) : (
-                            <span
-                              aria-label="มีเวอร์ชันใหม่บน GitHub"
-                              className="absolute top-1.5 right-2 w-2 h-2 rounded-full bg-[#8066B5]"
-                            />
-                          ))}
+                          )
+                        )}
                       </button>
                     );
                   })}

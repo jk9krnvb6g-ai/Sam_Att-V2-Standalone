@@ -89,6 +89,14 @@ export interface AppConfig {
     livePushEnabled: boolean;
     targetTable: string;
   };
+  github: {
+    repo: string;
+    branch: string;
+    apiBaseUrl: string;
+    token: string;
+    tokenConfigured: boolean;
+    timeoutMs: number;
+  };
 }
 
 export class ProductionConfigError extends Error {
@@ -358,6 +366,26 @@ export function loadConfig(): AppConfig {
       livePushEnabled: process.env.HOSOFFICE_LIVE_PUSH_ENABLED === 'true',
       targetTable: (process.env.HOSOFFICE_PUSH_TARGET_TABLE || '').trim(),
     },
+    github: (() => {
+      const rawRepo = (process.env.GITHUB_REPO || 'jk9krnvb6g-ai/Sam_Att-V2-Standalone').trim();
+      const safeRepo = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(rawRepo)
+        ? rawRepo
+        : 'jk9krnvb6g-ai/Sam_Att-V2-Standalone';
+      const rawBranch = (process.env.GITHUB_BRANCH || 'main').trim();
+      const safeBranch = /^[A-Za-z0-9_./-]+$/.test(rawBranch) && !rawBranch.includes('..')
+        ? rawBranch
+        : 'main';
+      const rawToken = (process.env.GITHUB_TOKEN || '').trim();
+      const tokenConfigured = Boolean(rawToken && !INVALID_SECRET_PLACEHOLDERS.has(rawToken));
+      return {
+        repo: safeRepo,
+        branch: safeBranch,
+        apiBaseUrl: 'https://api.github.com',
+        token: tokenConfigured ? rawToken : '',
+        tokenConfigured,
+        timeoutMs: parseBoundedPositiveInteger(process.env.GITHUB_API_TIMEOUT_MS, 10000, 2000, 30000),
+      };
+    })(),
   };
 }
 

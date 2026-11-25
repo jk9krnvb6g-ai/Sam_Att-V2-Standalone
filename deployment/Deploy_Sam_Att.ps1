@@ -31,14 +31,6 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-# Allow environment variable fallback to avoid cmd.exe comma splitting on multi-file approvals
-if ([string]::IsNullOrWhiteSpace($ApprovedCommit) -and -not [string]::IsNullOrWhiteSpace($env:SAM_ATT_APPROVED_COMMIT)) {
-  $ApprovedCommit = $env:SAM_ATT_APPROVED_COMMIT.Trim()
-}
-if ([string]::IsNullOrWhiteSpace($ApprovedMigrations) -and -not [string]::IsNullOrWhiteSpace($env:SAM_ATT_APPROVED_MIGRATIONS)) {
-  $ApprovedMigrations = $env:SAM_ATT_APPROVED_MIGRATIONS.Trim()
-}
-
 # ==============================================================================
 # 0. Resolve Application Directory & External Backup Paths
 # ==============================================================================
@@ -101,11 +93,7 @@ function Protect-SensitiveText {
       $Sanitized = $Sanitized.Replace($Secret, "***REDACTED***")
     }
   }
-  $Sanitized = [regex]::Replace($Sanitized, '(?i)(PASSWORD|PWD|SECRET|TOKEN|API_KEY|MYSQL_PWD)\s*[:=]\s*([^\s;&"]+)', '$1=***REDACTED***')
-  $Sanitized = [regex]::Replace($Sanitized, '(?i)(Bearer|token)\s+[A-Za-z0-9._\-+/=]{8,}', '$1 ***REDACTED***')
-  $Sanitized = [regex]::Replace($Sanitized, '\b(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,}\b', '***REDACTED***')
-  $Sanitized = [regex]::Replace($Sanitized, '\bgithub_pat_[A-Za-z0-9_]{20,}\b', '***REDACTED***')
-  $Sanitized = [regex]::Replace($Sanitized, '([a-z][a-z0-9+.-]*://[^:\s/@]+:)([^@\s/]+)(@)', '$1***REDACTED***$3')
+  $Sanitized = [regex]::Replace($Sanitized, '(?i)(PASSWORD|SECRET|TOKEN|API_KEY)\s*=\s*([^\s;&"]+)', '$1=***REDACTED***')
   return $Sanitized
 }
 
@@ -382,9 +370,6 @@ $State = [ordered]@{
 }
 
 function Find-MysqlDumpExecutable {
-  if (-not [string]::IsNullOrWhiteSpace($env:MYSQLDUMP_PATH) -and (Test-Path $env:MYSQLDUMP_PATH)) {
-    return $env:MYSQLDUMP_PATH
-  }
   $Cmd = Get-Command mysqldump -ErrorAction SilentlyContinue
   if ($null -ne $Cmd) {
     return $Cmd.Source
@@ -392,8 +377,6 @@ function Find-MysqlDumpExecutable {
   $Candidates = @(
     "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqldump.exe",
     "C:\Program Files\MySQL\MySQL Server 8.4\bin\mysqldump.exe",
-    "C:\Program Files\MySQL\MySQL Server 9.0\bin\mysqldump.exe",
-    "C:\Program Files\MySQL\MySQL Server 5.7\bin\mysqldump.exe",
     "C:\Program Files\MariaDB 10.11\bin\mysqldump.exe",
     "C:\Program Files\MariaDB 11.4\bin\mysqldump.exe",
     "C:\xampp\mysql\bin\mysqldump.exe"
@@ -401,18 +384,6 @@ function Find-MysqlDumpExecutable {
   foreach ($Cand in $Candidates) {
     if (Test-Path $Cand) {
       return $Cand
-    }
-  }
-  $GlobPatterns = @(
-    "C:\Program Files\MySQL\*\bin\mysqldump.exe",
-    "C:\Program Files\MariaDB*\bin\mysqldump.exe",
-    "C:\Program Files (x86)\MySQL\*\bin\mysqldump.exe",
-    "C:\laragon\bin\mysql\*\bin\mysqldump.exe"
-  )
-  foreach ($Pattern in $GlobPatterns) {
-    $Found = Get-Item -Path $Pattern -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($null -ne $Found) {
-      return $Found.FullName
     }
   }
   return $null
@@ -1264,9 +1235,6 @@ try {
       }
     } else {
       Write-DeployLog -Message "Running Frontend production build (npm run build)..."
-      if (Test-Path (Join-Path $AppDir "bun.lock")) {
-        Remove-Item -Path (Join-Path $AppDir "bun.lock") -Force -ErrorAction SilentlyContinue
-      }
       $BuildRes = Invoke-NativeCli -Executable "npm" -Arguments @("run", "build")
       if ($BuildRes.ExitCode -ne 0) {
         throw "BUILD_FAILED: npm run build failed:`n$($BuildRes.Output)"
@@ -1395,6 +1363,12 @@ try {
   }
   Write-Host ""
   Write-Host "ERROR [$($State.StepName)]: $ErrMessage" -ForegroundColor Red
+  if (-not [string]::IsNullOrWhiteSpace($State.CommitBefore)) {
+    Write-Host "CommitBefore   : $($State.CommitBefore)"
+  }
+  if (-not [string]::IsNullOrWhiteSpace($State.RemoteCommit)) {
+    Write-Host "TargetCommit   : $($State.RemoteCommit)"
+  }
   Write-DeployLog -Message "FAILED at Step $($State.CurrentStep) ($($State.StepName)): $ErrMessage" -Level "ERROR"
 
   if ($State.CurrentStep -ge 4 -or $State.GitPulled -or $State.DatabaseMigrationAttempted) {

@@ -29,6 +29,7 @@ import {
   getNavBreadcrumb,
   resolveSafeNavView,
   type NavViewKey,
+  type SidebarUpdateBadge,
 } from './components/layout/Sidebar.tsx';
 import { LoginView } from './pages/LoginView.tsx';
 import { DashboardView } from './pages/DashboardView.tsx';
@@ -53,7 +54,7 @@ export default function App() {
   const [initializing, setInitializing] = useState(true);
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
-  const [hasSystemUpdate, setHasSystemUpdate] = useState(false);
+  const [updateBadge, setUpdateBadge] = useState<SidebarUpdateBadge | null>(null);
 
   // ปิดการเข้าถึงเส้นทางหน้าตั้งค่าระบบหรือตรวจสอบสถานะการเชื่อมต่อเดิมหากผู้ใช้พิมพ์ URL/Hash โดยตรง
   useEffect(() => {
@@ -105,25 +106,33 @@ export default function App() {
     restoreSession();
   }, []);
 
-  // ตรวจสอบเวอร์ชันแบบเบา (Read-Only) เฉพาะผู้ดูแลระบบ (ADMIN) หนึ่งครั้งต่อเซสชัน เพื่อแสดงแถบแจ้งเตือนเล็กที่เมนูอัปเดตระบบ
-  useEffect(() => {
-    if (!user || user.role !== 'ADMIN') {
-      setHasSystemUpdate(false);
+  async function refreshAdminUpdateNotification(role: AuthUser['role']) {
+    if (role !== 'ADMIN') {
+      setUpdateBadge(null);
       return;
     }
-    let cancelled = false;
-    apiRequest<{ hasUpdateAvailable?: boolean }>('/deployment/update-summary')
-      .then((summary) => {
-        if (!cancelled) {
-          setHasSystemUpdate(Boolean(summary?.hasUpdateAvailable));
-        }
-      })
-      .catch(() => {
-        // Silent fail — never interrupt ADMIN workflow with nag popups
+    try {
+      const res = await apiRequest<{
+        hasUpdate?: boolean;
+        statusLabelThai?: string;
+        githubReachable?: boolean;
+      }>('/deployment/update-notification');
+      setUpdateBadge({
+        hasUpdate: Boolean(res.hasUpdate),
+        label: res.statusLabelThai,
+        githubReachable: res.githubReachable,
       });
-    return () => {
-      cancelled = true;
-    };
+    } catch {
+      setUpdateBadge(null);
+    }
+  }
+
+  useEffect(() => {
+    if (user && user.role === 'ADMIN') {
+      refreshAdminUpdateNotification(user.role);
+    } else {
+      setUpdateBadge(null);
+    }
   }, [user]);
 
   async function handleLogout() {
@@ -135,8 +144,8 @@ export default function App() {
     } finally {
       setLoggingOut(false);
       setLogoutConfirmOpen(false);
-      setHasSystemUpdate(false);
       setStoredToken(null);
+      setUpdateBadge(null);
       setUser(null);
     }
   }
@@ -176,7 +185,7 @@ export default function App() {
         onCloseMobile={() => setMobileMenuOpen(false)}
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
-        updateAvailableBadge={hasSystemUpdate}
+        updateBadge={user.role === 'ADMIN' ? updateBadge : null}
       />
 
       {/* Right Main Column: Optional DEMO Banner + Sticky Top Bar + Workspace Content */}
@@ -337,7 +346,7 @@ export default function App() {
               mode="deployment"
               userRole={user.role}
               onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-              onUpdateBadgeChange={setHasSystemUpdate}
+              onNotificationChange={() => refreshAdminUpdateNotification(user.role)}
             />
           )}
           {activeView === 'workflowGuide' && (

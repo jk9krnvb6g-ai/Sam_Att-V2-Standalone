@@ -27,9 +27,9 @@ if "%SAM_ATT_SKIP_ADMIN_CHECK%"=="" (
     net session >nul 2>&1
     if not "!ERRORLEVEL!"=="0" (
         echo ========================================================================
-        echo [ERROR] PREFLIGHT_ADMIN_PRIVILEGE_REQUIRED: Administrator privileges are required.
         echo [WARNING] Please right-click Deploy_Sam_Att.bat and select:
         echo           "Run as administrator"
+        echo ERROR [Preflight Check]: PREFLIGHT_ADMIN_PRIVILEGE_REQUIRED: Administrator privileges are required to inspect IIS and restart Sam_Att Windows Service.
         echo ========================================================================
         echo.
         if "%SAM_ATT_NO_PAUSE%"=="" pause
