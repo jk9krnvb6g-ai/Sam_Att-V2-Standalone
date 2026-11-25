@@ -624,9 +624,9 @@ test('Safe Deployment & Database Migration Governance Suite (18 Scenarios)', asy
     });
 
     // -------------------------------------------------------------------------
-    // Scenario 17: Script Static Safety & 7-bit ASCII Invariants
+    // Scenario 17: Script Static Safety & 7-bit ASCII Invariants (8-Step App-Only Deploy + Separate Backup Scripts)
     // -------------------------------------------------------------------------
-    await t.test('17. Deployment & Backup Scripts enforce 7-bit ASCII, --defaults-extra-file, C:\\SamAttBackups & Procurement isolation', async () => {
+    await t.test('17. Deployment Script enforces 8-step App-Only 7-bit ASCII & Procurement isolation while Backup Scripts enforce --defaults-extra-file', async () => {
       const deployPs1 = fs.readFileSync(path.resolve(process.cwd(), 'deployment/Deploy_Sam_Att.ps1'), 'utf8');
       const backupPs1 = fs.readFileSync(path.resolve(process.cwd(), 'scripts/backup.ps1'), 'utf8');
       const restorePs1 = fs.readFileSync(path.resolve(process.cwd(), 'scripts/restore-test.ps1'), 'utf8');
@@ -636,108 +636,90 @@ test('Safe Deployment & Database Migration Governance Suite (18 Scenarios)', asy
       assert.match(backupPs1, /^[\x00-\x7F]*$/, 'scripts/backup.ps1 must be 100% 7-bit ASCII');
       assert.match(restorePs1, /^[\x00-\x7F]*$/, 'scripts/restore-test.ps1 must be 100% 7-bit ASCII');
 
-      // External backup directory outside Git repo
-      assert.ok(deployPs1.includes('C:\\SamAttBackups'));
-      assert.ok(deployPs1.includes('PREFLIGHT_BACKUP_DIR_INSIDE_GIT'));
+      // 8-Step Application-Only Deployment assertions
+      assert.ok(deployPs1.includes('$TotalSteps = 8'), 'Deploy_Sam_Att.ps1 must define 8 deployment steps');
+      assert.ok(deployPs1.includes('C:\\SamAttDeploySnapshots'), 'App-only rollback snapshot root must live outside Git repo');
+      assert.ok(deployPs1.includes('PREFLIGHT_SNAPSHOT_DIR_INSIDE_GIT'));
+      assert.ok(deployPs1.includes('PREFLIGHT_FORBIDDEN_HOSOFFICE_DB'));
+      assert.ok(deployPs1.includes('DB_SCHEMA_CHANGE_BLOCKED'));
+      assert.ok(deployPs1.includes('STEP 8 - DEPLOYMENT REPORT'));
+      assert.ok(deployPs1.includes('Invoke-SafeAppRollback'));
+
+      // Separate DB backup/restore scripts retain --defaults-extra-file & external backup dir
       assert.ok(backupPs1.includes('C:\\SamAttBackups'));
       assert.ok(backupPs1.includes('BACKUP_DIR_INSIDE_GIT_FORBIDDEN'));
-
-      // Uses --defaults-extra-file instead of plaintext CLI password
-      assert.ok(deployPs1.includes('--defaults-extra-file='));
       assert.ok(backupPs1.includes('--defaults-extra-file='));
       assert.ok(restorePs1.includes('--defaults-extra-file='));
 
-      // Explicit HOSOffice & Procurement isolation + forbidden commands check
-      assert.ok(deployPs1.includes('BACKUP_FAILED_FORBIDDEN_HOSOFFICE_DB'));
-      assert.ok(deployPs1.includes('ApprovedCommit'));
-      assert.ok(deployPs1.includes('ApprovedMigrations'));
-      assert.ok(deployPs1.includes('cli-migrate.ts'));
-      assert.ok(deployPs1.includes('--verify-schema'));
-      assert.ok(deployPs1.includes('MANUAL_DB_RESTORE_REQUIRED'));
+      // Forbidden destructive commands check
       assert.ok(!/^\s*iisreset\b/im.test(deployPs1));
       assert.ok(!/^\s*git\s+reset\s+--hard/m.test(deployPs1));
       assert.ok(!/^\s*git\s+clean\s+-fd/m.test(deployPs1));
     });
 
     // -------------------------------------------------------------------------
-    // Scenario 18: Deploy_Sam_Att.ps1 MySQL .cnf Isolation, ACL & Cleanup Guard
+    // Scenario 18: Deploy_Sam_Att.ps1 Strictly Application-Only (Zero DB Management), Read-Only Health, Secret Masking & Safe Rollback
     // -------------------------------------------------------------------------
-    await t.test('18. Deploy_Sam_Att.ps1 isolates temp .cnf, fixes file icacls flags, verifies read/ACL before mysqldump, masks secrets, and cleans up', async () => {
+    await t.test('18. Deploy_Sam_Att.ps1 enforces 8-step sequence, zero DB backup/migration execution, DB schema block, secret masking, and app-only rollback', async () => {
       const deployPs1 = fs.readFileSync(path.resolve(process.cwd(), 'deployment/Deploy_Sam_Att.ps1'), 'utf8');
-
-      // Extract Set-RestrictedBackupAcl & New-VerifiedMySqlBackup bodies for precise structural assertions
-      const aclFnMatch = deployPs1.match(/function Set-RestrictedBackupAcl \{[\s\S]*?\r?\n\}\r?\n\r?\nfunction New-VerifiedMySqlBackup/);
-      assert.ok(aclFnMatch, 'Expected Set-RestrictedBackupAcl function in Deploy_Sam_Att.ps1');
-      const aclFn = aclFnMatch[0];
-
-      const backupFnMatch = deployPs1.match(/function New-VerifiedMySqlBackup \{[\s\S]*?\r?\n\}\r?\n\r?\nfunction Invoke-SafeRollback/);
-      assert.ok(backupFnMatch, 'Expected New-VerifiedMySqlBackup function in Deploy_Sam_Att.ps1');
-      const backupFn = backupFnMatch[0];
-
-      // 1 & 5. Set-RestrictedBackupAcl separates directory (OI)(CI)F vs file :F and fails fast on non-zero icacls exit code
-      assert.ok(aclFn.includes('ACL_TARGET_NOT_FOUND'));
-      assert.ok(aclFn.includes('PSIsContainer'));
-      assert.ok(aclFn.includes('SYSTEM:(OI)(CI)F'));
-      assert.ok(aclFn.includes('${CurrentUser}:(OI)(CI)F'));
-      assert.ok(aclFn.includes('SYSTEM:F'));
-      assert.ok(aclFn.includes('${CurrentUser}:F'));
-      assert.ok(aclFn.includes('Invoke-NativeCli -Executable "icacls"'));
-      assert.ok(aclFn.includes('$AclRes.ExitCode -ne 0'));
-      assert.ok(aclFn.includes('ACL_CONFIGURATION_FAILED'));
-      assert.ok(!aclFn.includes('2>$null'), 'icacls errors must never be swallowed with 2>$null');
-      assert.ok(!aclFn.includes('Warning: Failed to apply'), 'icacls failure must throw instead of logging warning');
-
-      // 2. Dedicated Sam_Att temp dir instead of $env:TEMP / [IO.Path]::GetTempPath()
-      const backupCodeOnly = backupFn
+      const deployCodeOnly = deployPs1
+        .replace(/<#[\s\S]*?#>/g, '')
         .split(/\r?\n/)
         .filter((line) => !line.trim().startsWith('#'))
         .join('\n');
-      assert.ok(!backupCodeOnly.includes('$env:TEMP'), 'Must not create .cnf inside $env:TEMP');
-      assert.ok(!backupCodeOnly.includes('$env:TMP'), 'Must not create .cnf inside $env:TMP');
-      assert.ok(!backupCodeOnly.includes('GetTempPath'), 'Must not use Windows user GetTempPath');
-      assert.ok(!backupCodeOnly.includes('sam_att_my_backup_'), 'Old $env:TEMP cnf naming must be removed');
-      assert.ok(backupCodeOnly.includes('".sam_att_tmp"'));
-      assert.ok(backupCodeOnly.includes('UTF8Encoding($false)'), 'Option file must be UTF-8 without BOM for MariaDB/PS 5.1');
 
-      // 3 & 4. Explicit ACL check, existence + non-zero size check, and active-account read verification before mysqldump
-      assert.ok(backupFn.includes('BACKUP_FAILED_CNF_MISSING'));
-      assert.ok(backupFn.includes('BACKUP_FAILED_CNF_EMPTY'));
-      assert.ok(backupFn.includes('Get-Acl -LiteralPath $TmpCnf'));
-      assert.ok(backupFn.includes('BACKUP_FAILED_CNF_ACL_VERIFICATION'));
-      assert.ok(backupFn.includes('[System.IO.File]::Open($TmpCnf'));
-      assert.ok(backupFn.includes('BACKUP_FAILED_CNF_UNREADABLE'));
-      assert.ok(backupFn.includes('BACKUP_FAILED_CNF_MISSING_BEFORE_DUMP'));
+      // 1. All 8 steps in exact order
+      const expectedStepLabels = [
+        'STEP 1 - Preflight Check',
+        'STEP 2 - GitHub Version Verification',
+        'STEP 3 - Change Impact Analysis',
+        'STEP 4 - Install Dependencies',
+        'STEP 5 - Test & Build',
+        'STEP 6 - Deploy Application',
+        'STEP 7 - Health Check',
+        'STEP 8 - Deployment Report',
+      ];
+      let prevIdx = -1;
+      for (const label of expectedStepLabels) {
+        const idx = deployPs1.indexOf(label);
+        assert.ok(idx > prevIdx, `Expected '${label}' to appear in order in Deploy_Sam_Att.ps1`);
+        prevIdx = idx;
+      }
 
-      // 6. --defaults-extra-file MUST be the very first CLI argument passed to mysqldump
-      const dumpArgsMatch = backupFn.match(/Invoke-NativeCli -Executable \$MysqlDumpExe -Arguments @\(([\s\S]*?)\)/);
-      assert.ok(dumpArgsMatch, 'Expected Invoke-NativeCli call for $MysqlDumpExe');
-      const firstArgLine = dumpArgsMatch[1].trim().split(/\r?\n/)[0].trim();
-      assert.ok(
-        firstArgLine.startsWith('"--defaults-extra-file=$TmpCnf"'),
-        `First mysqldump argument must be "--defaults-extra-file=$TmpCnf", got: ${firstArgLine}`
-      );
-      assert.ok(!dumpArgsMatch[1].includes('--password'), 'DB password must never be in mysqldump CLI args');
-      assert.ok(!dumpArgsMatch[1].includes('-p$'), 'DB password must never be in mysqldump CLI args');
+      // 2. Zero database backup / dump / migration execution in Deploy_Sam_Att.ps1
+      assert.ok(!deployCodeOnly.includes('mysqldump'), 'Deploy_Sam_Att.ps1 must NOT run mysqldump');
+      assert.ok(!deployCodeOnly.includes('mariadb-dump'), 'Deploy_Sam_Att.ps1 must NOT run mariadb-dump');
+      assert.ok(!deployCodeOnly.includes('cli-migrate.ts'), 'Deploy_Sam_Att.ps1 must NOT run cli-migrate.ts');
+      assert.ok(!deployCodeOnly.includes('db:migrate'), 'Deploy_Sam_Att.ps1 must NOT invoke npm run db:migrate');
+      assert.ok(!deployCodeOnly.includes('New-VerifiedMySqlBackup'), 'Deploy_Sam_Att.ps1 must NOT contain DB backup routine');
+      assert.ok(!deployCodeOnly.includes('Set-RestrictedBackupAcl'), 'Deploy_Sam_Att.ps1 must NOT contain DB backup ACL routine');
 
-      // 7. Password masking across registers and error output
-      assert.ok(backupFn.includes('Register-SensitiveSecret -SecretValue $DbPassword'));
-      assert.ok(backupFn.includes('Register-SensitiveSecret -SecretValue $EscapedPass'));
-      assert.ok(backupFn.includes('Protect-SensitiveText -InputText $DumpRes.Output'));
+      // 3. Step 1-3 Read-only MySQL config verification, GitHub check & DB schema change block
+      assert.ok(deployPs1.includes('jk9krnvb6g-ai/Sam_Att-V2-Standalone'));
+      assert.ok(deployPs1.includes('PREFLIGHT_ENV_INCOMPLETE'));
+      assert.ok(deployPs1.includes('GITHUB_REPO_MISMATCH'));
+      assert.ok(deployPs1.includes('GIT_HISTORY_DIVERGED'));
+      assert.ok(deployPs1.includes('DB_SCHEMA_CHANGE_BLOCKED'));
+      assert.ok(deployPs1.includes('CONFIG_ENV_TRACKED_VIOLATION'));
 
-      // 8. Guaranteed cleanup of .cnf and temporary directory in finally block
-      const finallyMatch = backupFn.match(/\r?\n    \} finally \{([\s\S]*?)\r?\n    \}/);
-      assert.ok(finallyMatch, 'Expected outer finally cleanup block in New-VerifiedMySqlBackup');
-      assert.ok(finallyMatch[1].includes('Remove-Item -LiteralPath $TmpCnf -Force'));
-      assert.ok(finallyMatch[1].includes('Remove-Item -LiteralPath $TmpCnfDir -Recurse -Force'));
-      assert.ok(finallyMatch[1].includes('Remove-Item -LiteralPath $SamAttTmpRoot -Force'));
+      // 4. Step 4-5 Isolated test sandbox, .env immutability & ScannerReader preservation
+      assert.ok(deployPs1.includes('SECURITY_ENV_MUTATED_VIOLATION'));
+      assert.ok(deployPs1.includes('SAM_ATT_TEST_ISOLATION = "true"'));
+      assert.ok(deployPs1.includes('SAM_ATT_DB_ENGINE = "sqlite_sandbox"'));
+      assert.ok(deployPs1.includes('SCANNER_EXE_MODIFIED_VIOLATION'));
 
-      // 9, 10, 13. Backup integrity, SHA256 & Migration Approval Guard remain intact
-      assert.ok(backupFn.includes('BACKUP_FAILED_SQL_DUMP_MISSING'));
-      assert.ok(backupFn.includes('BACKUP_FAILED_SQL_DUMP_EMPTY'));
-      assert.ok(backupFn.includes('BACKUP_FAILED_SQL_DUMP_CORRUPT'));
-      assert.ok(backupFn.includes('Get-FileHash -Path $SqlDumpPath -Algorithm SHA256'));
-      assert.ok(deployPs1.includes('[switch]$ApproveMigrations'));
-      assert.ok(deployPs1.includes('MIGRATION_APPROVAL_REQUIRED'));
+      // 5. Step 6-7 Service isolation, Port 4101 ownership & Read-only health verification
+      assert.ok(deployPs1.includes('SECURITY_ISOLATION_VIOLATION'));
+      assert.ok(deployPs1.includes('PREFLIGHT_PORT_4101_FOREIGN_PROCESS'));
+      assert.ok(deployPs1.includes('/api/Sam_Att/health'));
+      assert.ok(deployPs1.includes('CONNECTED (READ-ONLY CHECK)'));
+      assert.ok(deployPs1.includes('POST_DEPLOY_LOG_ERRORS'));
+
+      // 6. Secret masking & Application-only rollback
+      assert.ok(deployPs1.includes('Register-SensitiveSecret'));
+      assert.ok(deployPs1.includes('Protect-SensitiveText'));
+      assert.ok(deployPs1.includes('git" -Arguments @("reset", "--keep"'));
+      assert.ok(deployPs1.includes('Restart-SamAttBackendOnly'));
     });
   } finally {
     await closeServer();

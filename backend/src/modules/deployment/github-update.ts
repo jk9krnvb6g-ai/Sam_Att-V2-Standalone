@@ -1417,12 +1417,12 @@ export function diagnoseDeploymentFailure(params: {
   const combined = `${params.stdout}\n${params.stderr}`;
   const rolledBack = /ROLLED BACK SAFELY TO PREVIOUS VERSION/i.test(combined);
 
-  // Detect active step from PowerShell output markers: [N/7] <Label> FAIL or ERROR [<StepName>]:
+  // Detect active step from PowerShell output markers: [N/8] <Label> FAIL, [N/7] <Label> FAIL or ERROR [<StepName>]:
   let failedStep = 'ไม่ระบุขั้นตอน (ตรวจสอบ Console Output ด้านล่าง)';
   const stepErrMatch = combined.match(/ERROR \[([^\]]+)\]:/i);
-  const stepFailMatch = combined.match(/\[(\d)\/7\]\s+([A-Za-z0-9 /\-]+?)\s+FAIL/i);
+  const stepFailMatch = combined.match(/\[(\d)\/(?:7|8)\]\s+([A-Za-z0-9 &/\-]+?)\s+FAIL/i);
   if (stepFailMatch) {
-    failedStep = `ขั้นตอนที่ ${stepFailMatch[1]}/7: ${stepFailMatch[2].trim()}`;
+    failedStep = `ขั้นตอนที่ ${stepFailMatch[1]}: ${stepFailMatch[2].trim()}`;
   } else if (stepErrMatch) {
     failedStep = `ขั้นตอน: ${stepErrMatch[1].trim()}`;
   }
@@ -1435,6 +1435,16 @@ export function diagnoseDeploymentFailure(params: {
     remediation: string[];
     httpStatus: number;
   }> = [
+    {
+      regex: /DB_SCHEMA_CHANGE_BLOCKED/i,
+      code: 'DB_SCHEMA_CHANGE_BLOCKED',
+      step: 'ขั้นตอนที่ 3/8: วิเคราะห์ผลกระทบ (Change Impact Analysis)',
+      cause: 'ตรวจพบการเปลี่ยนแปลงไฟล์ Database Schema หรือ Migration ในรุ่นเป้าหมาย ระบบ Deployment แบบ 8 ขั้นตอนจัดการเฉพาะ Application และจะไม่แก้ไขฐานข้อมูล',
+      remediation: [
+        'ให้ผู้ดูแลระบบ/DBA ตรวจสอบและปรับโครงสร้างฐานข้อมูล samchuk_attendance_v2 แยกต่างหากก่อนนำโค้ดรุ่นนี้ขึ้นใช้งาน',
+      ],
+      httpStatus: 409,
+    },
     {
       regex: /MIGRATION_APPROVAL_REQUIRED/i,
       code: 'MIGRATION_APPROVAL_REQUIRED',

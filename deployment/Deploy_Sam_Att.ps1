@@ -1,16 +1,20 @@
 <#
 .SYNOPSIS
-  Sam_Att V2 Standalone - One-Click Production Deployment & Rollback Script (Samchuk Hospital)
+  Sam_Att V2 Standalone - Application-Only Production Deployment & Rollback Script (8 Steps)
 .DESCRIPTION
-  Production deployment script for Sam_Att V2 Standalone from GitHub (origin/main) on Windows Server + IIS.
-  - Pure 7-bit ASCII source file to guarantee 100% compatibility with Windows PowerShell 5.1 (without BOM issues).
-  - Step 1: Preflight Check (Git repo, branch, clean working tree, Node/npm, disk space, .env REAL/mysql, IIS, Port 4101 owner, external backup dir)
-  - Step 2: GitHub & Migration Inspection (git fetch, detect pending migrations, enforce MIGRATION_APPROVAL_REQUIRED bound to commit + files)
-  - Step 3: Pre-Update Backup & Git Pull (Verified MySQL samchuk_attendance_v2 dump + dist/config outside Git repo BEFORE git pull --ff-only)
-  - Step 4: Install Dependencies (npm ci / npm install)
-  - Step 5: Typecheck / Test / Build & Approved Database Migration (tsc, sandbox npm test, vite build, cli-migrate + post-migration schema verification)
-  - Step 6: IIS / Backend Update (Isolated to Sam_Att on Port 4101 only; never touches Procurement or runs iisreset)
-  - Step 7: Health Check & Migration-Aware Safe Rollback (https://localhost:4101/Sam_Att/ and /api/Sam_Att/health)
+  Application-only production deployment script for Sam_Att V2 Standalone from GitHub (origin/main)
+  on Windows Server + IIS (Samchuk Hospital).
+  - Pure 7-bit ASCII source file to guarantee 100% compatibility with Windows PowerShell 5.1.
+  - Database-agnostic / Application-only: NEVER performs database backups, mysqldump/mariadb-dump,
+    schema changes, table creation/alteration, data edits, or automatic migrations.
+  - Step 1: Preflight Check (Git repo, branch, clean working tree, Node>=22/npm, disk space, .env MySQL check, IIS & Port 4101, service isolation)
+  - Step 2: GitHub Version Verification (verify repository, branch, current & target commit; abort if unreachable/diverged)
+  - Step 3: Change Impact Analysis (list changed files, classify Frontend/Backend/Config/.env/DB Schema; STOP if DB schema/migration changes detected)
+  - Step 4: Install Dependencies (save app-only rollback snapshot, git pull --ff-only, npm ci/install without altering .env or production data)
+  - Step 5: Test & Build (TypeScript typecheck, existing automated tests in isolated sandbox, Frontend & Backend build verification)
+  - Step 6: Deploy Application (update Sam_Att Frontend/Backend on HTTPS Port 4101 only; never run iisreset or touch Procurement)
+  - Step 7: Health Check (Frontend /Sam_Att/, API /api/Sam_Att/health, read-only MySQL connection check, Port 4101 owner, runtime logs)
+  - Step 8: Deployment Report (start/end time, commit before/after, changed files, test/build/health results, 8-step PASS/FAIL summary & remediation)
 #>
 [CmdletBinding()]
 param(
@@ -19,20 +23,25 @@ param(
   [string]$Remote = "origin",
   [int]$Port = 4101,
   [switch]$CheckOnly,
-  [switch]$ApproveMigrations,
-  [string]$ApprovedCommit = "",
-  [string]$ApprovedMigrations = "",
+  [string]$RollbackRootDir = "",
   [string]$BackupRootDir = "",
   [switch]$NonInteractive,
   [switch]$SkipTests,
-  [string]$MockEnvFile = ""
+  [string]$MockEnvFile = "",
+  [switch]$ApproveMigrations,
+  [string]$ApprovedCommit = "",
+  [string]$ApprovedMigrations = ""
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+$TotalSteps = 8
+$DeployStartTime = Get-Date
+$DeployEndTime = $null
+
 # ==============================================================================
-# 0. Resolve Application Directory & External Backup Paths
+# 0. Resolve Application Directory & Isolated Rollback Snapshot Path
 # ==============================================================================
 if ([string]::IsNullOrWhiteSpace($AppDir)) {
   $ScriptDir = $PSScriptRoot
@@ -50,18 +59,22 @@ if ([string]::IsNullOrWhiteSpace($AppDir)) {
 $AppDir = [System.IO.Path]::GetFullPath($AppDir)
 
 $LogsDir = Join-Path $AppDir "logs"
-if (-not [string]::IsNullOrWhiteSpace($BackupRootDir)) {
-  $BackupsRootDir = [System.IO.Path]::GetFullPath($BackupRootDir)
-} elseif (-not [string]::IsNullOrWhiteSpace($env:SAM_ATT_BACKUP_DIR)) {
-  $BackupsRootDir = [System.IO.Path]::GetFullPath($env:SAM_ATT_BACKUP_DIR)
+if (-not [string]::IsNullOrWhiteSpace($RollbackRootDir)) {
+  $SnapshotRootDir = [System.IO.Path]::GetFullPath($RollbackRootDir)
+} elseif (-not [string]::IsNullOrWhiteSpace($BackupRootDir)) {
+  $SnapshotRootDir = [System.IO.Path]::GetFullPath($BackupRootDir)
+} elseif (-not [string]::IsNullOrWhiteSpace($env:SAM_ATT_DEPLOY_SNAPSHOT_DIR)) {
+  $SnapshotRootDir = [System.IO.Path]::GetFullPath($env:SAM_ATT_DEPLOY_SNAPSHOT_DIR)
 } else {
-  $BackupsRootDir = "C:\SamAttBackups"
+  $SnapshotRootDir = "C:\SamAttDeploySnapshots"
 }
+
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $LogFilePath = Join-Path $LogsDir "deploy_sam_att_$Timestamp.log"
 
 $ForbiddenServiceNames = @("Procurement", "ProcurementService", "ProcurementPool", "CentralApiGateway", "SamAttGateway", "W3SVC")
 $SensitiveSecretsToMask = New-Object System.Collections.Generic.List[string]
+$StepRecords = New-Object System.Collections.Generic.List[object]
 
 $MockConfig = $null
 if (-not [string]::IsNullOrWhiteSpace($MockEnvFile)) {
@@ -93,7 +106,8 @@ function Protect-SensitiveText {
       $Sanitized = $Sanitized.Replace($Secret, "***REDACTED***")
     }
   }
-  $Sanitized = [regex]::Replace($Sanitized, '(?i)(PASSWORD|SECRET|TOKEN|API_KEY)\s*=\s*("[^"\r\n]*"|''[^''\r\n]*''|[^\s;&"]+)', '$1=***REDACTED***')
+  $Sanitized = [regex]::Replace($Sanitized, '(?i)(PASSWORD|PWD|SECRET|TOKEN|API_KEY|MYSQL_PWD)\s*=\s*("[^"\r\n]*"|''[^''\r\n]*''|[^\s;&"]+)', '$1=***REDACTED***')
+  $Sanitized = [regex]::Replace($Sanitized, '(?i)((?:mysql|https?|ftp)://[^:\s/]+:)([^@\s]+)(@)', '$1***REDACTED***$3')
   return $Sanitized
 }
 
@@ -110,20 +124,41 @@ function Write-DeployLog {
     }
     Add-Content -Path $LogFilePath -Value $Line -Encoding UTF8 -ErrorAction SilentlyContinue
   } catch {
-    # Ignore early log error
+    # Ignore early log write error
   }
 }
 
-function Write-StepResult {
+function Record-StepOutcome {
   param(
     [int]$StepNo,
-    [int]$TotalSteps,
     [string]$Label,
-    [string]$Status
+    [string]$Status,
+    [string]$Detail = ""
   )
-  $PaddedLabel = $Label.PadRight(22, ' ')
+  $SafeDetail = Protect-SensitiveText -InputText $Detail
+  $ExistingIdx = -1
+  for ($i = 0; $i -lt $StepRecords.Count; $i++) {
+    if ($StepRecords[$i].StepNo -eq $StepNo) {
+      $ExistingIdx = $i
+      break
+    }
+  }
+  $Entry = [PSCustomObject]@{
+    StepNo = $StepNo
+    Label  = $Label
+    Status = $Status
+    Detail = $SafeDetail
+  }
+  if ($ExistingIdx -ge 0) {
+    $StepRecords[$ExistingIdx] = $Entry
+  } else {
+    $StepRecords.Add($Entry) | Out-Null
+  }
+
+  $PaddedLabel = $Label.PadRight(28, ' ')
   $Line = "[$StepNo/$TotalSteps] $PaddedLabel $Status"
-  Write-DeployLog -Message $Line -Level $(if ($Status -eq "PASS") { "INFO" } else { "ERROR" })
+  $LogMsg = if ([string]::IsNullOrWhiteSpace($SafeDetail)) { $Line } else { "$Line - $SafeDetail" }
+  Write-DeployLog -Message $LogMsg -Level $(if ($Status -eq "PASS") { "INFO" } elseif ($Status -eq "SKIP") { "WARN" } else { "ERROR" })
   if ($Status -eq "PASS") {
     Write-Host $Line -ForegroundColor Green
   } elseif ($Status -eq "SKIP") {
@@ -162,6 +197,24 @@ function Read-DotEnvFileSafe {
     }
   }
   return $Map
+}
+
+function Get-FileSha256Safe {
+  param([string]$FilePath)
+  if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) {
+    return ""
+  }
+  $Stream = $null
+  $Sha = $null
+  try {
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    $Stream = [System.IO.File]::OpenRead($FilePath)
+    $HashBytes = $Sha.ComputeHash($Stream)
+    return ([System.BitConverter]::ToString($HashBytes) -replace '-', '').ToLower()
+  } finally {
+    if ($null -ne $Stream) { $Stream.Dispose() }
+    if ($null -ne $Sha) { $Sha.Dispose() }
+  }
 }
 
 function Invoke-NativeCli {
@@ -211,7 +264,6 @@ function Invoke-HttpsProbe {
     }
   }
 
-  # Use Node.js HTTPS client (rejectUnauthorized: false) to avoid Windows PowerShell 5.1 Schannel / TLS 1.3 self-signed certificate errors
   $NodeProbeScript = @"
 const https = require('https');
 const req = https.get('$Url', { rejectUnauthorized: false, timeout: $($TimeoutSec * 1000) }, (res) => {
@@ -249,6 +301,65 @@ req.on('error', (err) => { console.error(err.message); process.exit(2); });
   return [PSCustomObject]@{
     StatusCode = [int]$ProbeObj.statusCode
     Content    = [string]$ProbeObj.body
+  }
+}
+
+function Test-SamAttPortOwnership {
+  param(
+    [int]$TargetPort = 4101
+  )
+  if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["port4101Owner"]) {
+    $MockOwner = [string]$MockConfig.port4101Owner
+    if ($MockOwner -eq "FOREIGN_PROCESS") {
+      throw "PORT_4101_FOREIGN_PROCESS: Port $TargetPort is owned by a foreign process"
+    }
+    return [PSCustomObject]@{
+      Listening = $true
+      Pid       = 4101
+      OwnerName = "node.exe (Mock)"
+    }
+  }
+
+  if (-not ($env:OS -like "*Windows*")) {
+    return [PSCustomObject]@{
+      Listening = $true
+      Pid       = 0
+      OwnerName = "non-windows-runtime"
+    }
+  }
+
+  $NetConn = Get-NetTCPConnection -LocalPort $TargetPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($null -eq $NetConn -or $NetConn.OwningProcess -le 0) {
+    throw "HEALTH_PORT_NOT_LISTENING: No process is listening on HTTPS port $TargetPort"
+  }
+
+  $ListenPid = [int]$NetConn.OwningProcess
+  $ProcWmi = Get-CimInstance Win32_Process -Filter "ProcessId = $ListenPid" -ErrorAction SilentlyContinue
+  $ProcName = if ($null -ne $ProcWmi) { [string]$ProcWmi.Name } else { "unknown" }
+  $CmdLine = if ($null -ne $ProcWmi) { [string]$ProcWmi.CommandLine } else { "" }
+
+  $IsConfirmedSamAtt = $false
+  if ($CmdLine -match "Sam_Att" -or $CmdLine -match "server\.ts") {
+    $IsConfirmedSamAtt = $true
+  } else {
+    try {
+      $Probe = Invoke-HttpsProbe -Url "https://127.0.0.1:$TargetPort/api/Sam_Att/health" -ParseJson -TimeoutSec 5
+      if ($Probe.StatusCode -eq 200 -and $Probe.Json.service -eq "Sam_Att V2 Standalone") {
+        $IsConfirmedSamAtt = $true
+      }
+    } catch {
+      $IsConfirmedSamAtt = $false
+    }
+  }
+
+  if (-not $IsConfirmedSamAtt) {
+    throw "PORT_4101_FOREIGN_PROCESS: Port $TargetPort is held by PID=$ListenPid ($ProcName), not Sam_Att V2 Standalone"
+  }
+
+  return [PSCustomObject]@{
+    Listening = $true
+    Pid       = $ListenPid
+    OwnerName = $ProcName
   }
 }
 
@@ -299,15 +410,21 @@ function Test-SamAttHealthEndpoint {
         throw "WRONG_DATA_MODE: System is running in '$($Body.dataMode)' mode (expected 'REAL')"
       }
 
+      $PortOwner = Test-SamAttPortOwnership -TargetPort $TargetPort
+
       return [PSCustomObject]@{
         Healthy        = $true
+        FrontendUrl    = $FrontendUrl
+        ApiUrl         = $HealthUrl
         FrontendStatus = "200 OK"
         ApiStatus      = "200 OK"
-        MysqlStatus    = "CONNECTED"
+        MysqlStatus    = "CONNECTED (READ-ONLY CHECK)"
         DatabaseName   = [string]$Body.database.databaseName
         DatabaseEngine = [string]$Body.database.engine
         DataMode       = if ($null -ne $Body.PSObject.Properties["dataMode"]) { [string]$Body.dataMode } else { "REAL" }
         Port           = $TargetPort
+        OwnerPid       = $PortOwner.Pid
+        OwnerProcess   = $PortOwner.OwnerName
       }
     } catch {
       $LastError = $_.Exception.Message
@@ -324,334 +441,177 @@ function Test-SamAttHealthEndpoint {
   }
 }
 
-# ==============================================================================
-# Print Deployment Banner
-# ==============================================================================
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host " SAM_ATT V2 STANDALONE DEPLOYMENT" -ForegroundColor Cyan
-Write-Host " Samchuk Hospital" -ForegroundColor Cyan
-Write-Host "========================================" -ForegroundColor Cyan
-Write-Host ""
-
-Write-DeployLog -Message "Starting Sam_Att V2 Standalone Deployment in $AppDir (CheckOnly=$CheckOnly)"
+function Get-RemediationHint {
+  param(
+    [int]$StepNo,
+    [string]$ErrorMessage
+  )
+  if ($ErrorMessage -match "PREFLIGHT_DIRTY_WORKING_TREE") {
+    return "Run 'git status' and 'git diff' in $AppDir to inspect local modifications cleanly before deploying (do not force reset uncommitted admin edits)."
+  }
+  if ($ErrorMessage -match "PREFLIGHT_WRONG_BRANCH") {
+    return "Switch repository back to branch '$Branch' ('git checkout $Branch') before retrying deployment."
+  }
+  if ($ErrorMessage -match "PREFLIGHT_ENV_") {
+    return "Verify $AppDir\.env exists and defines valid MySQL connection values (SAM_ATT_DB_*), JWT_SECRET, and SCANNER_INGEST_SHARED_TOKEN without modifying production credentials."
+  }
+  if ($ErrorMessage -match "PREFLIGHT_PORT_4101_FOREIGN_PROCESS|PORT_4101_FOREIGN_PROCESS") {
+    return "Check which process owns TCP port $Port using Get-NetTCPConnection -LocalPort $Port and resolve port conflict manually."
+  }
+  if ($ErrorMessage -match "GIT_FETCH_FAILED|GITHUB_REPO_MISMATCH|GIT_HISTORY_DIVERGED") {
+    return "Check server internet/firewall access to github.com and confirm git remote origin points to jk9krnvb6g-ai/Sam_Att-V2-Standalone without local branch divergence."
+  }
+  if ($ErrorMessage -match "DB_SCHEMA_CHANGE_BLOCKED") {
+    return "Database schema or migration changes were detected in Git diff. Deployment is strictly Application-Only. Apply and verify database schema changes separately as DBA before deploying updated code."
+  }
+  if ($ErrorMessage -match "NPM_INSTALL_FAILED") {
+    return "Verify npm registry connectivity and check file locks on native modules under node_modules."
+  }
+  if ($ErrorMessage -match "TYPECHECK_FAILED|UNIT_TESTS_FAILED|BUILD_FAILED") {
+    return "Inspect TypeScript, automated test, or Vite build errors in $LogFilePath and fix on GitHub branch '$Branch' before re-deploying."
+  }
+  if ($ErrorMessage -match "MYSQL_DISCONNECTED|WRONG_DB_") {
+    return "Verify MySQL server availability, host/port/credentials in .env, and ensure Sam_Att connects to samchuk_attendance_v2 in REAL/mysql mode."
+  }
+  if ($ErrorMessage -match "HEALTH_CHECK_FAILED|FRONTEND_|API_") {
+    return "Check Sam_Att runtime logs in $LogsDir and Windows Service / Node process status on HTTPS port $Port."
+  }
+  return "Review deployment log '$LogFilePath' around Step $StepNo for full diagnostic output."
+}
 
 $State = [ordered]@{
-  CurrentStep                = 0
-  StepName                   = "Initialization"
-  CommitBefore               = ""
-  CommitAfter                = ""
-  RemoteCommit               = ""
-  GitPulled                  = $false
-  BackupCreated              = $false
-  BackupDir                  = ""
-  BackupSqlPath              = ""
-  BackupSqlSha256            = ""
-  PendingMigrations          = @()
-  AppliedMigrations          = @()
-  DatabaseMigrationAttempted = $false
-  DatabaseMigrationApplied   = $false
-  RequiresManualDbRestore    = $false
-  ScannerExePath             = ""
-  ScannerExeSha256           = ""
-  IisRoutingMode             = "STANDALONE_DIRECT_4101"
-  IisStaticTargetDir         = ""
-  BackendProcessMode         = "STANDALONE_NODE_TSX"
-  BackendServiceName         = ""
-  BackendPm2Name             = ""
-  VerifiedSamAttPid          = 0
-  BackendRestarted           = $false
-  ExpectedDbEngine           = "mysql"
-  ExpectedDbName             = "samchuk_attendance_v2"
-  ExpectedDbHost             = "10.1.0.201"
-  ExpectedDbPort             = 3306
-  ExpectedDbUser             = ""
-  ExpectedDbPassword         = ""
-  HosOfficeDbUser            = ""
+  CurrentStep             = 0
+  StepName                = "Initialization"
+  RepositoryUrl           = ""
+  VersionBefore           = ""
+  VersionTarget           = ""
+  CommitBefore            = ""
+  CommitAfter             = ""
+  RemoteCommit            = ""
+  GitPulled               = $false
+  ChangedFiles            = @()
+  FrontendImpactCount     = 0
+  BackendImpactCount      = 0
+  ConfigImpactCount       = 0
+  DbSchemaImpactFiles     = @()
+  SnapshotCreated         = $false
+  SnapshotDir             = ""
+  EnvHashBefore           = ""
+  ScannerExePath          = ""
+  ScannerExeSha256        = ""
+  TypecheckStatus         = "NOT_RUN"
+  TestStatus              = "NOT_RUN"
+  BuildStatus             = "NOT_RUN"
+  IisRoutingMode          = "STANDALONE_DIRECT_4101"
+  IisStaticTargetDir      = ""
+  BackendProcessMode      = "STANDALONE_NODE_TSX"
+  BackendServiceName      = ""
+  BackendPm2Name          = ""
+  VerifiedSamAttPid       = 0
+  BackendRestarted        = $false
+  RuntimeStderrLog        = ""
+  LogErrorSummary         = "NONE"
+  HealthOutcome           = $null
+  ExpectedDbEngine        = "mysql"
+  ExpectedDbName          = "samchuk_attendance_v2"
+  ExpectedDbHost          = "10.1.0.201"
+  ExpectedDbPort          = 3306
 }
 
-function Find-MysqlDumpExecutable {
-  $Cmd = Get-Command mysqldump -ErrorAction SilentlyContinue
-  if ($null -ne $Cmd) {
-    return $Cmd.Source
-  }
-  $Candidates = @(
-    "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqldump.exe",
-    "C:\Program Files\MySQL\MySQL Server 8.4\bin\mysqldump.exe",
-    "C:\Program Files\MariaDB 10.11\bin\mysqldump.exe",
-    "C:\Program Files\MariaDB 11.4\bin\mysqldump.exe",
-    "C:\xampp\mysql\bin\mysqldump.exe"
-  )
-  foreach ($Cand in $Candidates) {
-    if (Test-Path $Cand) {
-      return $Cand
+function Restart-SamAttBackendOnly {
+  param([bool]$IsRollback = $false)
+
+  foreach ($Forbidden in $ForbiddenServiceNames) {
+    if ($State.BackendServiceName -ieq $Forbidden -or $State.BackendPm2Name -ieq $Forbidden) {
+      throw "SECURITY_ISOLATION_VIOLATION: Refusing to touch forbidden service '$Forbidden'"
     }
   }
-  return $null
-}
 
-function Set-RestrictedBackupAcl {
-  param(
-    [Parameter(Mandatory=$true)][string]$TargetPath
-  )
-
-  if (-not (Test-Path -LiteralPath $TargetPath)) {
-    throw "ACL_TARGET_NOT_FOUND: Cannot configure permissions because path does not exist: $TargetPath"
-  }
-
-  if (-not ($env:OS -like "*Windows*")) {
+  if ($null -ne $MockConfig) {
+    if ($null -ne $MockConfig.PSObject.Properties["simulateBackendStartFailure"] -and $MockConfig.simulateBackendStartFailure -eq $true -and (-not $IsRollback)) {
+      throw "BACKEND_START_FAILED: Sam_Att Backend process failed to start on port $Port"
+    }
+    $State.BackendRestarted = $true
+    Write-DeployLog -Message "[MockMode] Restarted Sam_Att backend isolated process (Mode=$($State.BackendProcessMode), IsRollback=$IsRollback)"
     return
   }
 
-  $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-  if ([string]::IsNullOrWhiteSpace($CurrentUser)) {
-    throw "ACL_IDENTITY_UNKNOWN: Cannot determine current Windows user identity for icacls on '$TargetPath'"
-  }
+  $State.BackendRestarted = $true
 
-  $TargetItem = Get-Item -LiteralPath $TargetPath -ErrorAction Stop
-  $IsDirectory = [bool]$TargetItem.PSIsContainer
+  switch ($State.BackendProcessMode) {
+    "WINDOWS_SERVICE" {
+      $SvcName = $State.BackendServiceName
+      Write-DeployLog -Message "Restarting isolated Windows Service '$SvcName' (IIS central & Procurement untouched)..."
+      Restart-Service -Name $SvcName -Force -ErrorAction Stop
+      Start-Sleep -Seconds 3
+      $SvcObj = Get-Service -Name $SvcName -ErrorAction Stop
+      if ($SvcObj.Status -ne "Running") {
+        throw "BACKEND_SERVICE_NOT_RUNNING: Windows Service '$SvcName' is not Running (Status: $($SvcObj.Status))"
+      }
+    }
+    "PM2_PROCESS" {
+      $Pm2App = $State.BackendPm2Name
+      Write-DeployLog -Message "Reloading isolated PM2 process '$Pm2App'..."
+      $Pm2RestartRes = Invoke-NativeCli -Executable "pm2" -Arguments @("restart", $Pm2App, "--update-env")
+      if ($Pm2RestartRes.ExitCode -ne 0) {
+        throw "BACKEND_PM2_RESTART_FAILED: pm2 restart '$Pm2App' failed (ExitCode=$($Pm2RestartRes.ExitCode))"
+      }
+      Start-Sleep -Seconds 2
+    }
+    "STANDALONE_NODE_TSX" {
+      if ($State.VerifiedSamAttPid -gt 0) {
+        $ExistingProc = Get-Process -Id $State.VerifiedSamAttPid -ErrorAction SilentlyContinue
+        if ($null -ne $ExistingProc) {
+          Write-DeployLog -Message "Stopping verified Sam_Att Node.js process (PID=$($State.VerifiedSamAttPid))..."
+          Stop-Process -Id $State.VerifiedSamAttPid -Force -ErrorAction SilentlyContinue
+        }
+      }
 
-  # Windows icacls rejects (OI)(CI) inheritance flags on files; apply (OI)(CI)F to directories only and F to files
-  if ($IsDirectory) {
-    $IcaclsArgs = @(
-      $TargetPath,
-      "/inheritance:r",
-      "/grant:r",
-      "SYSTEM:(OI)(CI)F",
-      "Administrators:(OI)(CI)F",
-      "${CurrentUser}:(OI)(CI)F"
-    )
-  } else {
-    $IcaclsArgs = @(
-      $TargetPath,
-      "/inheritance:r",
-      "/grant:r",
-      "SYSTEM:F",
-      "Administrators:F",
-      "${CurrentUser}:F"
-    )
-  }
+      for ($WaitIdx = 1; $WaitIdx -le 8; $WaitIdx++) {
+        $StillListening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $StillListening) {
+          break
+        }
+        $HoldPid = [int]$StillListening.OwningProcess
+        $HoldWmi = Get-CimInstance Win32_Process -Filter "ProcessId = $HoldPid" -ErrorAction SilentlyContinue
+        if ($null -ne $HoldWmi -and ($HoldWmi.CommandLine -match "Sam_Att" -or $HoldWmi.CommandLine -match "server\.ts")) {
+          Stop-Process -Id $HoldPid -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 1
+      }
 
-  $AclRes = Invoke-NativeCli -Executable "icacls" -Arguments $IcaclsArgs
-  if ($AclRes.ExitCode -ne 0) {
-    $SafeAclOut = Protect-SensitiveText -InputText $AclRes.Output
-    throw "ACL_CONFIGURATION_FAILED: icacls failed on '$TargetPath' for account '$CurrentUser' (ExitCode=$($AclRes.ExitCode)): $SafeAclOut"
+      $StdOutLog = Join-Path $LogsDir "sam_att_runtime_stdout_$Timestamp.log"
+      $StdErrLog = Join-Path $LogsDir "sam_att_runtime_stderr_$Timestamp.log"
+      $State.RuntimeStderrLog = $StdErrLog
+      $NodeExe = (Get-Command node -ErrorAction Stop).Source
+
+      Write-DeployLog -Message "Starting single Sam_Att V2 Standalone process ($NodeExe --import tsx server.ts) in $AppDir..."
+      $StartedProc = Start-Process -FilePath $NodeExe `
+        -ArgumentList @("--import", "tsx", "server.ts") `
+        -WorkingDirectory $AppDir `
+        -RedirectStandardOutput $StdOutLog `
+        -RedirectStandardError $StdErrLog `
+        -WindowStyle Hidden `
+        -PassThru
+      Start-Sleep -Seconds 4
+      if ($StartedProc.HasExited) {
+        $ErrText = if (Test-Path $StdErrLog) { Protect-SensitiveText -InputText (Get-Content -Path $StdErrLog -Raw -ErrorAction SilentlyContinue) } else { "" }
+        throw "BACKEND_PROCESS_EXITED_IMMEDIATELY: Sam_Att process exited immediately (ExitCode=$($StartedProc.ExitCode)). Details: $ErrText"
+      }
+      $State.VerifiedSamAttPid = $StartedProc.Id
+      Write-DeployLog -Message "Started Sam_Att V2 Standalone process (New PID=$($State.VerifiedSamAttPid))."
+    }
   }
 }
 
-function New-VerifiedMySqlBackup {
-  param(
-    [string]$TargetBackupDir,
-    [string]$DbHost,
-    [int]$DbPort,
-    [string]$DbName,
-    [string]$DbUser,
-    [string]$DbPassword,
-    [string]$HosOfficeUser
-  )
-
-  if ([string]::IsNullOrWhiteSpace($DbUser) -or [string]::IsNullOrWhiteSpace($DbPassword)) {
-    throw "BACKUP_FAILED_DB_CREDENTIALS_MISSING: SAM_ATT_DB_USER or SAM_ATT_DB_PASSWORD is missing"
-  }
-  Register-SensitiveSecret -SecretValue $DbPassword
-
-  if (-not [string]::IsNullOrWhiteSpace($HosOfficeUser) -and ($DbUser -ieq $HosOfficeUser) -and ($DbName -ine "samchuk_attendance_v2")) {
-    throw "BACKUP_FAILED_FORBIDDEN_HOSOFFICE_USER: Refusing to run backup with HOSOffice read-only account"
-  }
-  if ($DbName -imatch "hosoffice") {
-    throw "BACKUP_FAILED_FORBIDDEN_HOSOFFICE_DB: Refusing to dump or touch HOSOffice database"
-  }
-
-  $SqlDumpPath = Join-Path $TargetBackupDir "${DbName}_${Timestamp}.sql"
-  if ($null -ne $MockConfig) {
-    $MockSql = "-- MySQL dump (isolated mock verification)`n-- Database: $DbName`nCREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR(32) PRIMARY KEY);`n-- Dump completed on $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`n"
-    Set-Content -Path $SqlDumpPath -Value $MockSql -Encoding UTF8 -ErrorAction Stop
-  } else {
-    $MysqlDumpExe = Find-MysqlDumpExecutable
-    if ([string]::IsNullOrWhiteSpace($MysqlDumpExe)) {
-      throw "BACKUP_FAILED_NO_MYSQLDUMP: mysqldump executable not found in PATH or standard MySQL directories. Aborting before any code or schema change."
-    }
-
-    # Create a dedicated Sam_Att temporary directory under the verified external backup root (avoids $env:TEMP 8.3 short paths and inherited ACL issues)
-    $BackupParentRoot = Split-Path -Parent $TargetBackupDir
-    if ([string]::IsNullOrWhiteSpace($BackupParentRoot)) {
-      $BackupParentRoot = $BackupsRootDir
-    }
-    $SamAttTmpRoot = Join-Path $BackupParentRoot ".sam_att_tmp"
-    $TmpRunId = "${Timestamp}_$([guid]::NewGuid().ToString('N').Substring(0,8))"
-    $TmpCnfDir = Join-Path $SamAttTmpRoot "cnf_$TmpRunId"
-    $TmpCnf = Join-Path $TmpCnfDir "sam_att_mysql.cnf"
-
-    try {
-      if (-not (Test-Path -LiteralPath $SamAttTmpRoot)) {
-        New-Item -ItemType Directory -Path $SamAttTmpRoot -Force -ErrorAction Stop | Out-Null
-      }
-      Set-RestrictedBackupAcl -TargetPath $SamAttTmpRoot
-
-      New-Item -ItemType Directory -Path $TmpCnfDir -Force -ErrorAction Stop | Out-Null
-      Set-RestrictedBackupAcl -TargetPath $TmpCnfDir
-
-      $EscapedPass = $DbPassword.Replace('\', '\\').Replace('"', '\"').Replace("`r", '\r').Replace("`n", '\n')
-      Register-SensitiveSecret -SecretValue $EscapedPass
-      $CnfLines = @(
-        "[client]",
-        "host=$DbHost",
-        "port=$DbPort",
-        "user=$DbUser",
-        "password=`"$EscapedPass`""
-      )
-      $CnfBody = ($CnfLines -join "`r`n") + "`r`n"
-
-      # Write UTF-8 without BOM (compatible with both PowerShell 5.1 and MariaDB/MySQL option-file parsers)
-      $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-      [System.IO.File]::WriteAllText($TmpCnf, $CnfBody, $Utf8NoBom)
-
-      # Apply file-level ACL (without directory inheritance flags) and fail immediately if icacls returns non-zero
-      Set-RestrictedBackupAcl -TargetPath $TmpCnf
-
-      # Verify existence, non-zero size, ACL grant, and readability by current Windows account BEFORE invoking mysqldump
-      if (-not (Test-Path -LiteralPath $TmpCnf -PathType Leaf)) {
-        throw "BACKUP_FAILED_CNF_MISSING: Temporary defaults-extra-file was not created at $TmpCnf"
-      }
-      $CnfFileInfo = Get-Item -LiteralPath $TmpCnf -ErrorAction Stop
-      if ($CnfFileInfo.Length -le 0) {
-        throw "BACKUP_FAILED_CNF_EMPTY: Temporary defaults-extra-file is empty (0 bytes) at $TmpCnf"
-      }
-
-      $CurrentIdentity = if ($env:OS -like "*Windows*") {
-        [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-      } else {
-        $env:USER
-      }
-
-      if ($env:OS -like "*Windows*") {
-        $WinIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-        $AccountSids = New-Object System.Collections.Generic.HashSet[string]
-        if ($null -ne $WinIdentity.User) {
-          $AccountSids.Add($WinIdentity.User.Value) | Out-Null
-        }
-        if ($null -ne $WinIdentity.Groups) {
-          foreach ($GrpSid in $WinIdentity.Groups) {
-            if ($null -ne $GrpSid) {
-              $AccountSids.Add($GrpSid.Value) | Out-Null
-            }
-          }
-        }
-        $CnfAcl = Get-Acl -LiteralPath $TmpCnf -ErrorAction Stop
-        $ReadDataBit = [int][System.Security.AccessControl.FileSystemRights]::ReadData
-        $HasReadAllow = $false
-        $HasReadDeny = $false
-        foreach ($Rule in $CnfAcl.Access) {
-          try {
-            $RuleSid = $Rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
-          } catch {
-            continue
-          }
-          if (-not $AccountSids.Contains($RuleSid)) {
-            continue
-          }
-          $RuleMask = [int]$Rule.FileSystemRights
-          if (($RuleMask -band $ReadDataBit) -ne 0) {
-            if ($Rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny) {
-              $HasReadDeny = $true
-            } elseif ($Rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow) {
-              $HasReadAllow = $true
-            }
-          }
-        }
-        if ($HasReadDeny -or (-not $HasReadAllow)) {
-          throw "BACKUP_FAILED_CNF_ACL_VERIFICATION: Verified ACL on '$TmpCnf' does not grant Read access to active Windows account '$CurrentIdentity' (HasAllow=$HasReadAllow, HasDeny=$HasReadDeny)"
-        }
-      }
-
-      $ReadStream = $null
-      $StreamReader = $null
-      try {
-        $ReadStream = [System.IO.File]::Open($TmpCnf, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-        $StreamReader = New-Object System.IO.StreamReader($ReadStream, $Utf8NoBom, $false)
-        $VerifyText = $StreamReader.ReadToEnd()
-        if ([string]::IsNullOrWhiteSpace($VerifyText) -or (-not $VerifyText.Contains("[client]"))) {
-          throw "Invalid option-file header in temporary defaults file"
-        }
-      } catch {
-        $SafeReadErr = Protect-SensitiveText -InputText $_.Exception.Message
-        throw "BACKUP_FAILED_CNF_UNREADABLE: Account '$CurrentIdentity' cannot read defaults-extra-file '$TmpCnf': $SafeReadErr"
-      } finally {
-        if ($null -ne $StreamReader) {
-          $StreamReader.Dispose()
-        } elseif ($null -ne $ReadStream) {
-          $ReadStream.Dispose()
-        }
-      }
-
-      # Re-confirm file presence and non-zero size right before invoking mysqldump
-      if ((-not (Test-Path -LiteralPath $TmpCnf -PathType Leaf)) -or ((Get-Item -LiteralPath $TmpCnf -ErrorAction Stop).Length -le 0)) {
-        throw "BACKUP_FAILED_CNF_MISSING_BEFORE_DUMP: Temporary defaults-extra-file disappeared before mysqldump execution at $TmpCnf"
-      }
-
-      Write-DeployLog -Message "Verified temporary defaults-extra-file at $TmpCnf ($($CnfFileInfo.Length) bytes) readable by '$CurrentIdentity'. Running mysqldump for '$DbName' on ${DbHost}:${DbPort}..."
-
-      # MariaDB / MySQL requirement: --defaults-extra-file MUST be the first CLI argument
-      $DumpRes = Invoke-NativeCli -Executable $MysqlDumpExe -Arguments @(
-        "--defaults-extra-file=$TmpCnf",
-        "--single-transaction",
-        "--routines",
-        "--triggers",
-        "--quick",
-        "--hex-blob",
-        "--result-file=$SqlDumpPath",
-        $DbName
-      )
-      if ($DumpRes.ExitCode -ne 0) {
-        $SafeDumpOut = Protect-SensitiveText -InputText $DumpRes.Output
-        throw "BACKUP_FAILED_MYSQLDUMP_EXIT_CODE: mysqldump exited with code $($DumpRes.ExitCode): $SafeDumpOut"
-      }
-    } finally {
-      if (-not [string]::IsNullOrWhiteSpace($TmpCnf) -and (Test-Path -LiteralPath $TmpCnf)) {
-        Remove-Item -LiteralPath $TmpCnf -Force -ErrorAction SilentlyContinue
-      }
-      if (-not [string]::IsNullOrWhiteSpace($TmpCnfDir) -and (Test-Path -LiteralPath $TmpCnfDir)) {
-        Remove-Item -LiteralPath $TmpCnfDir -Recurse -Force -ErrorAction SilentlyContinue
-      }
-      if (-not [string]::IsNullOrWhiteSpace($SamAttTmpRoot) -and (Test-Path -LiteralPath $SamAttTmpRoot)) {
-        $RemainingItems = @(Get-ChildItem -LiteralPath $SamAttTmpRoot -Force -ErrorAction SilentlyContinue)
-        if ($RemainingItems.Count -eq 0) {
-          Remove-Item -LiteralPath $SamAttTmpRoot -Force -ErrorAction SilentlyContinue
-        }
-      }
-    }
-  }
-
-  if (-not (Test-Path $SqlDumpPath)) {
-    throw "BACKUP_FAILED_SQL_DUMP_MISSING: SQL dump file was not created at $SqlDumpPath"
-  }
-  $DumpInfo = Get-Item $SqlDumpPath
-  if ($DumpInfo.Length -le 64) {
-    throw "BACKUP_FAILED_SQL_DUMP_EMPTY: SQL dump file is empty or too small ($($DumpInfo.Length) bytes)"
-  }
-  $DumpPreviewHead = (Get-Content -Path $SqlDumpPath -TotalCount 60 -ErrorAction SilentlyContinue) -join "`n"
-  $DumpPreviewTail = (Get-Content -Path $SqlDumpPath -Tail 20 -ErrorAction SilentlyContinue) -join "`n"
-  if (-not (($DumpPreviewHead -match "CREATE TABLE|MySQL dump|MariaDB dump") -and ($DumpPreviewTail -match "Dump completed|SET|UNLOCK|COMMIT|CREATE TABLE"))) {
-    throw "BACKUP_FAILED_SQL_DUMP_CORRUPT: SQL dump integrity markers missing in $SqlDumpPath"
-  }
-
-  $SqlSha = (Get-FileHash -Path $SqlDumpPath -Algorithm SHA256).Hash.ToLower()
-  Set-Content -Path "$SqlDumpPath.sha256" -Value $SqlSha -Encoding ASCII -ErrorAction Stop
-  Write-DeployLog -Message "Verified MySQL backup: $SqlDumpPath ($($DumpInfo.Length) bytes, SHA256=$SqlSha)"
-  return [PSCustomObject]@{
-    SqlPath   = $SqlDumpPath
-    SizeBytes = $DumpInfo.Length
-    Sha256    = $SqlSha
-  }
-}
-
-function Invoke-SafeRollback {
+function Invoke-SafeAppRollback {
   param([string]$FailureReason)
 
   Write-Host ""
   Write-Host "----------------------------------------" -ForegroundColor Yellow
-  Write-Host " INITIATING SAFE ROLLBACK (SAM_ATT ONLY)" -ForegroundColor Yellow
+  Write-Host " INITIATING SAFE APP-ONLY ROLLBACK" -ForegroundColor Yellow
   Write-Host "----------------------------------------" -ForegroundColor Yellow
-  Write-DeployLog -Message "Initiating Safe Rollback due to failure: $FailureReason" -Level "WARN"
+  Write-DeployLog -Message "Initiating Safe Application-Only Rollback due to failure: $FailureReason" -Level "WARN"
 
   if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["simulateRollbackFailure"] -and $MockConfig.simulateRollbackFailure -eq $true) {
     Write-DeployLog -Message "CRITICAL: Simulated rollback failure triggered." -Level "ERROR"
@@ -664,9 +624,9 @@ function Invoke-SafeRollback {
     $VerifiedCommitAfterRollback = $State.CommitBefore
     Push-Location $AppDir
     try {
-      # 1. Revert Git commit if git pull had advanced the branch (never git reset --hard or git clean -fd)
+      # 1. Revert Git commit safely with --keep if git pull had advanced HEAD (never git reset --hard or git clean -fd)
       if ($State.GitPulled -and -not [string]::IsNullOrWhiteSpace($State.CommitBefore) -and ($State.CommitBefore -ne $State.CommitAfter)) {
-        Write-DeployLog -Message "Reverting Git working branch '$Branch' back to previous commit $($State.CommitBefore)..."
+        Write-DeployLog -Message "Reverting Git working branch '$Branch' safely back to commit $($State.CommitBefore)..."
         if ($null -eq $MockConfig) {
           Invoke-NativeCli -Executable "git" -Arguments @("merge", "--abort") | Out-Null
           $RevertRes = Invoke-NativeCli -Executable "git" -Arguments @("reset", "--keep", $State.CommitBefore)
@@ -674,6 +634,7 @@ function Invoke-SafeRollback {
             throw "ROLLBACK_GIT_REVERT_FAILED: Could not safely revert to commit $($State.CommitBefore)"
           }
         }
+        $State.CommitAfter = $State.CommitBefore
       }
 
       if ($null -eq $MockConfig -and -not [string]::IsNullOrWhiteSpace($State.CommitBefore)) {
@@ -684,24 +645,24 @@ function Invoke-SafeRollback {
         }
       }
 
-      # 2. Restore dist/ build artifact and manifest files from Backup
-      if ($State.BackupCreated -and -not [string]::IsNullOrWhiteSpace($State.BackupDir) -and (Test-Path $State.BackupDir)) {
+      # 2. Restore application build & manifest snapshot (never touches .env or database)
+      if ($State.SnapshotCreated -and -not [string]::IsNullOrWhiteSpace($State.SnapshotDir) -and (Test-Path $State.SnapshotDir)) {
         foreach ($CfgFile in @("package.json", "package-lock.json", "tsconfig.json")) {
-          $BkpCfg = Join-Path $State.BackupDir $CfgFile
-          if (Test-Path $BkpCfg) {
-            Copy-Item -Path $BkpCfg -Destination (Join-Path $AppDir $CfgFile) -Force -ErrorAction Stop
+          $SnapCfg = Join-Path $State.SnapshotDir $CfgFile
+          if (Test-Path $SnapCfg) {
+            Copy-Item -Path $SnapCfg -Destination (Join-Path $AppDir $CfgFile) -Force -ErrorAction Stop
           }
         }
-        $BackupDist = Join-Path $State.BackupDir "dist"
+        $SnapDist = Join-Path $State.SnapshotDir "dist"
         $TargetDist = Join-Path $AppDir "dist"
-        if (Test-Path (Join-Path $BackupDist "index.html")) {
-          Write-DeployLog -Message "Restoring dist/ bundle from backup $($State.BackupDir)..."
+        if (Test-Path (Join-Path $SnapDist "index.html")) {
+          Write-DeployLog -Message "Restoring dist/ bundle from snapshot $($State.SnapshotDir)..."
           if (Test-Path $TargetDist) {
             Remove-Item -Path $TargetDist -Recurse -Force -ErrorAction Stop
           }
-          Copy-Item -Path $BackupDist -Destination $TargetDist -Recurse -Force -ErrorAction Stop
+          Copy-Item -Path $SnapDist -Destination $TargetDist -Recurse -Force -ErrorAction Stop
           if (-not (Test-Path (Join-Path $TargetDist "index.html"))) {
-            throw "ROLLBACK_DIST_RESTORE_FAILED: dist/index.html missing after restoring from backup"
+            throw "ROLLBACK_DIST_RESTORE_FAILED: dist/index.html missing after restoring snapshot"
           }
         }
       }
@@ -709,18 +670,7 @@ function Invoke-SafeRollback {
       Pop-Location
     }
 
-    # 3. Migration-Aware Safety Check: NEVER auto-DROP or auto-downgrade database schema!
-    if ($State.DatabaseMigrationApplied -or $State.DatabaseMigrationAttempted) {
-      $State.RequiresManualDbRestore = $true
-      Write-Host "  [WARNING] DATABASE SCHEMA MIGRATION WAS ALREADY ATTEMPTED OR APPLIED." -ForegroundColor Yellow
-      Write-Host "  [WARNING] Automatic database downgrade / DROP TABLE is strictly forbidden." -ForegroundColor Yellow
-      Write-Host "  [ACTION]  Verified SQL Backup : $($State.BackupSqlPath)" -ForegroundColor Yellow
-      Write-Host "  [ACTION]  Restore Command     : powershell -ExecutionPolicy Bypass -File `"$AppDir\scripts\restore-test.ps1`" -BackupFolder `"$($State.BackupDir)`"" -ForegroundColor Yellow
-      Write-DeployLog -Message "MANUAL_DB_RESTORE_REQUIRED: Application files were reverted, but database migration had started/completed. Admin must inspect DB and restore from $($State.BackupSqlPath) if incompatible." -Level "WARN"
-      return $false
-    }
-
-    # 4. Verify Health API or Restart Sam_Att backend process only if needed (never touch Procurement or IIS)
+    # 3. Restart Sam_Att backend only if it had been restarted or failed health probe (never touch Procurement or IIS)
     $VerifiedHealth = $null
     if ($null -ne $MockConfig) {
       if ($State.BackendRestarted) {
@@ -765,98 +715,102 @@ function Invoke-SafeRollback {
     Write-DeployLog -Message "Rollback verified: Commit=$VerifiedCommitAfterRollback, Health=$($VerifiedHealth.ApiStatus), MySQL=$($VerifiedHealth.MysqlStatus)" -Level "INFO"
     $RollbackSuccess = $true
   } catch {
-    Write-Host "  [ROLLBACK DETAIL] $($_.Exception.Message)" -ForegroundColor Red
-    Write-DeployLog -Message "CRITICAL ROLLBACK ERROR: $($_.Exception.Message)" -Level "ERROR"
+    $SafeRbErr = Protect-SensitiveText -InputText $_.Exception.Message
+    Write-Host "  [ROLLBACK DETAIL] $SafeRbErr" -ForegroundColor Red
+    Write-DeployLog -Message "CRITICAL ROLLBACK ERROR: $SafeRbErr" -Level "ERROR"
     $RollbackSuccess = $false
   }
 
   return $RollbackSuccess
 }
 
-function Restart-SamAttBackendOnly {
-  param([bool]$IsRollback = $false)
+function Write-DeploymentReport {
+  param(
+    [bool]$Succeeded,
+    [string]$FailureReason = "",
+    [string]$Remediation = ""
+  )
+  $DeployEndTime = Get-Date
+  $DurationSec = [math]::Round(($DeployEndTime - $DeployStartTime).TotalSeconds, 2)
+  $ShortBefore = if (-not [string]::IsNullOrWhiteSpace($State.CommitBefore)) { $State.CommitBefore.Substring(0, [Math]::Min(8, $State.CommitBefore.Length)) } else { "unknown" }
+  $ShortAfter = if (-not [string]::IsNullOrWhiteSpace($State.CommitAfter)) { $State.CommitAfter.Substring(0, [Math]::Min(8, $State.CommitAfter.Length)) } elseif (-not [string]::IsNullOrWhiteSpace($State.RemoteCommit)) { $State.RemoteCommit.Substring(0, [Math]::Min(8, $State.RemoteCommit.Length)) } else { "unknown" }
 
-  foreach ($Forbidden in $ForbiddenServiceNames) {
-    if ($State.BackendServiceName -ieq $Forbidden -or $State.BackendPm2Name -ieq $Forbidden) {
-      throw "SECURITY_ISOLATION_VIOLATION: Refusing to touch forbidden service '$Forbidden'"
+  Write-Host ""
+  Write-Host "========================================" -ForegroundColor Cyan
+  Write-Host " STEP 8 - DEPLOYMENT REPORT" -ForegroundColor Cyan
+  Write-Host "========================================" -ForegroundColor Cyan
+  Write-Host "Start Time     : $($DeployStartTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+  Write-Host "End Time       : $($DeployEndTime.ToString('yyyy-MM-dd HH:mm:ss')) (${DurationSec}s)"
+  Write-Host "Version        : $($State.VersionBefore) -> $(if (-not [string]::IsNullOrWhiteSpace($State.VersionTarget)) { $State.VersionTarget } else { $State.VersionBefore })"
+  Write-Host "Commit         : $ShortBefore -> $ShortAfter"
+  Write-Host "CommitBefore   : $($State.CommitBefore)"
+  Write-Host "CommitAfter    : $(if (-not [string]::IsNullOrWhiteSpace($State.CommitAfter)) { $State.CommitAfter } else { $State.CommitBefore })"
+  Write-Host "Changed Files  : $($State.ChangedFiles.Count) (Frontend=$($State.FrontendImpactCount), Backend=$($State.BackendImpactCount), Config=$($State.ConfigImpactCount), DbSchema=$($State.DbSchemaImpactFiles.Count))"
+  if ($State.ChangedFiles.Count -gt 0) {
+    $PreviewFiles = @($State.ChangedFiles | Select-Object -First 20)
+    foreach ($Cf in $PreviewFiles) {
+      Write-Host "  - $Cf"
+    }
+    if ($State.ChangedFiles.Count -gt 20) {
+      Write-Host "  ... and $($State.ChangedFiles.Count - 20) more files"
     }
   }
-
-  if ($null -ne $MockConfig) {
-    if ($null -ne $MockConfig.PSObject.Properties["simulateBackendStartFailure"] -and $MockConfig.simulateBackendStartFailure -eq $true -and (-not $IsRollback)) {
-      throw "BACKEND_START_FAILED: Sam_Att Backend process failed to start on port $Port"
-    }
-    $State.BackendRestarted = $true
-    Write-DeployLog -Message "[MockMode] Restarted Sam_Att backend isolated process (Mode=$($State.BackendProcessMode), IsRollback=$IsRollback)"
-    return
+  Write-Host "Typecheck      : $($State.TypecheckStatus)"
+  Write-Host "Tests          : $($State.TestStatus)"
+  Write-Host "Build          : $($State.BuildStatus)"
+  if ($null -ne $State.HealthOutcome -and $State.HealthOutcome.Healthy) {
+    Write-Host "Frontend HTTPS : $($State.HealthOutcome.FrontendStatus) ($($State.HealthOutcome.FrontendUrl))"
+    Write-Host "Backend API    : $($State.HealthOutcome.ApiStatus) ($($State.HealthOutcome.ApiUrl))"
+    Write-Host "MySQL          : $($State.HealthOutcome.MysqlStatus)"
+    Write-Host "Database       : $($State.HealthOutcome.DatabaseName)"
+    Write-Host "Port           : $($State.HealthOutcome.Port) (OwnerPID=$($State.HealthOutcome.OwnerPid), Process=$($State.HealthOutcome.OwnerProcess))"
+    Write-Host "Runtime Logs   : $($State.LogErrorSummary)"
+  } else {
+    Write-Host "Health Check   : $(if ($Succeeded) { 'VERIFIED' } else { 'FAILED / NOT REACHED' })"
   }
-
-  $State.BackendRestarted = $true
-
-  switch ($State.BackendProcessMode) {
-    "WINDOWS_SERVICE" {
-      $SvcName = $State.BackendServiceName
-      Write-DeployLog -Message "Restarting isolated Windows Service '$SvcName'..."
-      Restart-Service -Name $SvcName -Force -ErrorAction Stop
-      Start-Sleep -Seconds 3
-      $SvcObj = Get-Service -Name $SvcName -ErrorAction Stop
-      if ($SvcObj.Status -ne "Running") {
-        throw "BACKEND_SERVICE_NOT_RUNNING: Windows Service '$SvcName' is not Running (Status: $($SvcObj.Status))"
-      }
+  Write-Host ""
+  Write-Host "Step Summary:" -ForegroundColor Cyan
+  for ($Idx = 1; $Idx -le $TotalSteps; $Idx++) {
+    $Matched = $null
+    foreach ($Rec in $StepRecords) {
+      if ($Rec.StepNo -eq $Idx) { $Matched = $Rec; break }
     }
-    "PM2_PROCESS" {
-      $Pm2App = $State.BackendPm2Name
-      Write-DeployLog -Message "Reloading isolated PM2 process '$Pm2App'..."
-      $Pm2RestartRes = Invoke-NativeCli -Executable "pm2" -Arguments @("restart", $Pm2App, "--update-env")
-      if ($Pm2RestartRes.ExitCode -ne 0) {
-        throw "BACKEND_PM2_RESTART_FAILED: pm2 restart '$Pm2App' failed (ExitCode=$($Pm2RestartRes.ExitCode))"
-      }
-      Start-Sleep -Seconds 2
-    }
-    "STANDALONE_NODE_TSX" {
-      if ($State.VerifiedSamAttPid -gt 0) {
-        $ExistingProc = Get-Process -Id $State.VerifiedSamAttPid -ErrorAction SilentlyContinue
-        if ($null -ne $ExistingProc) {
-          Write-DeployLog -Message "Stopping verified Sam_Att Node.js process (PID=$($State.VerifiedSamAttPid))..."
-          Stop-Process -Id $State.VerifiedSamAttPid -Force -ErrorAction SilentlyContinue
-        }
-      }
-
-      # Wait up to 8 seconds for port 4101 to release
-      for ($WaitIdx = 1; $WaitIdx -le 8; $WaitIdx++) {
-        $StillListening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($null -eq $StillListening) {
-          break
-        }
-        $HoldPid = [int]$StillListening.OwningProcess
-        $HoldWmi = Get-CimInstance Win32_Process -Filter "ProcessId = $HoldPid" -ErrorAction SilentlyContinue
-        if ($null -ne $HoldWmi -and ($HoldWmi.CommandLine -match "Sam_Att" -or $HoldWmi.CommandLine -match "server\.ts")) {
-          Stop-Process -Id $HoldPid -Force -ErrorAction SilentlyContinue
-        }
-        Start-Sleep -Seconds 1
-      }
-
-      $StdOutLog = Join-Path $LogsDir "sam_att_runtime_stdout_$Timestamp.log"
-      $StdErrLog = Join-Path $LogsDir "sam_att_runtime_stderr_$Timestamp.log"
-      $NodeExe = (Get-Command node -ErrorAction Stop).Source
-
-      Write-DeployLog -Message "Starting single Sam_Att V2 Standalone process ($NodeExe --import tsx server.ts) in $AppDir..."
-      $StartedProc = Start-Process -FilePath $NodeExe `
-        -ArgumentList @("--import", "tsx", "server.ts") `
-        -WorkingDirectory $AppDir `
-        -RedirectStandardOutput $StdOutLog `
-        -RedirectStandardError $StdErrLog `
-        -WindowStyle Hidden `
-        -PassThru
-      Start-Sleep -Seconds 4
-      if ($StartedProc.HasExited) {
-        $ErrText = if (Test-Path $StdErrLog) { (Get-Content -Path $StdErrLog -Raw -ErrorAction SilentlyContinue) } else { "" }
-        throw "BACKEND_PROCESS_EXITED_IMMEDIATELY: Sam_Att process exited immediately (ExitCode=$($StartedProc.ExitCode)). Details: $ErrText"
-      }
-      $State.VerifiedSamAttPid = $StartedProc.Id
-      Write-DeployLog -Message "Started Sam_Att V2 Standalone process (New PID=$($State.VerifiedSamAttPid))."
+    if ($null -ne $Matched) {
+      $StatusStr = $Matched.Status
+      $Lbl = $Matched.Label.PadRight(28, ' ')
+      Write-Host ("  [$Idx/$TotalSteps] $Lbl : $StatusStr")
+      Write-DeployLog -Message "Report Step [$Idx/$TotalSteps] $($Matched.Label): $StatusStr ($($Matched.Detail))"
+    } else {
+      Write-Host ("  [$Idx/$TotalSteps] (Not Executed)              : SKIP")
+      Write-DeployLog -Message "Report Step [$Idx/$TotalSteps]: SKIP"
     }
   }
+  if (-not $Succeeded -and -not [string]::IsNullOrWhiteSpace($FailureReason)) {
+    Write-Host ""
+    Write-Host "Failure Cause  : $FailureReason" -ForegroundColor Red
+    if (-not [string]::IsNullOrWhiteSpace($Remediation)) {
+      Write-Host "Remediation    : $Remediation" -ForegroundColor Yellow
+    }
+  }
+  if ($State.SnapshotCreated -and -not [string]::IsNullOrWhiteSpace($State.SnapshotDir)) {
+    Write-Host "SnapshotDir    : $($State.SnapshotDir)"
+  }
+  Write-Host "Log File       : $LogFilePath"
+  Write-Host "----------------------------------------" -ForegroundColor Cyan
+}
+
+# ==============================================================================
+# Print Deployment Banner
+# ==============================================================================
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host " SAM_ATT V2 STANDALONE DEPLOYMENT (8-STEP APP-ONLY)" -ForegroundColor Cyan
+Write-Host " Samchuk Hospital (HTTPS Port $Port)" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+Write-DeployLog -Message "Starting Sam_Att V2 Standalone 8-Step Application-Only Deployment in $AppDir (CheckOnly=$CheckOnly)"
+if ($ApproveMigrations -or -not [string]::IsNullOrWhiteSpace($ApprovedCommit) -or -not [string]::IsNullOrWhiteSpace($ApprovedMigrations)) {
+  Write-DeployLog -Message "NOTICE: Legacy migration approval flags were passed, but Deploy_Sam_Att.ps1 is strictly Application-Only (8 Steps) and never executes database backups, schema edits, or migrations." -Level "WARN"
 }
 
 try {
@@ -866,7 +820,6 @@ try {
   $State.CurrentStep = 1
   $State.StepName = "Preflight Check"
 
-  # 1.1 Verify repository directory and core files
   if (-not (Test-Path $AppDir)) {
     throw "PREFLIGHT_REPO_NOT_FOUND: Installation directory not found at $AppDir"
   }
@@ -876,9 +829,14 @@ try {
     }
   }
 
+  $PkgRaw = Get-Content -Path (Join-Path $AppDir "package.json") -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($null -ne $PkgRaw -and $null -ne $PkgRaw.PSObject.Properties["version"]) {
+    $State.VersionBefore = [string]$PkgRaw.version
+  }
+
   Push-Location $AppDir
   try {
-    # 1.2 Verify Git Branch and clean Working Tree
+    # 1.1 Git branch & clean working tree
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["gitBranch"]) {
       $CurrentBranch = [string]$MockConfig.gitBranch
     } else {
@@ -895,15 +853,14 @@ try {
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["gitDirtyFiles"]) {
       $DirtyOutput = [string]$MockConfig.gitDirtyFiles
     } else {
-      Invoke-NativeCli -Executable "git" -Arguments @("checkout", "--", "package-lock.json") | Out-Null
       $DirtyRes = Invoke-NativeCli -Executable "git" -Arguments @("status", "--porcelain", "--untracked-files=no")
       $DirtyOutput = $DirtyRes.Output
     }
     if (-not [string]::IsNullOrWhiteSpace($DirtyOutput)) {
-      throw "PREFLIGHT_DIRTY_WORKING_TREE: Local modifications detected in Git working tree. Inspect before deploying (automatic git reset --hard is forbidden):`n$DirtyOutput"
+      throw "PREFLIGHT_DIRTY_WORKING_TREE: Local modifications detected in Git working tree. Automatic git reset --hard is forbidden:`n$DirtyOutput"
     }
 
-    # 1.3 Verify Node.js and npm
+    # 1.2 Node.js >= 22 and npm
     $NodeRes = Invoke-NativeCli -Executable "node" -Arguments @("-v")
     $NodeVerRaw = $NodeRes.Output
     if ($NodeRes.ExitCode -ne 0 -or -not ($NodeVerRaw -match "^v(\d+)\.")) {
@@ -920,7 +877,7 @@ try {
     }
     Write-DeployLog -Message "Runtime verified: Node.js=$NodeVerRaw, npm=$NpmVerRaw"
 
-    # 1.4 Verify available disk space (>= 500 MB)
+    # 1.3 Available disk space (>= 500 MB)
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["freeDiskMb"]) {
       $FreeDiskMb = [double]$MockConfig.freeDiskMb
     } else {
@@ -932,7 +889,7 @@ try {
       throw "PREFLIGHT_LOW_DISK_SPACE: Available disk space is $FreeDiskMb MB (requires at least 500 MB)"
     }
 
-    # 1.5 Verify .env file and REAL Mode / MySQL settings (never overwrite or delete .env)
+    # 1.4 Verify .env & MySQL connection settings (read-only; NEVER expose password or overwrite .env)
     $DotEnvPath = Join-Path $AppDir ".env"
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["customEnvFile"]) {
       $DotEnvPath = [string]$MockConfig.customEnvFile
@@ -940,38 +897,37 @@ try {
     if (-not (Test-Path $DotEnvPath)) {
       throw "PREFLIGHT_ENV_MISSING: .env file not found at $DotEnvPath"
     }
+    $State.EnvHashBefore = Get-FileSha256Safe -FilePath $DotEnvPath
 
     $EnvMap = Read-DotEnvFileSafe -EnvFilePath $DotEnvPath
-
     if (-not $EnvMap.ContainsKey("SAM_ATT_DATA_MODE") -or [string]::IsNullOrWhiteSpace($EnvMap["SAM_ATT_DATA_MODE"])) {
-      Write-Host "  [ADVISORY] SAM_ATT_DATA_MODE is not explicitly set in .env (backend/src/config/env.ts defaults to REAL when SAM_ATT_DB_ENGINE=mysql; consider adding SAM_ATT_DATA_MODE=REAL to .env)" -ForegroundColor Yellow
-      Write-DeployLog -Message "ADVISORY: SAM_ATT_DATA_MODE not explicitly set in .env; defaults to REAL when SAM_ATT_DB_ENGINE=mysql." -Level "WARN"
+      Write-DeployLog -Message "ADVISORY: SAM_ATT_DATA_MODE not explicitly set in .env; backend defaults to REAL when SAM_ATT_DB_ENGINE=mysql." -Level "WARN"
     } elseif ($EnvMap["SAM_ATT_DATA_MODE"].ToUpper() -ne "REAL") {
-      throw "PREFLIGHT_INVALID_DATA_MODE: SAM_ATT_DATA_MODE in .env is '$($EnvMap["SAM_ATT_DATA_MODE"])' (must be REAL for production deployment; DEMO is forbidden)"
+      throw "PREFLIGHT_INVALID_DATA_MODE: SAM_ATT_DATA_MODE in .env is '$($EnvMap["SAM_ATT_DATA_MODE"])' (must be REAL)"
     }
 
     $DbEngineVal = if ($EnvMap.ContainsKey("SAM_ATT_DB_ENGINE")) { $EnvMap["SAM_ATT_DB_ENGINE"] } else { "mysql" }
     if ($DbEngineVal -ne "mysql") {
-      throw "PREFLIGHT_INVALID_DB_ENGINE: SAM_ATT_DB_ENGINE in .env must be 'mysql' (found '$DbEngineVal'). Automatic fallback to SQLite is forbidden."
+      throw "PREFLIGHT_INVALID_DB_ENGINE: SAM_ATT_DB_ENGINE in .env must be 'mysql' (found '$DbEngineVal')"
     }
 
     foreach ($ReqEnvKey in @("SAM_ATT_DB_HOST", "SAM_ATT_DB_PORT", "SAM_ATT_DB_NAME", "SAM_ATT_DB_USER", "SAM_ATT_DB_PASSWORD", "JWT_SECRET", "SCANNER_INGEST_SHARED_TOKEN")) {
       if (-not $EnvMap.ContainsKey($ReqEnvKey) -or [string]::IsNullOrWhiteSpace($EnvMap[$ReqEnvKey]) -or $EnvMap[$ReqEnvKey] -eq "CHANGE_ME" -or $EnvMap[$ReqEnvKey] -like "GENERATE_*") {
-        throw "PREFLIGHT_ENV_INCOMPLETE: Required variable '$ReqEnvKey' in .env is missing or still set to a placeholder value"
+        throw "PREFLIGHT_ENV_INCOMPLETE: Required variable '$ReqEnvKey' in .env is missing or set to a placeholder"
       }
+    }
+
+    if ($EnvMap["SAM_ATT_DB_NAME"] -imatch "hosoffice") {
+      throw "PREFLIGHT_FORBIDDEN_HOSOFFICE_DB: SAM_ATT_DB_NAME must not target HOSOffice database"
     }
 
     $State.ExpectedDbEngine = $DbEngineVal
     $State.ExpectedDbName = $EnvMap["SAM_ATT_DB_NAME"]
     $State.ExpectedDbHost = $EnvMap["SAM_ATT_DB_HOST"]
     $State.ExpectedDbPort = [int]$EnvMap["SAM_ATT_DB_PORT"]
-    $State.ExpectedDbUser = $EnvMap["SAM_ATT_DB_USER"]
-    $State.ExpectedDbPassword = $EnvMap["SAM_ATT_DB_PASSWORD"]
-    if ($EnvMap.ContainsKey("HOSOFFICE_DB_USER")) {
-      $State.HosOfficeDbUser = $EnvMap["HOSOFFICE_DB_USER"]
-    }
+    Write-DeployLog -Message "Verified .env MySQL config (Host=$($State.ExpectedDbHost):$($State.ExpectedDbPort), DB=$($State.ExpectedDbName), User=$($EnvMap["SAM_ATT_DB_USER"]), Password=***REDACTED***)."
 
-    # Record ScannerReader EXE SHA-256 to guarantee it is never modified
+    # Record ScannerReader EXE checksum so we verify it stays untouched
     $ScannerRel = if ($EnvMap.ContainsKey("SCANNER_READER_EXE_PATH") -and -not [string]::IsNullOrWhiteSpace($EnvMap["SCANNER_READER_EXE_PATH"])) {
       $EnvMap["SCANNER_READER_EXE_PATH"]
     } else {
@@ -980,11 +936,11 @@ try {
     $ResolvedScannerPath = if ([System.IO.Path]::IsPathRooted($ScannerRel)) { $ScannerRel } else { Join-Path $AppDir $ScannerRel }
     if (Test-Path $ResolvedScannerPath) {
       $State.ScannerExePath = $ResolvedScannerPath
-      $State.ScannerExeSha256 = (Get-FileHash -Path $ResolvedScannerPath -Algorithm SHA256).Hash.ToLower()
+      $State.ScannerExeSha256 = Get-FileSha256Safe -FilePath $ResolvedScannerPath
       Write-DeployLog -Message "ScannerReader binary verified at $ResolvedScannerPath (SHA256=$($State.ScannerExeSha256))"
     }
 
-    # 1.6 Inspect IIS Configuration (never run iisreset or touch Procurement)
+    # 1.5 Verify IIS & Isolation Guard (never run iisreset or modify Procurement)
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["iisPermissionDenied"] -and $MockConfig.iisPermissionDenied -eq $true) {
       throw "PREFLIGHT_IIS_PERMISSION_DENIED: Insufficient permissions to inspect IIS configuration. Please Run as Administrator."
     }
@@ -996,7 +952,7 @@ try {
       if ($env:OS -like "*Windows*" -and (Test-Path $AppCmdPath)) {
         $AppCmdRes = Invoke-NativeCli -Executable $AppCmdPath -Arguments @("list", "app")
         if ($AppCmdRes.ExitCode -ne 0) {
-          throw "PREFLIGHT_IIS_PERMISSION_DENIED: Cannot read IIS configuration via appcmd.exe. Please right-click and Run as Administrator."
+          throw "PREFLIGHT_IIS_PERMISSION_DENIED: Cannot read IIS configuration via appcmd.exe. Please Run as Administrator."
         }
         if ($AppCmdRes.Output -match "Procurement") {
           Write-DeployLog -Message "IIS Co-tenancy Guard: Detected Procurement on same server - locked READ-ONLY (never restart/modify)."
@@ -1004,11 +960,11 @@ try {
       }
     }
 
-    # 1.7 Verify Port 4101 and Backend Process Ownership
+    # 1.6 Verify Port 4101 & Process Ownership (never affect other services)
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["port4101Owner"]) {
       $OwnerType = [string]$MockConfig.port4101Owner
       if ($OwnerType -eq "FOREIGN_PROCESS") {
-        throw "PREFLIGHT_PORT_4101_FOREIGN_PROCESS: Port $Port is occupied by a foreign process not owned by Sam_Att (killing by port number alone is forbidden)"
+        throw "PREFLIGHT_PORT_4101_FOREIGN_PROCESS: Port $Port is occupied by a foreign process not owned by Sam_Att"
       }
       if ($null -ne $MockConfig.PSObject.Properties["processManager"]) {
         $State.BackendProcessMode = [string]$MockConfig.processManager
@@ -1045,13 +1001,12 @@ try {
           $ProcWmi = Get-CimInstance Win32_Process -Filter "ProcessId = $ListenPid" -ErrorAction SilentlyContinue
           $ProcName = if ($null -ne $ProcWmi) { [string]$ProcWmi.Name } else { "" }
           $CmdLine = if ($null -ne $ProcWmi) { [string]$ProcWmi.CommandLine } else { "" }
-
           $IsConfirmedSamAtt = $false
           if ($CmdLine -match "Sam_Att" -or $CmdLine -match "server\.ts") {
             $IsConfirmedSamAtt = $true
           } else {
             try {
-              $Probe = Invoke-HttpsProbe -Url "https://localhost:$Port/api/Sam_Att/health" -ParseJson -TimeoutSec 5
+              $Probe = Invoke-HttpsProbe -Url "https://127.0.0.1:$Port/api/Sam_Att/health" -ParseJson -TimeoutSec 5
               if ($Probe.StatusCode -eq 200 -and $Probe.Json.service -eq "Sam_Att V2 Standalone") {
                 $IsConfirmedSamAtt = $true
               }
@@ -1059,38 +1014,33 @@ try {
               $IsConfirmedSamAtt = $false
             }
           }
-
           if (-not $IsConfirmedSamAtt) {
-            throw "PREFLIGHT_PORT_4101_FOREIGN_PROCESS: Port $Port is in use by a foreign process (PID=$ListenPid, Name=$ProcName). Aborting to protect co-tenant services."
+            throw "PREFLIGHT_PORT_4101_FOREIGN_PROCESS: Port $Port is in use by a foreign process (PID=$ListenPid, Name=$ProcName). Aborting to protect other services."
           }
           $State.VerifiedSamAttPid = $ListenPid
-          Write-DeployLog -Message "Verified Port $Port is owned by Sam_Att V2 Standalone (PID=$ListenPid, Mode=$($State.BackendProcessMode))."
+          Write-DeployLog -Message "Verified Port $Port owned by Sam_Att (PID=$ListenPid, Mode=$($State.BackendProcessMode))."
         }
       }
     }
 
-    # 1.8 Verify External Backup directory is OUTSIDE Git repository and writable
-    if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["simulateBackupDirUnwritable"] -and $MockConfig.simulateBackupDirUnwritable -eq $true) {
-      throw "PREFLIGHT_BACKUP_DIR_UNWRITABLE: Backup directory $BackupsRootDir is not writable"
+    # 1.7 Ensure Rollback Snapshot directory is outside Git repository
+    if ($null -eq $MockConfig -and $SnapshotRootDir.StartsWith($AppDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "PREFLIGHT_SNAPSHOT_DIR_INSIDE_GIT: App rollback snapshot directory '$SnapshotRootDir' must reside outside Git repository '$AppDir'"
     }
-    if ($null -eq $MockConfig -and $BackupsRootDir.StartsWith($AppDir, [System.StringComparison]::OrdinalIgnoreCase)) {
-      throw "PREFLIGHT_BACKUP_DIR_INSIDE_GIT: Backup directory '$BackupsRootDir' must be outside the Git repository '$AppDir' (use C:\SamAttBackups or SAM_ATT_BACKUP_DIR)"
+    if (-not (Test-Path $SnapshotRootDir)) {
+      New-Item -ItemType Directory -Path $SnapshotRootDir -Force -ErrorAction Stop | Out-Null
     }
-    if (-not (Test-Path $BackupsRootDir)) {
-      New-Item -ItemType Directory -Path $BackupsRootDir -Force -ErrorAction Stop | Out-Null
-    }
-    Set-RestrictedBackupAcl -TargetPath $BackupsRootDir
   } finally {
     Pop-Location
   }
 
-  Write-StepResult -StepNo 1 -TotalSteps 7 -Label "Preflight Check" -Status "PASS"
+  Record-StepOutcome -StepNo 1 -Label "Preflight Check" -Status "PASS" -Detail "Node $NodeVerRaw, Branch $Branch, Port $Port"
 
   # ============================================================================
-  # STEP 2 - GitHub & Migration Inspection (NO CHANGES APPLIED YET)
+  # STEP 2 - GitHub Version Verification
   # ============================================================================
   $State.CurrentStep = 2
-  $State.StepName = "GitHub Update"
+  $State.StepName = "GitHub Version Verification"
 
   Push-Location $AppDir
   try {
@@ -1098,186 +1048,191 @@ try {
       throw "GIT_FETCH_FAILED: Cannot connect to GitHub ($Remote/$Branch)"
     }
 
-    $HeadRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "HEAD")
-    $State.CommitBefore = $HeadRes.Output
     if ($null -eq $MockConfig) {
+      $RemoteUrlRes = Invoke-NativeCli -Executable "git" -Arguments @("remote", "get-url", $Remote)
+      if ($RemoteUrlRes.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($RemoteUrlRes.Output)) {
+        throw "GITHUB_REPO_MISMATCH: Git remote '$Remote' is not configured"
+      }
+      $State.RepositoryUrl = $RemoteUrlRes.Output.Trim()
+      if ($State.RepositoryUrl -notmatch "jk9krnvb6g-ai/Sam_Att-V2-Standalone") {
+        throw "GITHUB_REPO_MISMATCH: Remote URL '$($State.RepositoryUrl)' does not match jk9krnvb6g-ai/Sam_Att-V2-Standalone"
+      }
+
+      $HeadRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "HEAD")
+      if ($HeadRes.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($HeadRes.Output)) {
+        throw "GIT_LOCAL_HEAD_UNAVAILABLE: Unable to resolve local HEAD commit"
+      }
+      $State.CommitBefore = $HeadRes.Output.Trim()
+
       $FetchRes = Invoke-NativeCli -Executable "git" -Arguments @("fetch", $Remote, $Branch)
       if ($FetchRes.ExitCode -ne 0) {
         throw "GIT_FETCH_FAILED: git fetch $Remote $Branch failed: $($FetchRes.Output)"
       }
+
       $RemoteHeadRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "$Remote/$Branch")
-      $State.RemoteCommit = $RemoteHeadRes.Output
-    } else {
-      $State.RemoteCommit = if ($null -ne $MockConfig.PSObject.Properties["remoteCommit"]) { [string]$MockConfig.remoteCommit } else { $State.CommitBefore }
-    }
-
-    Write-DeployLog -Message "Commit Before Update : $($State.CommitBefore)"
-    Write-DeployLog -Message "Remote Target Commit : $($State.RemoteCommit)"
-
-    $PendingMigrationSet = New-Object System.Collections.Generic.List[string]
-    if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["pendingMigrations"]) {
-      foreach ($M in @($MockConfig.pendingMigrations)) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$M)) {
-          $Leaf = [System.IO.Path]::GetFileName([string]$M)
-          if (-not $PendingMigrationSet.Contains($Leaf)) { $PendingMigrationSet.Add($Leaf) | Out-Null }
-        }
+      if ($RemoteHeadRes.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($RemoteHeadRes.Output)) {
+        throw "GIT_REMOTE_HEAD_UNAVAILABLE: Unable to resolve $Remote/$Branch commit"
       }
-    } else {
+      $State.RemoteCommit = $RemoteHeadRes.Output.Trim()
+
+      # Verify history is fast-forwardable (not diverged)
       if ($State.CommitBefore -ne $State.RemoteCommit) {
-        $DiffRes = Invoke-NativeCli -Executable "git" -Arguments @("diff", "--name-only", "$($State.CommitBefore)..$($State.RemoteCommit)", "--", "database/migrations/")
-        if (-not [string]::IsNullOrWhiteSpace($DiffRes.Output)) {
-          foreach ($Line in ($DiffRes.Output -split "`r?`n")) {
-            $TrimmedLine = $Line.Trim()
-            if ($TrimmedLine -like "*.sql") {
-              $Leaf = [System.IO.Path]::GetFileName($TrimmedLine)
-              if (-not $PendingMigrationSet.Contains($Leaf)) { $PendingMigrationSet.Add($Leaf) | Out-Null }
-            }
-          }
+        $MergeBaseRes = Invoke-NativeCli -Executable "git" -Arguments @("merge-base", "--is-ancestor", $State.CommitBefore, $State.RemoteCommit)
+        if ($MergeBaseRes.ExitCode -ne 0) {
+          throw "GIT_HISTORY_DIVERGED: Local commit $($State.CommitBefore) is not an ancestor of $Remote/$Branch ($($State.RemoteCommit)). Resolve manually before deploying."
         }
       }
-      # Also inspect live database schema_migrations via read-only cli-migrate --check-only
-      $CheckMigRes = Invoke-NativeCli -Executable "npx" -Arguments @("tsx", "backend/src/database/cli-migrate.ts", "--check-only")
-      if ($CheckMigRes.ExitCode -eq 2) {
-        throw "MIGRATION_CHECKSUM_MISMATCH: Existing applied migration checksum mismatch detected. Aborting before pull."
-      }
-      if ($CheckMigRes.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($CheckMigRes.Output)) {
+
+      $RemotePkgRes = Invoke-NativeCli -Executable "git" -Arguments @("show", "$Remote/${Branch}:package.json")
+      if ($RemotePkgRes.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($RemotePkgRes.Output)) {
         try {
-          $LastJsonLine = ($CheckMigRes.Output -split "`r?`n" | Where-Object { $_.Trim().StartsWith("{") } | Select-Object -Last 1)
-          if (-not [string]::IsNullOrWhiteSpace($LastJsonLine)) {
-            $MigStatusObj = $LastJsonLine | ConvertFrom-Json
-            if ($null -ne $MigStatusObj.PSObject.Properties["pendingFiles"]) {
-              foreach ($Pf in @($MigStatusObj.pendingFiles)) {
-                $Leaf = [System.IO.Path]::GetFileName([string]$Pf)
-                if (-not [string]::IsNullOrWhiteSpace($Leaf) -and (-not $PendingMigrationSet.Contains($Leaf))) {
-                  $PendingMigrationSet.Add($Leaf) | Out-Null
-                }
-              }
-            }
+          $RemotePkgObj = $RemotePkgRes.Output | ConvertFrom-Json
+          if ($null -ne $RemotePkgObj.PSObject.Properties["version"]) {
+            $State.VersionTarget = [string]$RemotePkgObj.version
           }
         } catch {
-          Write-DeployLog -Message "Warning: Could not parse cli-migrate --check-only JSON output" -Level "WARN"
+          $State.VersionTarget = $State.VersionBefore
+        }
+      }
+    } else {
+      $State.RepositoryUrl = "https://github.com/jk9krnvb6g-ai/Sam_Att-V2-Standalone"
+      $State.CommitBefore = if ($null -ne $MockConfig.PSObject.Properties["commitBefore"]) { [string]$MockConfig.commitBefore } else { "9f1cdc1000000000000000000000000000000001" }
+      $State.RemoteCommit = if ($null -ne $MockConfig.PSObject.Properties["remoteCommit"]) { [string]$MockConfig.remoteCommit } else { $State.CommitBefore }
+      $State.VersionTarget = if ($null -ne $MockConfig.PSObject.Properties["targetVersion"]) { [string]$MockConfig.targetVersion } else { $State.VersionBefore }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($State.VersionTarget)) {
+      $State.VersionTarget = $State.VersionBefore
+    }
+
+    Write-Host "  Repository     : $($State.RepositoryUrl) ($Branch)"
+    Write-Host "  Current        : v$($State.VersionBefore) ($($State.CommitBefore))"
+    Write-Host "  Target         : v$($State.VersionTarget) ($($State.RemoteCommit))"
+  } finally {
+    Pop-Location
+  }
+
+  Record-StepOutcome -StepNo 2 -Label "GitHub Version Verification" -Status "PASS" -Detail "$($State.CommitBefore.Substring(0, [Math]::Min(8, $State.CommitBefore.Length))) -> $($State.RemoteCommit.Substring(0, [Math]::Min(8, $State.RemoteCommit.Length)))"
+
+  # ============================================================================
+  # STEP 3 - Change Impact Analysis
+  # ============================================================================
+  $State.CurrentStep = 3
+  $State.StepName = "Change Impact Analysis"
+
+  $ChangedFileList = New-Object System.Collections.Generic.List[string]
+  $DbImpactList = New-Object System.Collections.Generic.List[string]
+  $FrontCount = 0
+  $BackCount = 0
+  $CfgCount = 0
+
+  Push-Location $AppDir
+  try {
+    if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["changedFiles"]) {
+      foreach ($Cf in @($MockConfig.changedFiles)) {
+        $TrimCf = [string]$Cf
+        if (-not [string]::IsNullOrWhiteSpace($TrimCf)) {
+          $ChangedFileList.Add($TrimCf.Trim()) | Out-Null
+        }
+      }
+    } elseif ($State.CommitBefore -ne $State.RemoteCommit) {
+      $DiffFilesRes = Invoke-NativeCli -Executable "git" -Arguments @("diff", "--name-only", "$($State.CommitBefore)..$($State.RemoteCommit)")
+      if ($DiffFilesRes.ExitCode -ne 0) {
+        throw "CHANGE_IMPACT_DIFF_FAILED: Could not compute changed files between $($State.CommitBefore) and $($State.RemoteCommit)"
+      }
+      foreach ($Line in ($DiffFilesRes.Output -split "`r?`n")) {
+        $CleanLine = $Line.Trim()
+        if (-not [string]::IsNullOrWhiteSpace($CleanLine)) {
+          $ChangedFileList.Add($CleanLine) | Out-Null
         }
       }
     }
 
-    $PendingMigrations = @($PendingMigrationSet | Sort-Object)
-    $State.PendingMigrations = $PendingMigrations
-
-    if ($PendingMigrations.Count -gt 0) {
-      $MigList = ($PendingMigrations -join ", ")
-      if (-not $ApproveMigrations) {
-        throw "MIGRATION_APPROVAL_REQUIRED: Database migration changes detected ($MigList). Automatic migration is forbidden. Please review impact and approve with -ApproveMigrations."
+    foreach ($RelPath in $ChangedFileList) {
+      if ($RelPath -match "^frontend/" -or $RelPath -eq "index.html" -or $RelPath -eq "vite.config.ts") {
+        $FrontCount++
       }
-      if (-not [string]::IsNullOrWhiteSpace($ApprovedCommit) -and ($ApprovedCommit.Trim() -ne $State.RemoteCommit)) {
-        throw "MIGRATION_APPROVAL_MISMATCH: ApprovedCommit ($ApprovedCommit) does not match RemoteCommit ($($State.RemoteCommit)). Re-approval is required."
+      if ($RelPath -match "^backend/" -or $RelPath -eq "server.ts") {
+        $BackCount++
       }
-      if (-not [string]::IsNullOrWhiteSpace($ApprovedMigrations)) {
-        $ApprovedList = @($ApprovedMigrations -split "," | ForEach-Object { [System.IO.Path]::GetFileName($_.Trim()) } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
-        $ExpectedKey = ($PendingMigrations -join ",")
-        $ApprovedKey = ($ApprovedList -join ",")
-        if ($ExpectedKey -ne $ApprovedKey) {
-          throw "MIGRATION_APPROVAL_MISMATCH: Approved migrations ($ApprovedKey) do not match detected pending migrations ($ExpectedKey)."
-        }
+      if ($RelPath -match "^\.env" -or $RelPath -in @("package.json", "package-lock.json", "tsconfig.json") -or $RelPath -match "^deployment/" -or $RelPath -match "^scripts/") {
+        $CfgCount++
       }
-      Write-DeployLog -Message "Admin migration approval verified for commit $($State.RemoteCommit): $MigList"
+      if ($RelPath -match "^database/.*\.sql$" -or $RelPath -match "^database/.*schema" -or $RelPath -match "^backend/src/database/.*migrat") {
+        $DbImpactList.Add($RelPath) | Out-Null
+      }
+      if ($RelPath -eq ".env") {
+        throw "CONFIG_ENV_TRACKED_VIOLATION: .env file must not be overwritten by Git updates"
+      }
     }
 
-    if ($CheckOnly) {
-      Write-StepResult -StepNo 2 -TotalSteps 7 -Label "GitHub Update" -Status "PASS"
-      Write-Host ""
-      Write-Host "----------------------------------------" -ForegroundColor Cyan
-      Write-Host " CHECK-ONLY MODE COMPLETED (NO CHANGES)" -ForegroundColor Cyan
-      Write-Host " Current Commit     : $($State.CommitBefore)"
-      Write-Host " Remote Commit      : $($State.RemoteCommit)"
-      Write-Host " Pending Migrations : $(if ($PendingMigrations.Count -gt 0) { $PendingMigrations -join ', ' } else { 'NONE' })"
-      Write-Host " Backup Root        : $BackupsRootDir"
-      Write-Host " IIS Routing        : $($State.IisRoutingMode)"
-      Write-Host " Process Mode       : $($State.BackendProcessMode)"
-      Write-Host "----------------------------------------" -ForegroundColor Cyan
-      exit 0
+    $State.ChangedFiles = @($ChangedFileList)
+    $State.FrontendImpactCount = $FrontCount
+    $State.BackendImpactCount = $BackCount
+    $State.ConfigImpactCount = $CfgCount
+    $State.DbSchemaImpactFiles = @($DbImpactList)
+
+    Write-DeployLog -Message "Impact Analysis: TotalChanged=$($ChangedFileList.Count), Frontend=$FrontCount, Backend=$BackCount, Config=$CfgCount, DbSchema=$($DbImpactList.Count)"
+
+    if ($DbImpactList.Count -gt 0) {
+      $ImpactJoined = ($DbImpactList -join ", ")
+      throw "DB_SCHEMA_CHANGE_BLOCKED: Database schema/migration file changes detected ($ImpactJoined). Deployment is strictly Application-Only and will NOT alter tables or run migrations. Administrator must inspect and apply database changes separately before deploying this release."
     }
   } finally {
     Pop-Location
   }
 
-  Write-StepResult -StepNo 2 -TotalSteps 7 -Label "GitHub Update" -Status "PASS"
+  Record-StepOutcome -StepNo 3 -Label "Change Impact Analysis" -Status "PASS" -Detail "Files=$($State.ChangedFiles.Count) (FE=$FrontCount, BE=$BackCount, Cfg=$CfgCount, DB=0)"
 
-  # ============================================================================
-  # STEP 3 - Pre-Update Verified Backup (OUTSIDE GIT REPO) & Git Pull
-  # ============================================================================
-  $State.CurrentStep = 3
-  $State.StepName = "Backup"
-
-  if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["simulateBackupFailure"] -and $MockConfig.simulateBackupFailure -eq $true) {
-    throw "BACKUP_FAILED: Failed to create pre-deployment database/release backup before git pull. Aborting deployment."
+  if ($CheckOnly) {
+    for ($SkipIdx = 4; $SkipIdx -le 7; $SkipIdx++) {
+      $SkipLabels = @{
+        4 = "Install Dependencies"
+        5 = "Test & Build"
+        6 = "Deploy Application"
+        7 = "Health Check"
+      }
+      Record-StepOutcome -StepNo $SkipIdx -Label $SkipLabels[$SkipIdx] -Status "SKIP" -Detail "CheckOnly mode"
+    }
+    Record-StepOutcome -StepNo 8 -Label "Deployment Report" -Status "PASS" -Detail "CheckOnly mode completed cleanly (no files changed)"
+    Write-DeploymentReport -Succeeded $true
+    exit 0
   }
 
-  $BackupDir = Join-Path $BackupsRootDir "deploy_backup_$Timestamp"
-  New-Item -ItemType Directory -Path $BackupDir -Force -ErrorAction Stop | Out-Null
-  Set-RestrictedBackupAcl -TargetPath $BackupDir
-  $State.BackupDir = $BackupDir
+  # ============================================================================
+  # STEP 4 - Install Dependencies (Application-Only Snapshot + Git Pull + npm)
+  # ============================================================================
+  $State.CurrentStep = 4
+  $State.StepName = "Install Dependencies"
 
-  # 3.1 Real MySQL database backup BEFORE git pull or any schema modification
-  $DbBackupResult = New-VerifiedMySqlBackup `
-    -TargetBackupDir $BackupDir `
-    -DbHost $State.ExpectedDbHost `
-    -DbPort $State.ExpectedDbPort `
-    -DbName $State.ExpectedDbName `
-    -DbUser $State.ExpectedDbUser `
-    -DbPassword $State.ExpectedDbPassword `
-    -HosOfficeUser $State.HosOfficeDbUser
+  # 4.1 Save Application-Only rollback snapshot (dist/, package manifests; ZERO database dump)
+  $SnapDir = Join-Path $SnapshotRootDir "app_snapshot_$Timestamp"
+  New-Item -ItemType Directory -Path $SnapDir -Force -ErrorAction Stop | Out-Null
+  $State.SnapshotDir = $SnapDir
 
-  $State.BackupSqlPath = $DbBackupResult.SqlPath
-  $State.BackupSqlSha256 = $DbBackupResult.Sha256
-
-  # 3.2 Snapshot current dist/ and configuration files BEFORE git pull
   $DistDir = Join-Path $AppDir "dist"
   if (Test-Path $DistDir) {
-    Copy-Item -Path $DistDir -Destination (Join-Path $BackupDir "dist") -Recurse -Force -ErrorAction Stop
+    Copy-Item -Path $DistDir -Destination (Join-Path $SnapDir "dist") -Recurse -Force -ErrorAction Stop
   }
-
   foreach ($CfgFile in @("package.json", "package-lock.json", "tsconfig.json")) {
-    $SrcPath = Join-Path $AppDir $CfgFile
-    if (Test-Path $SrcPath) {
-      Copy-Item -Path $SrcPath -Destination (Join-Path $BackupDir $CfgFile) -Force -ErrorAction Stop
+    $SrcCfg = Join-Path $AppDir $CfgFile
+    if (Test-Path $SrcCfg) {
+      Copy-Item -Path $SrcCfg -Destination (Join-Path $SnapDir $CfgFile) -Force -ErrorAction Stop
     }
   }
+  $State.SnapshotCreated = $true
+  Write-DeployLog -Message "Created application-only rollback snapshot at $SnapDir (no database backup created)."
 
-  $BackupManifest = [ordered]@{
-    serviceName          = "Sam_Att V2 Standalone"
-    backupTimestamp      = $Timestamp
-    commitBefore         = $State.CommitBefore
-    targetCommit         = $State.RemoteCommit
-    databaseName         = $State.ExpectedDbName
-    sqlDumpFileName      = (Split-Path $DbBackupResult.SqlPath -Leaf)
-    sqlDumpSizeBytes     = $DbBackupResult.SizeBytes
-    sqlDumpSha256        = $DbBackupResult.Sha256
-    iisRoutingMode       = $State.IisRoutingMode
-    backendProcessMode   = $State.BackendProcessMode
-    scannerExeSha256     = $State.ScannerExeSha256
-    appDirectory         = $AppDir
-    restoreCommand       = "powershell -ExecutionPolicy Bypass -File `"$AppDir\scripts\restore-test.ps1`" -BackupFolder `"$BackupDir`""
-  }
-  $ManifestPath = Join-Path $BackupDir "backup-manifest.json"
-  ($BackupManifest | ConvertTo-Json -Depth 5) | Set-Content -Path $ManifestPath -Encoding UTF8 -ErrorAction Stop
-  if (-not (Test-Path $ManifestPath)) {
-    throw "BACKUP_MANIFEST_MISSING: backup-manifest.json missing in backup folder"
-  }
-  $ManifestHash = (Get-FileHash -Path $ManifestPath -Algorithm SHA256).Hash.ToLower()
-  Set-Content -Path "$ManifestPath.sha256" -Value $ManifestHash -Encoding ASCII -ErrorAction Stop
-  $State.BackupCreated = $true
-  Write-DeployLog -Message "Created verified pre-update backup at $BackupDir (SQL SHA256=$($DbBackupResult.Sha256), Manifest SHA256=$ManifestHash)"
-
-  # 3.3 Execute git pull --ff-only ONLY AFTER verified backup succeeds
   Push-Location $AppDir
   try {
+    # 4.2 Pull latest commits cleanly with --ff-only
     if ($null -eq $MockConfig) {
       $PullRes = Invoke-NativeCli -Executable "git" -Arguments @("pull", "--ff-only", $Remote, $Branch)
       if ($PullRes.ExitCode -ne 0) {
-        throw "GIT_PULL_FAILED: git pull --ff-only failed (automatic git reset --hard is forbidden): $($PullRes.Output)"
+        throw "GIT_PULL_FAILED: git pull --ff-only failed (git reset --hard is forbidden): $($PullRes.Output)"
       }
       $AfterHeadRes = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "HEAD")
-      $State.CommitAfter = $AfterHeadRes.Output
+      $State.CommitAfter = $AfterHeadRes.Output.Trim()
     } else {
       if ($null -ne $MockConfig.PSObject.Properties["simulateGitPullFailure"] -and $MockConfig.simulateGitPullFailure -eq $true) {
         throw "GIT_PULL_FAILED: Simulated git pull --ff-only failure"
@@ -1285,30 +1240,18 @@ try {
       $State.CommitAfter = $State.RemoteCommit
     }
     $State.GitPulled = $true
-    Write-DeployLog -Message "Git pull completed safely after backup: $($State.CommitBefore) -> $($State.CommitAfter)"
-  } finally {
-    Pop-Location
-  }
+    Write-DeployLog -Message "Git pull --ff-only succeeded: $($State.CommitBefore) -> $($State.CommitAfter)"
 
-  Write-StepResult -StepNo 3 -TotalSteps 7 -Label "Backup" -Status "PASS"
-
-  # ============================================================================
-  # STEP 4 - Install Dependencies
-  # ============================================================================
-  $State.CurrentStep = 4
-  $State.StepName = "Install Dependencies"
-
-  Push-Location $AppDir
-  try {
+    # 4.3 Install dependencies cleanly without altering versions unnecessarily
     if ($null -ne $MockConfig) {
       if ($null -ne $MockConfig.PSObject.Properties["simulateNpmInstallFailure"] -and $MockConfig.simulateNpmInstallFailure -eq $true) {
         throw "NPM_INSTALL_FAILED: Dependency installation from package-lock.json failed"
       }
     } else {
-      Write-DeployLog -Message "Installing npm dependencies from package-lock.json..."
+      Write-DeployLog -Message "Installing npm dependencies via npm ci --no-audit --no-fund..."
       $NpmCiRes = Invoke-NativeCli -Executable "npm" -Arguments @("ci", "--no-audit", "--no-fund")
       if ($NpmCiRes.ExitCode -ne 0) {
-        Write-DeployLog -Message "npm ci returned code $($NpmCiRes.ExitCode) (retrying with npm install --no-package-lock --no-audit --no-fund due to Windows native module file lock)..." -Level "WARN"
+        Write-DeployLog -Message "npm ci returned exit $($NpmCiRes.ExitCode); retrying with npm install --no-package-lock --no-audit --no-fund..." -Level "WARN"
         $NpmInstRes = Invoke-NativeCli -Executable "npm" -Arguments @("install", "--no-package-lock", "--no-audit", "--no-fund")
         if ($NpmInstRes.ExitCode -ne 0) {
           throw "NPM_INSTALL_FAILED: npm dependency installation failed: $($NpmInstRes.Output)"
@@ -1316,163 +1259,148 @@ try {
         Invoke-NativeCli -Executable "git" -Arguments @("checkout", "--", "package-lock.json") | Out-Null
       }
     }
+
+    # Verify .env was never modified or overwritten
+    $EnvHashNow = Get-FileSha256Safe -FilePath (Join-Path $AppDir ".env")
+    if (-not [string]::IsNullOrWhiteSpace($State.EnvHashBefore) -and ($null -eq $MockConfig -or -not $MockConfig.PSObject.Properties["customEnvFile"])) {
+      if ($EnvHashNow -ne $State.EnvHashBefore) {
+        throw "SECURITY_ENV_MUTATED_VIOLATION: Production .env checksum changed unexpectedly during Step 4"
+      }
+    }
   } finally {
     Pop-Location
   }
 
-  Write-StepResult -StepNo 4 -TotalSteps 7 -Label "Install Dependencies" -Status "PASS"
+  Record-StepOutcome -StepNo 4 -Label "Install Dependencies" -Status "PASS" -Detail "git pull --ff-only + npm dependencies ready"
 
   # ============================================================================
-  # STEP 5 - Typecheck / Test / Build
+  # STEP 5 - Test & Build (TypeScript + Existing Tests + Production Build)
   # ============================================================================
   $State.CurrentStep = 5
-  $State.StepName = "Typecheck/Test/Build"
+  $State.StepName = "Test & Build"
 
   Push-Location $AppDir
   try {
-    # 5.1 TypeScript Typecheck
+    # 5.1 TypeScript check
     if ($null -ne $MockConfig) {
       if ($null -ne $MockConfig.PSObject.Properties["simulateTypecheckFailure"] -and $MockConfig.simulateTypecheckFailure -eq $true) {
+        $State.TypecheckStatus = "FAIL"
         throw "TYPECHECK_FAILED: TypeScript typecheck (npm run typecheck) failed"
       }
+      $State.TypecheckStatus = "PASS (Mock)"
     } else {
       Write-DeployLog -Message "Running TypeScript typecheck (npm run typecheck)..."
       $TcRes = Invoke-NativeCli -Executable "npm" -Arguments @("run", "typecheck")
       if ($TcRes.ExitCode -ne 0) {
+        $State.TypecheckStatus = "FAIL"
         throw "TYPECHECK_FAILED: TypeScript typecheck failed:`n$($TcRes.Output)"
       }
+      $State.TypecheckStatus = "PASS"
     }
 
-    # 5.2 Automated Unit & Integration Tests (isolated SQLite sandbox; never touches production MySQL)
-    if (-not $SkipTests) {
-      if ($null -ne $MockConfig) {
-        if ($null -ne $MockConfig.PSObject.Properties["simulateTestFailure"] -and $MockConfig.simulateTestFailure -eq $true) {
-          throw "UNIT_TESTS_FAILED: Automated test suite (npm test) failed"
+    # 5.2 Automated tests in isolated SQLite sandbox (never writes to production MySQL)
+    if ($SkipTests) {
+      $State.TestStatus = "SKIPPED (-SkipTests)"
+    } elseif ($null -ne $MockConfig) {
+      if ($null -ne $MockConfig.PSObject.Properties["simulateTestFailure"] -and $MockConfig.simulateTestFailure -eq $true) {
+        $State.TestStatus = "FAIL"
+        throw "UNIT_TESTS_FAILED: Automated test suite (npm test) failed"
+      }
+      $State.TestStatus = "PASS (Mock)"
+    } else {
+      Write-DeployLog -Message "Running automated tests (npm test) in isolated SQLite sandbox..."
+      $PrevEngine = $env:SAM_ATT_DB_ENGINE
+      $PrevMode = $env:SAM_ATT_DATA_MODE
+      $PrevNodeEnv = $env:NODE_ENV
+      $PrevTestIso = $env:SAM_ATT_TEST_ISOLATION
+      $PrevHosHost = $env:HOSOFFICE_DB_HOST
+      $PrevHosPass = $env:HOSOFFICE_DB_PASSWORD
+      $PrevHosPush = $env:HOSOFFICE_LIVE_PUSH_ENABLED
+      try {
+        $env:SAM_ATT_TEST_ISOLATION = "true"
+        $env:SAM_ATT_DB_ENGINE = "sqlite_sandbox"
+        $env:SAM_ATT_DATA_MODE = "DEMO"
+        $env:NODE_ENV = "test"
+        $env:HOSOFFICE_DB_HOST = "CHANGE_ME"
+        $env:HOSOFFICE_DB_PASSWORD = "CHANGE_ME"
+        $env:HOSOFFICE_LIVE_PUSH_ENABLED = "false"
+        $TestRes = Invoke-NativeCli -Executable "npm" -Arguments @("test")
+        if ($TestRes.ExitCode -ne 0) {
+          $State.TestStatus = "FAIL"
+          throw "UNIT_TESTS_FAILED: Automated tests failed:`n$($TestRes.Output)"
         }
-      } else {
-        Write-DeployLog -Message "Running automated verification test suite (npm test) in isolated SQLite sandbox..."
-        $PrevEngine = $env:SAM_ATT_DB_ENGINE
-        $PrevMode = $env:SAM_ATT_DATA_MODE
-        $PrevNodeEnv = $env:NODE_ENV
-        $PrevTestIso = $env:SAM_ATT_TEST_ISOLATION
-        $PrevHosHost = $env:HOSOFFICE_DB_HOST
-        $PrevHosPass = $env:HOSOFFICE_DB_PASSWORD
-        $PrevHosPush = $env:HOSOFFICE_LIVE_PUSH_ENABLED
-        try {
-          $env:SAM_ATT_TEST_ISOLATION = "true"
-          $env:SAM_ATT_DB_ENGINE = "sqlite_sandbox"
-          $env:SAM_ATT_DATA_MODE = "DEMO"
-          $env:NODE_ENV = "test"
-          $env:HOSOFFICE_DB_HOST = "CHANGE_ME"
-          $env:HOSOFFICE_DB_PASSWORD = "CHANGE_ME"
-          $env:HOSOFFICE_LIVE_PUSH_ENABLED = "false"
-          $TestRes = Invoke-NativeCli -Executable "npm" -Arguments @("test")
-          if ($TestRes.ExitCode -ne 0) {
-            throw "UNIT_TESTS_FAILED: Automated tests failed:`n$($TestRes.Output)"
-          }
-        } finally {
-          $env:SAM_ATT_TEST_ISOLATION = $PrevTestIso
-          $env:SAM_ATT_DB_ENGINE = $PrevEngine
-          $env:SAM_ATT_DATA_MODE = $PrevMode
-          $env:NODE_ENV = $PrevNodeEnv
-          $env:HOSOFFICE_DB_HOST = $PrevHosHost
-          $env:HOSOFFICE_DB_PASSWORD = $PrevHosPass
-          $env:HOSOFFICE_LIVE_PUSH_ENABLED = $PrevHosPush
-        }
+        $State.TestStatus = "PASS"
+      } finally {
+        $env:SAM_ATT_TEST_ISOLATION = $PrevTestIso
+        $env:SAM_ATT_DB_ENGINE = $PrevEngine
+        $env:SAM_ATT_DATA_MODE = $PrevMode
+        $env:NODE_ENV = $PrevNodeEnv
+        $env:HOSOFFICE_DB_HOST = $PrevHosHost
+        $env:HOSOFFICE_DB_PASSWORD = $PrevHosPass
+        $env:HOSOFFICE_LIVE_PUSH_ENABLED = $PrevHosPush
       }
     }
 
-    # 5.3 Production Frontend Build (vite build -> dist/index.html)
+    # 5.3 Frontend Vite production build & Backend entry verification
     if ($null -ne $MockConfig) {
       if ($null -ne $MockConfig.PSObject.Properties["simulateBuildFailure"] -and $MockConfig.simulateBuildFailure -eq $true) {
+        $State.BuildStatus = "FAIL"
         throw "BUILD_FAILED: Frontend production build (npm run build) failed"
       }
+      $State.BuildStatus = "PASS (Mock)"
     } else {
-      Write-DeployLog -Message "Running Frontend production build (npm run build)..."
+      Write-DeployLog -Message "Running production build (npm run build)..."
       $BuildRes = Invoke-NativeCli -Executable "npm" -Arguments @("run", "build")
       if ($BuildRes.ExitCode -ne 0) {
+        $State.BuildStatus = "FAIL"
         throw "BUILD_FAILED: npm run build failed:`n$($BuildRes.Output)"
       }
+      $State.BuildStatus = "PASS"
     }
 
     $BuiltIndexHtml = Join-Path $AppDir "dist\index.html"
-    if (-not (Test-Path $BuiltIndexHtml)) {
-      throw "BUILD_ARTIFACT_MISSING: dist\index.html not found after build"
+    if (-not (Test-Path $BuiltIndexHtml) -or (Get-Item $BuiltIndexHtml).Length -le 32) {
+      $State.BuildStatus = "FAIL"
+      throw "BUILD_ARTIFACT_MISSING: dist\index.html missing or empty after build"
     }
-    if ((Get-Item $BuiltIndexHtml).Length -le 32) {
-      throw "BUILD_ARTIFACT_EMPTY: dist\index.html is empty or invalid"
+    foreach ($BackendEntry in @("server.ts", "backend\src\app.ts", "backend\src\server.ts")) {
+      if (-not (Test-Path (Join-Path $AppDir $BackendEntry))) {
+        $State.BuildStatus = "FAIL"
+        throw "BACKEND_ENTRY_MISSING: Required backend file '$BackendEntry' missing after update"
+      }
     }
 
     if (-not [string]::IsNullOrWhiteSpace($State.ScannerExePath) -and (Test-Path $State.ScannerExePath)) {
-      $CurrentScannerSha = (Get-FileHash -Path $State.ScannerExePath -Algorithm SHA256).Hash.ToLower()
+      $CurrentScannerSha = Get-FileSha256Safe -FilePath $State.ScannerExePath
       if ($CurrentScannerSha -ne $State.ScannerExeSha256) {
         throw "SCANNER_EXE_MODIFIED_VIOLATION: ScannerReader EXE checksum changed unexpectedly"
-      }
-    }
-
-    # 5.4 Re-verify and Execute Approved Database Migrations + Post-Migration Schema Verification
-    if ($State.PendingMigrations.Count -gt 0) {
-      if (-not $ApproveMigrations) {
-        throw "MIGRATION_APPROVAL_REQUIRED: Refusing to execute database migrations without explicit -ApproveMigrations approval"
-      }
-      $ApprovedCsv = ($State.PendingMigrations -join ",")
-      $State.DatabaseMigrationAttempted = $true
-      if ($null -ne $MockConfig) {
-        if ($null -ne $MockConfig.PSObject.Properties["simulateMigrationFailure"] -and $MockConfig.simulateMigrationFailure -eq $true) {
-          throw "MIGRATION_EXECUTION_FAILED: Simulated database migration error"
-        }
-        $State.DatabaseMigrationApplied = $true
-        $State.AppliedMigrations = @($State.PendingMigrations)
-      } else {
-        Write-DeployLog -Message "Executing approved database migrations via cli-migrate.ts ($ApprovedCsv)..."
-        $MigRunRes = Invoke-NativeCli -Executable "npx" -Arguments @(
-          "tsx",
-          "backend/src/database/cli-migrate.ts",
-          "--approved-migrations=$ApprovedCsv"
-        )
-        if ($MigRunRes.ExitCode -ne 0) {
-          throw "MIGRATION_EXECUTION_FAILED: Database migration failed (ExitCode=$($MigRunRes.ExitCode)). Backend will NOT be restarted with new code:`n$($MigRunRes.Output)"
-        }
-        $State.DatabaseMigrationApplied = $true
-        $State.AppliedMigrations = @($State.PendingMigrations)
-
-        Write-DeployLog -Message "Running post-migration schema & schema_migrations verification..."
-        $VerifySchemaRes = Invoke-NativeCli -Executable "npx" -Arguments @(
-          "tsx",
-          "backend/src/database/cli-migrate.ts",
-          "--verify-schema"
-        )
-        if ($VerifySchemaRes.ExitCode -ne 0) {
-          throw "POST_MIGRATION_SCHEMA_VERIFICATION_FAILED: Schema verification failed after migration:`n$($VerifySchemaRes.Output)"
-        }
-        Write-DeployLog -Message "Post-migration schema verification PASSED."
       }
     }
   } finally {
     Pop-Location
   }
 
-  Write-StepResult -StepNo 5 -TotalSteps 7 -Label "Typecheck/Test/Build" -Status "PASS"
+  Record-StepOutcome -StepNo 5 -Label "Test & Build" -Status "PASS" -Detail "Typecheck=$($State.TypecheckStatus), Tests=$($State.TestStatus), Build=$($State.BuildStatus)"
 
   # ============================================================================
-  # STEP 6 - IIS / Backend Update
+  # STEP 6 - Deploy Application (Sam_Att Frontend/Backend Only; Port 4101)
   # ============================================================================
   $State.CurrentStep = 6
-  $State.StepName = "IIS / Backend Update"
+  $State.StepName = "Deploy Application"
 
   if ($State.IisRoutingMode -eq "IIS_STATIC_VIRTUAL_DIR" -and -not [string]::IsNullOrWhiteSpace($State.IisStaticTargetDir)) {
     Write-DeployLog -Message "Updating static IIS folder for Sam_Att only at $($State.IisStaticTargetDir)..."
     Copy-Item -Path (Join-Path $AppDir "dist\*") -Destination $State.IisStaticTargetDir -Recurse -Force -ErrorAction Stop
   } else {
-    Write-DeployLog -Message "IIS Routing Mode is $($State.IisRoutingMode): Frontend (/Sam_Att/) and API (/api/Sam_Att/) are served from $AppDir\dist via HTTPS Port $Port without restarting IIS or Procurement."
+    Write-DeployLog -Message "Serving Sam_Att Frontend (/Sam_Att/) and Backend API (/api/Sam_Att/) on HTTPS Port $Port (Procurement & IIS W3SVC untouched)."
   }
 
   Restart-SamAttBackendOnly -IsRollback $false
 
-  Write-StepResult -StepNo 6 -TotalSteps 7 -Label "IIS / Backend Update" -Status "PASS"
+  Record-StepOutcome -StepNo 6 -Label "Deploy Application" -Status "PASS" -Detail "Port=$Port, Mode=$($State.BackendProcessMode), Isolated=True"
 
   # ============================================================================
-  # STEP 7 - Health Check & Functional Smoke Verification
+  # STEP 7 - Health Check (Frontend, API, Read-Only MySQL Connection, Port 4101, Logs)
   # ============================================================================
   $State.CurrentStep = 7
   $State.StepName = "Health Check"
@@ -1487,62 +1415,64 @@ try {
   if (-not $HealthOutcome.Healthy) {
     throw "HEALTH_CHECK_FAILED: $($HealthOutcome.Error)"
   }
+  $State.HealthOutcome = $HealthOutcome
 
-  Write-StepResult -StepNo 7 -TotalSteps 7 -Label "Health Check" -Status "PASS"
-
-  Write-Host ""
-  Write-Host "----------------------------------------" -ForegroundColor Cyan
-  Write-Host "Frontend HTTPS : $($HealthOutcome.FrontendStatus)"
-  Write-Host "Backend API    : $($HealthOutcome.ApiStatus)"
-  Write-Host "MySQL          : $($HealthOutcome.MysqlStatus)"
-  Write-Host "Database       : $($HealthOutcome.DatabaseName)"
-  Write-Host "Port           : $($HealthOutcome.Port)"
-  Write-Host "BackupDir      : $($State.BackupDir)"
-  Write-Host "BackupSql      : $($State.BackupSqlPath)"
-  Write-Host "BackupSqlSha   : $($State.BackupSqlSha256)"
-  Write-Host "Migrations     : $(if ($State.AppliedMigrations.Count -gt 0) { $State.AppliedMigrations -join ', ' } else { 'NONE' })"
-  if ($State.CommitBefore -ne "" -and $State.CommitAfter -ne "") {
-    Write-Host "Commit         : $($State.CommitBefore.Substring(0, [Math]::Min(8, $State.CommitBefore.Length))) -> $($State.CommitAfter.Substring(0, [Math]::Min(8, $State.CommitAfter.Length)))"
+  # Inspect runtime stderr log for post-deploy errors without touching database
+  if (-not [string]::IsNullOrWhiteSpace($State.RuntimeStderrLog) -and (Test-Path $State.RuntimeStderrLog)) {
+    $ErrLines = @(Get-Content -Path $State.RuntimeStderrLog -ErrorAction SilentlyContinue | Where-Object { $_ -match "(?i)(UnhandledPromiseRejection|EADDRINUSE|FATAL|SyntaxError|ReferenceError)" })
+    if ($ErrLines.Count -gt 0) {
+      $FirstSafeErr = Protect-SensitiveText -InputText ([string]$ErrLines[0])
+      $State.LogErrorSummary = "FOUND $($ErrLines.Count) runtime error(s): $FirstSafeErr"
+      throw "POST_DEPLOY_LOG_ERRORS: Detected runtime error in stderr log: $FirstSafeErr"
+    } else {
+      $State.LogErrorSummary = "CLEAN (0 fatal runtime errors in $($State.RuntimeStderrLog))"
+    }
+  } else {
+    $State.LogErrorSummary = "CLEAN (No fatal errors)"
   }
-  Write-Host "----------------------------------------" -ForegroundColor Cyan
+
+  Record-StepOutcome -StepNo 7 -Label "Health Check" -Status "PASS" -Detail "Frontend=200, API=200, MySQL=CONNECTED (Read-Only), Port=$Port (PID=$($HealthOutcome.OwnerPid))"
+
+  # ============================================================================
+  # STEP 8 - Deployment Report
+  # ============================================================================
+  $State.CurrentStep = 8
+  $State.StepName = "Deployment Report"
+
+  Record-StepOutcome -StepNo 8 -Label "Deployment Report" -Status "PASS" -Detail "All 8 steps completed"
+  Write-DeploymentReport -Succeeded $true
+
   Write-Host ""
   Write-Host "DEPLOYMENT SUCCESS" -ForegroundColor Green
-  Write-DeployLog -Message "DEPLOYMENT SUCCESS on Port $Port (Database=$($HealthOutcome.DatabaseName), Commit=$($State.CommitAfter), BackupDir=$($State.BackupDir))"
+  Write-DeployLog -Message "DEPLOYMENT SUCCESS on Port $Port (Database=$($HealthOutcome.DatabaseName), Commit=$($State.CommitAfter))"
   exit 0
 
 } catch {
   $ErrMessage = Protect-SensitiveText -InputText $_.Exception.Message
-  if ($State.CurrentStep -ge 1 -and $State.CurrentStep -le 7) {
-    Write-StepResult -StepNo $State.CurrentStep -TotalSteps 7 -Label $State.StepName -Status "FAIL"
+  $RemediationText = Get-RemediationHint -StepNo $State.CurrentStep -ErrorMessage $ErrMessage
+
+  if ($State.CurrentStep -ge 1 -and $State.CurrentStep -le $TotalSteps) {
+    Record-StepOutcome -StepNo $State.CurrentStep -Label $State.StepName -Status "FAIL" -Detail $ErrMessage
   }
   Write-Host ""
   Write-Host "ERROR [$($State.StepName)]: $ErrMessage" -ForegroundColor Red
-  if (-not [string]::IsNullOrWhiteSpace($State.CommitBefore)) {
-    Write-Host "CommitBefore   : $($State.CommitBefore)"
-  }
-  if (-not [string]::IsNullOrWhiteSpace($State.RemoteCommit)) {
-    Write-Host "TargetCommit   : $($State.RemoteCommit)"
-  }
   Write-DeployLog -Message "FAILED at Step $($State.CurrentStep) ($($State.StepName)): $ErrMessage" -Level "ERROR"
 
-  if ($State.CurrentStep -ge 4 -or $State.GitPulled -or $State.DatabaseMigrationAttempted) {
-    $RolledBack = Invoke-SafeRollback -FailureReason $ErrMessage
+  if ($State.CurrentStep -ge 4 -or $State.GitPulled) {
+    $RolledBack = Invoke-SafeAppRollback -FailureReason $ErrMessage
+    Write-DeploymentReport -Succeeded $false -FailureReason $ErrMessage -Remediation $RemediationText
     if ($RolledBack) {
       Write-Host ""
       Write-Host "DEPLOYMENT FAILED - ROLLED BACK SAFELY TO PREVIOUS VERSION" -ForegroundColor Yellow
       exit 1
     } else {
       Write-Host ""
-      if ($State.RequiresManualDbRestore) {
-        Write-Host "DEPLOYMENT FAILED - CODE REVERTED BUT ADMIN DB RESTORE REQUIRED" -ForegroundColor Red
-        Write-Host "BackupSqlPath  : $($State.BackupSqlPath)" -ForegroundColor Yellow
-      } else {
-        Write-Host "DEPLOYMENT CRITICAL - ROLLBACK FAILED (MANUAL INTERVENTION REQUIRED)" -ForegroundColor Red
-      }
+      Write-Host "DEPLOYMENT CRITICAL - ROLLBACK FAILED (MANUAL INTERVENTION REQUIRED)" -ForegroundColor Red
       exit 2
     }
   }
 
+  Write-DeploymentReport -Succeeded $false -FailureReason $ErrMessage -Remediation $RemediationText
   Write-Host ""
   Write-Host "DEPLOYMENT ABORTED (NO SYSTEM CHANGES APPLIED)" -ForegroundColor Yellow
   exit 1

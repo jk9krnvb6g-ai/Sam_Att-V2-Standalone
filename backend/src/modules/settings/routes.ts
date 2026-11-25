@@ -110,11 +110,12 @@ function parseDeployOutputMetadata(stdout: string): {
   requiresAdminDatabaseRestore: boolean;
   migrationApprovalRequired: boolean;
 } {
-  const backupDirMatch = stdout.match(/BackupDir\s*:\s*(.+)/i);
+  const backupDirMatch = stdout.match(/(?:BackupDir|SnapshotDir)\s*:\s*(.+)/i);
   const backupSqlMatch = stdout.match(/BackupSql\s*:\s*(.+)/i);
   const backupSqlShaMatch = stdout.match(/BackupSqlSha\s*:\s*([a-f0-9]{16,64})/i);
   const commitMatch = stdout.match(/Commit\s*:\s*([a-zA-Z0-9_-]+)\s*->\s*([a-zA-Z0-9_-]+)/i);
   const commitBeforeLine = stdout.match(/CommitBefore\s*:\s*([a-f0-9]{7,40})/i);
+  const commitAfterLine = stdout.match(/CommitAfter\s*:\s*([a-f0-9]{7,40})/i);
   const targetCommitLine = stdout.match(/TargetCommit\s*:\s*([a-f0-9]{7,40})/i);
   const migMatch = stdout.match(/Migrations\s*:\s*(.+)/i);
   const rawMig = migMatch ? migMatch[1].trim() : '';
@@ -130,8 +131,8 @@ function parseDeployOutputMetadata(stdout: string): {
     backupDir: backupDirMatch ? backupDirMatch[1].trim() : null,
     backupSqlPath: backupSqlMatch ? backupSqlMatch[1].trim() : null,
     backupSqlSha256: backupSqlShaMatch ? backupSqlShaMatch[1].trim() : null,
-    commitBefore: commitMatch ? commitMatch[1].trim() : commitBeforeLine ? commitBeforeLine[1].trim() : null,
-    commitAfter: commitMatch ? commitMatch[2].trim() : null,
+    commitBefore: commitBeforeLine ? commitBeforeLine[1].trim() : commitMatch ? commitMatch[1].trim() : null,
+    commitAfter: commitAfterLine ? commitAfterLine[1].trim() : commitMatch ? commitMatch[2].trim() : null,
     targetCommit: targetCommitLine ? targetCommitLine[1].trim() : null,
     migrationsApplied,
     requiresAdminDatabaseRestore:
@@ -1517,19 +1518,19 @@ settingsRouter.post(
       const job = startCentralJob({
         jobType: 'DEPLOYMENT_RUN',
         actorUsername: req.user!.username,
-        initialStep: 'ตรวจสอบความพร้อมระบบและเตรียมสำรองข้อมูลก่อนอัปเดต...',
+        initialStep: 'ตรวจสอบความพร้อมระบบและเตรียมอัปเดต Application (8 ขั้นตอน)...',
         stage: 'PREFLIGHT',
-        totalCount: 7,
+        totalCount: 8,
       });
 
       try {
         updateCentralJobStep(job.jobId, {
           stage: 'BACKING_UP',
           currentStep: migrationApprovalRecorded
-            ? `กำลังสำรองข้อมูลและรันสคริปต์อัปเดตพร้อม Migration ที่อนุมัติ (${combinedPending.join(', ')})...`
-            : 'กำลังสำรองข้อมูลและรันสคริปต์ Deploy_Sam_Att.ps1...',
+            ? `กำลังรันสคริปต์อัปเดต 8 ขั้นตอน (${combinedPending.join(', ')})...`
+            : 'กำลังรันสคริปต์อัปเดต Application 8 ขั้นตอน Deploy_Sam_Att.ps1...',
           processedCount: 2,
-          totalCount: 7,
+          totalCount: 8,
         });
 
         let batResult: DeployBatResult;
@@ -1739,9 +1740,9 @@ settingsRouter.post(
 
         completeCentralJob(job.jobId, {
           status: 'SUCCESS',
-          currentStep: 'อัปเดตระบบและตรวจสอบ Health Check สำเร็จ',
-          processedCount: 7,
-          totalCount: 7,
+          currentStep: 'อัปเดตระบบ Application 8 ขั้นตอนและตรวจสอบ Health Check สำเร็จ',
+          processedCount: 8,
+          totalCount: 8,
           resultSummary: {
             deploymentId: insertRes.insertId,
             commitBefore: commitBeforeVal,

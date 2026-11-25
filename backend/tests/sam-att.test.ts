@@ -1552,9 +1552,17 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     assert.match(deployBatContent, /^[\x00-\x7F]*$/, 'deployment/Deploy_Sam_Att.bat must be 100% 7-bit ASCII');
     assert.match(ps1Content, /^[\x00-\x7F]*$/, 'deployment/Deploy_Sam_Att.ps1 must be 100% 7-bit ASCII');
 
-    // Must support -CheckOnly and -ApproveMigrations
+    // Must support -CheckOnly, 8-step app-only flow, and backward-compatible -ApproveMigrations stub
     assert.ok(ps1Content.includes('[switch]$CheckOnly'), 'Deploy_Sam_Att.ps1 must support -CheckOnly');
     assert.ok(ps1Content.includes('[switch]$ApproveMigrations'), 'Deploy_Sam_Att.ps1 must support -ApproveMigrations');
+    const ps1CodeOnly = ps1Content
+      .replace(/<#[\s\S]*?#>/g, '')
+      .split(/\r?\n/)
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    assert.ok(ps1Content.includes('$TotalSteps = 8'), 'Deploy_Sam_Att.ps1 must define 8 steps');
+    assert.ok(ps1Content.includes('DB_SCHEMA_CHANGE_BLOCKED'), 'Deploy_Sam_Att.ps1 must block DB schema/migration changes');
+    assert.ok(!ps1CodeOnly.includes('mysqldump'), 'Deploy_Sam_Att.ps1 must be strictly Application-Only without mysqldump');
     // Must forbid destructive git reset --hard / git clean -fd and iisreset execution
     assert.ok(!/^\s*git\s+reset\s+--hard/m.test(ps1Content), 'Deploy_Sam_Att.ps1 must never run git reset --hard');
     assert.ok(!/^\s*git\s+clean\s+-fd/m.test(ps1Content), 'Deploy_Sam_Att.ps1 must never run git clean -fd');

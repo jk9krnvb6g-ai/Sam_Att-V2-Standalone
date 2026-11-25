@@ -646,6 +646,26 @@ test('GitHub Update Center, Thai Changelog, RBAC & 422 Diagnostics Suite', async
         'Deploy_Sam_Att.ps1 must no longer delete tracked bun.lock during build'
       );
 
+      const d3 = diagnoseDeploymentFailure(
+        1,
+        '[3/8] Change Impact Analysis       FAIL\nERROR [Change Impact Analysis]: DB_SCHEMA_CHANGE_BLOCKED: Database schema/migration file changes detected\nDEPLOYMENT ABORTED (NO SYSTEM CHANGES APPLIED)',
+        ''
+      );
+      assert.equal(d3.errorCode, 'DB_SCHEMA_CHANGE_BLOCKED');
+      assert.equal(d3.failedStepNumber, 3);
+      assert.equal(d3.failedStepName, 'Change Impact Analysis');
+      assert.equal(d3.rollbackStatus, 'NO_CHANGES_APPLIED');
+
+      const d4 = diagnoseDeploymentFailure(
+        1,
+        '[5/8] Test & Build                 FAIL\nERROR [Test & Build]: TYPECHECK_FAILED: TypeScript typecheck failed\nDEPLOYMENT FAILED - ROLLED BACK SAFELY TO PREVIOUS VERSION',
+        ''
+      );
+      assert.equal(d4.errorCode, 'TYPECHECK_FAILED');
+      assert.equal(d4.failedStepNumber, 5);
+      assert.equal(d4.failedStepName, 'Test & Build');
+      assert.equal(d4.rollbackStatus, 'ROLLED_BACK_CODE');
+
       const bat = fs.readFileSync(path.resolve(process.cwd(), 'deployment', 'Deploy_Sam_Att.bat'), 'utf8');
       assert.ok(bat.includes('PREFLIGHT_ADMIN_PRIVILEGE_REQUIRED'));
     });

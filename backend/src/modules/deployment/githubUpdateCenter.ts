@@ -1569,8 +1569,8 @@ export function diagnoseDeploymentFailure(
 ): DeploymentFailureDiagnostic {
   const combined = `${stdout || ''}\n${stderr || ''}`;
 
-  // 1. ดึง Step ที่ล้มเหลวจากรูปแบบ [X/7] StepName ... FAIL
-  const stepFailMatch = combined.match(/\[(\d+)\/7\]\s+([^\.\r\n]+?)\s+\.+\s+FAIL/i);
+  // 1. ดึง Step ที่ล้มเหลวจากรูปแบบ [X/8] StepName FAIL หรือ [X/7] StepName ... FAIL
+  const stepFailMatch = combined.match(/\[(\d+)\/(?:7|8)\]\s+([^\.\r\n]+?)\s+(?:\.+\s+)?FAIL\b/i);
   let failedStepNumber: number | null = stepFailMatch ? Number(stepFailMatch[1]) : null;
   let failedStepName = stepFailMatch ? stepFailMatch[2].trim() : 'ไม่ระบุขั้นตอน';
 
@@ -1586,20 +1586,32 @@ export function diagnoseDeploymentFailure(
   if (!errorCode) {
     const knownCodes = [
       'PREFLIGHT_ADMIN_PRIVILEGE_REQUIRED',
+      'PREFLIGHT_REPO_NOT_FOUND',
       'PREFLIGHT_DIRTY_WORKING_TREE',
       'PREFLIGHT_WRONG_BRANCH',
       'PREFLIGHT_NODE_MISSING',
       'PREFLIGHT_NODE_VERSION_UNSUPPORTED',
+      'PREFLIGHT_NPM_MISSING',
+      'PREFLIGHT_LOW_DISK_SPACE',
       'PREFLIGHT_ENV_MISSING',
       'PREFLIGHT_INVALID_DATA_MODE',
       'PREFLIGHT_INVALID_DB_ENGINE',
       'PREFLIGHT_ENV_INCOMPLETE',
+      'PREFLIGHT_FORBIDDEN_HOSOFFICE_DB',
       'PREFLIGHT_IIS_PERMISSION_DENIED',
       'PREFLIGHT_PORT_4101_FOREIGN_PROCESS',
+      'PREFLIGHT_SNAPSHOT_DIR_INSIDE_GIT',
       'PREFLIGHT_BACKUP_DIR_INSIDE_GIT',
       'PREFLIGHT_BACKUP_DIR_UNWRITABLE',
       'PREFLIGHT_MISSING_CORE_FILE',
+      'GITHUB_REPO_MISMATCH',
+      'GIT_LOCAL_HEAD_UNAVAILABLE',
       'GIT_FETCH_FAILED',
+      'GIT_REMOTE_HEAD_UNAVAILABLE',
+      'GIT_HISTORY_DIVERGED',
+      'CHANGE_IMPACT_DIFF_FAILED',
+      'CONFIG_ENV_TRACKED_VIOLATION',
+      'DB_SCHEMA_CHANGE_BLOCKED',
       'GIT_PULL_FAILED',
       'MIGRATION_APPROVAL_REQUIRED',
       'MIGRATION_APPROVAL_MISMATCH',
@@ -1607,12 +1619,20 @@ export function diagnoseDeploymentFailure(
       'BACKUP_FAILED_NO_MYSQLDUMP',
       'BACKUP_FAILED',
       'NPM_INSTALL_FAILED',
+      'SECURITY_ENV_MUTATED_VIOLATION',
       'TYPECHECK_FAILED',
       'UNIT_TESTS_FAILED',
       'BUILD_FAILED',
+      'BUILD_ARTIFACT_MISSING',
+      'BACKEND_ENTRY_MISSING',
+      'SCANNER_EXE_MODIFIED_VIOLATION',
+      'SECURITY_ISOLATION_VIOLATION',
       'MIGRATION_EXECUTION_FAILED',
       'POST_MIGRATION_SCHEMA_VERIFICATION_FAILED',
       'HEALTH_CHECK_FAILED',
+      'POST_DEPLOY_LOG_ERRORS',
+      'BACKEND_START_FAILED',
+      'BACKEND_PM2_RESTART_FAILED',
       'BACKEND_PROCESS_EXITED_IMMEDIATELY',
       'BACKEND_SERVICE_NOT_RUNNING',
     ];
@@ -1638,7 +1658,7 @@ export function diagnoseDeploymentFailure(
   // 3. ประเมินสถานะ Rollback จากแบนเนอร์จริงของสคริปต์
   let rollbackStatus: DeploymentFailureDiagnostic['rollbackStatus'] = 'UNKNOWN';
   let rollbackStatusThai = 'ไม่ทราบสถานะการย้อนกลับ กรุณาตรวจสอบ Log ด้านล่าง';
-  if (/DEPLOYMENT ABORTED \(NO SYSTEM CHANGES APPLIED\)/i.test(combined) || (failedStepNumber !== null && failedStepNumber <= 2)) {
+  if (/DEPLOYMENT ABORTED \(NO SYSTEM CHANGES APPLIED\)/i.test(combined) || (failedStepNumber !== null && failedStepNumber <= 3 && !/ROLLED BACK/i.test(combined))) {
     rollbackStatus = 'NO_CHANGES_APPLIED';
     rollbackStatusThai = 'หยุดก่อนเปลี่ยนแปลงระบบ — โค้ดและฐานข้อมูลเดิมไม่ถูกกระทบ';
   } else if (/ADMIN DB RESTORE REQUIRED|MANUAL_DB_RESTORE_REQUIRED/i.test(combined)) {
@@ -1672,6 +1692,24 @@ export function diagnoseDeploymentFailure(
       cause: 'Git Branch ปัจจุบันบนเซิร์ฟเวอร์ไม่ตรงกับ Branch เป้าหมาย (main)',
       fix: 'ตรวจสอบสาขาด้วย git branch บนเซิร์ฟเวอร์และสลับกลับมาที่ main ก่อนสั่งอัปเดต',
     },
+    PREFLIGHT_NODE_MISSING: {
+      step: 1,
+      stepName: 'Preflight Check',
+      cause: 'ไม่พบคำสั่ง Node.js บนเครื่องเซิร์ฟเวอร์',
+      fix: 'ติดตั้ง Node.js v22 LTS ขึ้นไปและตรวจสอบ System PATH บน Windows Server',
+    },
+    PREFLIGHT_NODE_VERSION_UNSUPPORTED: {
+      step: 1,
+      stepName: 'Preflight Check',
+      cause: 'เวอร์ชัน Node.js บนเซิร์ฟเวอร์ต่ำกว่าข้อกำหนดขั้นต่ำ (v22.0.0)',
+      fix: 'อัปเกรด Node.js เป็น v22 LTS ขึ้นไปบนเซิร์ฟเวอร์ก่อนสั่งอัปเดต',
+    },
+    PREFLIGHT_LOW_DISK_SPACE: {
+      step: 1,
+      stepName: 'Preflight Check',
+      cause: 'พื้นที่ว่างบนดิสก์เหลือน้อยกว่า 500 MB ไม่เพียงพอสำหรับ Snapshot และ Build',
+      fix: 'เพิ่มพื้นที่ว่างบนไดรฟ์ที่ติดตั้ง Sam_Att อย่างน้อย 500 MB แล้วลองใหม่อีกครั้ง',
+    },
     PREFLIGHT_ENV_MISSING: {
       step: 1,
       stepName: 'Preflight Check',
@@ -1683,6 +1721,12 @@ export function diagnoseDeploymentFailure(
       stepName: 'Preflight Check',
       cause: 'ค่าตั้งค่าสำคัญในไฟล์ .env ยังไม่ครบหรือยังเป็นค่า Placeholder (CHANGE_ME / GENERATE_*)',
       fix: 'ตรวจสอบตัวแปร SAM_ATT_DB_*, JWT_SECRET และ SCANNER_INGEST_SHARED_TOKEN ในไฟล์ .env',
+    },
+    PREFLIGHT_FORBIDDEN_HOSOFFICE_DB: {
+      step: 1,
+      stepName: 'Preflight Check',
+      cause: 'ค่า SAM_ATT_DB_NAME ในไฟล์ .env ชี้ไปยังฐานข้อมูล HOSOffice ซึ่งเป็นข้อห้าม',
+      fix: 'ตรวจสอบให้ SAM_ATT_DB_NAME ชี้ไปยังฐานข้อมูลเฉพาะของระบบ (samchuk_attendance_v2) เท่านั้น',
     },
     PREFLIGHT_INVALID_DATA_MODE: {
       step: 1,
@@ -1708,6 +1752,12 @@ export function diagnoseDeploymentFailure(
       cause: 'พอร์ต 4101 ถูกใช้งานโดยโปรเซสอื่นที่ไม่ใช่ Sam_Att V2 Standalone',
       fix: 'ตรวจสอบโปรเซสที่ถือพอร์ต 4101 บนเซิร์ฟเวอร์ด้วย Get-NetTCPConnection -LocalPort 4101 (ห้ามสั่ง kill โดยไม่ตรวจชื่อโปรเซส)',
     },
+    PREFLIGHT_SNAPSHOT_DIR_INSIDE_GIT: {
+      step: 1,
+      stepName: 'Preflight Check',
+      cause: 'โฟลเดอร์เก็บ Application Rollback Snapshot ถูกตั้งให้อยู่ภายใน Git Repository',
+      fix: 'ตั้งค่า -RollbackRootDir หรือ SAM_ATT_DEPLOY_SNAPSHOT_DIR ให้อยู่นอกโฟลเดอร์ติดตั้ง เช่น C:\\SamAttDeploySnapshots',
+    },
     PREFLIGHT_BACKUP_DIR_INSIDE_GIT: {
       step: 1,
       stepName: 'Preflight Check',
@@ -1720,33 +1770,57 @@ export function diagnoseDeploymentFailure(
       cause: 'ไม่สามารถสร้างหรือเขียนไฟล์ในโฟลเดอร์สำรองข้อมูลได้',
       fix: 'ตรวจสอบสิทธิ์ NTFS และพื้นที่ว่างในไดรฟ์ของ C:\\SamAttBackups',
     },
+    GITHUB_REPO_MISMATCH: {
+      step: 2,
+      stepName: 'GitHub Version Verification',
+      cause: 'Git Remote origin ไม่ตรงกับ Repository jk9krnvb6g-ai/Sam_Att-V2-Standalone',
+      fix: 'ตรวจสอบ git remote -v ในโฟลเดอร์ติดตั้งให้ชี้ไปยัง jk9krnvb6g-ai/Sam_Att-V2-Standalone',
+    },
     GIT_FETCH_FAILED: {
       step: 2,
-      stepName: 'GitHub Update',
+      stepName: 'GitHub Version Verification',
       cause: 'ไม่สามารถดึงข้อมูลล่าสุดจาก GitHub (git fetch) ได้',
       fix: 'ตรวจสอบการเชื่อมต่ออินเทอร์เน็ต Proxy/Firewall และสิทธิ์เข้าถึง GitHub Repository บนเซิร์ฟเวอร์',
     },
-    GIT_PULL_FAILED: {
+    GIT_HISTORY_DIVERGED: {
+      step: 2,
+      stepName: 'GitHub Version Verification',
+      cause: 'ประวัติ Commit บนเครื่องเซิร์ฟเวอร์แยกสายออกจาก origin/main ไม่สามารถ fast-forward ได้',
+      fix: 'ตรวจสอบ git status และ git log บนเซิร์ฟเวอร์ด้วยตนเองก่อนสั่งอัปเดต (ห้ามใช้ git reset --hard)',
+    },
+    DB_SCHEMA_CHANGE_BLOCKED: {
       step: 3,
-      stepName: 'Backup',
+      stepName: 'Change Impact Analysis',
+      cause: 'ตรวจพบการเปลี่ยนแปลงไฟล์ Database Schema หรือ Migration ในรุ่นเป้าหมาย — Deployment Script แบบ 8 ขั้นตอนจัดการเฉพาะ Application และจะไม่แก้ไขฐานข้อมูล',
+      fix: 'ให้ผู้ดูแลระบบ/DBA ตรวจสอบและปรับโครงสร้างฐานข้อมูล samchuk_attendance_v2 แยกต่างหากให้เรียบร้อยก่อนนำโค้ดรุ่นนี้ขึ้นใช้งาน',
+    },
+    CONFIG_ENV_TRACKED_VIOLATION: {
+      step: 3,
+      stepName: 'Change Impact Analysis',
+      cause: 'พบไฟล์ .env อยู่ในรายการเปลี่ยนแปลงจาก GitHub ซึ่งเสี่ยงต่อการเขียนทับค่า Production',
+      fix: 'นำไฟล์ .env ออกจาก Git Commit บน Repository ก่อนสั่งอัปเดต',
+    },
+    GIT_PULL_FAILED: {
+      step: 4,
+      stepName: 'Install Dependencies',
       cause: 'คำสั่ง git pull --ff-only ไม่สำเร็จ (อาจมี Commit ในเครื่องที่แยกสายจาก origin/main)',
       fix: 'ตรวจสอบ git status และ git log --oneline -n 5 บนเซิร์ฟเวอร์เพื่อรวมหรือแก้ไขประวัติ Commit ด้วยตนเอง',
     },
     MIGRATION_APPROVAL_REQUIRED: {
       step: 2,
-      stepName: 'GitHub Update',
+      stepName: 'GitHub Version Verification',
       cause: 'พบไฟล์ Database Migration ใหม่ที่ยังไม่ได้รับการอนุมัติจากผู้ดูแลระบบ',
       fix: 'กดตรวจสอบเวอร์ชันอีกครั้ง ตรวจสอบรายการ Migration และอนุมัติด้วยรหัสผ่าน ADMIN ในหน้าจออัปเดตระบบ',
     },
     MIGRATION_APPROVAL_MISMATCH: {
       step: 2,
-      stepName: 'GitHub Update',
+      stepName: 'GitHub Version Verification',
       cause: 'รหัส Commit เป้าหมายหรือรายการไฟล์ Migration บน GitHub เปลี่ยนแปลงไปจากตอนที่กดอนุมัติ',
       fix: 'กด "ตรวจสอบเวอร์ชันอีกครั้ง" เพื่อโหลด Commit และรายการ Migration ล่าสุด แล้วทำขั้นตอนอนุมัติใหม่',
     },
     MIGRATION_CHECKSUM_MISMATCH: {
       step: 2,
-      stepName: 'GitHub Update',
+      stepName: 'GitHub Version Verification',
       cause: 'ไฟล์ SQL Migration ที่เคยรันไปแล้วมีค่า SHA-256 Checksum ไม่ตรงกับที่บันทึกไว้ในตาราง schema_migrations',
       fix: 'ห้ามแก้ไขไฟล์ Migration เดิม ให้ตรวจสอบความแตกต่างของไฟล์และฐานข้อมูลโดย DBA ก่อนดำเนินการต่อ',
     },
@@ -1768,23 +1842,47 @@ export function diagnoseDeploymentFailure(
       cause: 'การติดตั้งแพ็กเกจ npm ล้มเหลว (อาจเกิดจากเครือข่ายหรือไฟล์ล็อกบน Windows)',
       fix: 'ตรวจสอบการเชื่อมต่ออินเทอร์เน็ตของเซิร์ฟเวอร์ และดูข้อความผิดพลาดจาก npm ใน Log ด้านล่าง',
     },
+    SECURITY_ENV_MUTATED_VIOLATION: {
+      step: 4,
+      stepName: 'Install Dependencies',
+      cause: 'ตรวจพบว่าค่า Checksum ของไฟล์ .env เปลี่ยนแปลงระหว่างขั้นตอนติดตั้ง Dependencies',
+      fix: 'ตรวจสอบไฟล์ .env บนเซิร์ฟเวอร์ทันที (ระบบย้อนกลับเวอร์ชันเดิมให้แล้ว)',
+    },
     TYPECHECK_FAILED: {
       step: 5,
-      stepName: 'Typecheck/Test/Build',
+      stepName: 'Test & Build',
       cause: 'การตรวจสอบชนิดข้อมูล TypeScript (npm run typecheck) ไม่ผ่าน',
       fix: 'ตรวจสอบ Log ของ TypeScript ด้านล่างและแก้ไขโค้ดบน GitHub ก่อนสั่งอัปเดตใหม่ (ระบบย้อนกลับรุ่นเดิมให้แล้ว)',
     },
     UNIT_TESTS_FAILED: {
       step: 5,
-      stepName: 'Typecheck/Test/Build',
+      stepName: 'Test & Build',
       cause: 'ชุดทดสอบอัตโนมัติ (npm test) มีบางรายการไม่ผ่าน',
       fix: 'ตรวจสอบผลการทดสอบใน Log ด้านล่างและแก้ไขก่อนนำขึ้นใช้งานจริง (ระบบย้อนกลับรุ่นเดิมให้แล้ว)',
     },
     BUILD_FAILED: {
       step: 5,
-      stepName: 'Typecheck/Test/Build',
+      stepName: 'Test & Build',
       cause: 'การคอมไพล์หน้าเว็บ Production (npm run build) ล้มเหลว',
       fix: 'ตรวจสอบข้อความผิดพลาดของ Vite Build ใน Log ด้านล่างและแก้ไขบน GitHub ก่อนลองใหม่',
+    },
+    BUILD_ARTIFACT_MISSING: {
+      step: 5,
+      stepName: 'Test & Build',
+      cause: 'ไม่พบไฟล์ dist/index.html หรือไฟล์ว่างเปล่าหลังการ Build',
+      fix: 'ตรวจสอบ Log ของ Vite Build และพื้นที่ดิสก์บนเซิร์ฟเวอร์',
+    },
+    BACKEND_ENTRY_MISSING: {
+      step: 5,
+      stepName: 'Test & Build',
+      cause: 'ไม่พบไฟล์ Entry หลักของฝั่ง Backend (server.ts / backend/src/app.ts)',
+      fix: 'ตรวจสอบโครงสร้างซอร์สโค้ดใน GitHub Repository ก่อนสั่งอัปเดตใหม่',
+    },
+    SCANNER_EXE_MODIFIED_VIOLATION: {
+      step: 5,
+      stepName: 'Test & Build',
+      cause: 'ตรวจพบว่าไฟล์ ScannerSyncCli.exe มีการเปลี่ยนแปลง Checksum โดยไม่คาดคิด',
+      fix: 'ตรวจสอบไฟล์ในโฟลเดอร์ ScannerReader และคืนค่าจากแหล่งที่เชื่อถือได้',
     },
     MIGRATION_EXECUTION_FAILED: {
       step: 5,
@@ -1798,11 +1896,29 @@ export function diagnoseDeploymentFailure(
       cause: 'การตรวจสอบโครงสร้างตารางหลังรัน Migration ไม่ผ่าน',
       fix: 'ตรวจสอบรายงาน --verify-schema ใน Log และตรวจสอบฐานข้อมูลก่อนเปิดใช้งาน',
     },
+    BACKEND_START_FAILED: {
+      step: 6,
+      stepName: 'Deploy Application',
+      cause: 'ไม่สามารถเริ่มโปรเซส Sam_Att Backend บนพอร์ต 4101 ได้',
+      fix: 'ตรวจสอบสถานะ Windows Service / PM2 / Node process และ Runtime Logs ในโฟลเดอร์ logs/',
+    },
+    BACKEND_SERVICE_NOT_RUNNING: {
+      step: 6,
+      stepName: 'Deploy Application',
+      cause: 'Windows Service ของ Sam_Att ไม่ได้อยู่ในสถานะ Running หลังสั่งรีสตาร์ท',
+      fix: 'ตรวจสอบ Windows Event Viewer และโฟลเดอร์ logs/ บนเซิร์ฟเวอร์',
+    },
     HEALTH_CHECK_FAILED: {
       step: 7,
       stepName: 'Health Check',
-      cause: 'หลังรีสตาร์ทบริการแล้ว การตรวจสอบ /api/Sam_Att/health บนพอร์ต 4101 ไม่ผ่านภายในเวลาที่กำหนด',
+      cause: 'หลังรีสตาร์ทบริการแล้ว การตรวจสอบ /Sam_Att/ หรือ /api/Sam_Att/health บนพอร์ต 4101 ไม่ผ่านภายในเวลาที่กำหนด',
       fix: 'ตรวจสอบ Log การรันของบริการในโฟลเดอร์ logs/ และตรวจใบรับรอง TLS / การเชื่อมต่อ MySQL',
+    },
+    POST_DEPLOY_LOG_ERRORS: {
+      step: 7,
+      stepName: 'Health Check',
+      cause: 'ตรวจพบข้อผิดพลาดร้ายแรง (Fatal Runtime Error) ในไฟล์ stderr log หลังเริ่มบริการ',
+      fix: 'ตรวจสอบไฟล์ sam_att_runtime_stderr_*.log ในโฟลเดอร์ logs/ (ระบบย้อนกลับรุ่นเดิมให้แล้ว)',
     },
   };
 
