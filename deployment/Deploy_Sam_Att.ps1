@@ -93,7 +93,7 @@ function Protect-SensitiveText {
       $Sanitized = $Sanitized.Replace($Secret, "***REDACTED***")
     }
   }
-  $Sanitized = [regex]::Replace($Sanitized, '(?i)(PASSWORD|SECRET|TOKEN|API_KEY)\s*=\s*([^\s;&"]+)', '$1=***REDACTED***')
+  $Sanitized = [regex]::Replace($Sanitized, '(?i)(PASSWORD|SECRET|TOKEN|API_KEY)\s*=\s*("[^"\r\n]*"|''[^''\r\n]*''|[^\s;&"]+)', '$1=***REDACTED***')
   return $Sanitized
 }
 
@@ -390,14 +390,51 @@ function Find-MysqlDumpExecutable {
 }
 
 function Set-RestrictedBackupAcl {
-  param([string]$TargetPath)
-  if ($env:OS -like "*Windows*" -and (Test-Path $TargetPath)) {
-    try {
-      $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-      & icacls $TargetPath /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" "${CurrentUser}:(OI)(CI)F" 2>$null | Out-Null
-    } catch {
-      Write-DeployLog -Message "Warning: Could not tighten ACL on $TargetPath" -Level "WARN"
-    }
+  param(
+    [Parameter(Mandatory=$true)][string]$TargetPath
+  )
+
+  if (-not (Test-Path -LiteralPath $TargetPath)) {
+    throw "ACL_TARGET_NOT_FOUND: Cannot configure permissions because path does not exist: $TargetPath"
+  }
+
+  if (-not ($env:OS -like "*Windows*")) {
+    return
+  }
+
+  $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+  if ([string]::IsNullOrWhiteSpace($CurrentUser)) {
+    throw "ACL_IDENTITY_UNKNOWN: Cannot determine current Windows user identity for icacls on '$TargetPath'"
+  }
+
+  $TargetItem = Get-Item -LiteralPath $TargetPath -ErrorAction Stop
+  $IsDirectory = [bool]$TargetItem.PSIsContainer
+
+  # Windows icacls rejects (OI)(CI) inheritance flags on files; apply (OI)(CI)F to directories only and F to files
+  if ($IsDirectory) {
+    $IcaclsArgs = @(
+      $TargetPath,
+      "/inheritance:r",
+      "/grant:r",
+      "SYSTEM:(OI)(CI)F",
+      "Administrators:(OI)(CI)F",
+      "${CurrentUser}:(OI)(CI)F"
+    )
+  } else {
+    $IcaclsArgs = @(
+      $TargetPath,
+      "/inheritance:r",
+      "/grant:r",
+      "SYSTEM:F",
+      "Administrators:F",
+      "${CurrentUser}:F"
+    )
+  }
+
+  $AclRes = Invoke-NativeCli -Executable "icacls" -Arguments $IcaclsArgs
+  if ($AclRes.ExitCode -ne 0) {
+    $SafeAclOut = Protect-SensitiveText -InputText $AclRes.Output
+    throw "ACL_CONFIGURATION_FAILED: icacls failed on '$TargetPath' for account '$CurrentUser' (ExitCode=$($AclRes.ExitCode)): $SafeAclOut"
   }
 }
 
@@ -415,6 +452,8 @@ function New-VerifiedMySqlBackup {
   if ([string]::IsNullOrWhiteSpace($DbUser) -or [string]::IsNullOrWhiteSpace($DbPassword)) {
     throw "BACKUP_FAILED_DB_CREDENTIALS_MISSING: SAM_ATT_DB_USER or SAM_ATT_DB_PASSWORD is missing"
   }
+  Register-SensitiveSecret -SecretValue $DbPassword
+
   if (-not [string]::IsNullOrWhiteSpace($HosOfficeUser) -and ($DbUser -ieq $HosOfficeUser) -and ($DbName -ine "samchuk_attendance_v2")) {
     throw "BACKUP_FAILED_FORBIDDEN_HOSOFFICE_USER: Refusing to run backup with HOSOffice read-only account"
   }
@@ -432,10 +471,27 @@ function New-VerifiedMySqlBackup {
       throw "BACKUP_FAILED_NO_MYSQLDUMP: mysqldump executable not found in PATH or standard MySQL directories. Aborting before any code or schema change."
     }
 
-    # Write temporary defaults-extra-file so password NEVER appears in CLI arguments or process list
-    $TmpCnf = Join-Path $env:TEMP "sam_att_my_backup_$Timestamp`_$([guid]::NewGuid().ToString('N').Substring(0,8)).cnf"
+    # Create a dedicated Sam_Att temporary directory under the verified external backup root (avoids $env:TEMP 8.3 short paths and inherited ACL issues)
+    $BackupParentRoot = Split-Path -Parent $TargetBackupDir
+    if ([string]::IsNullOrWhiteSpace($BackupParentRoot)) {
+      $BackupParentRoot = $BackupsRootDir
+    }
+    $SamAttTmpRoot = Join-Path $BackupParentRoot ".sam_att_tmp"
+    $TmpRunId = "${Timestamp}_$([guid]::NewGuid().ToString('N').Substring(0,8))"
+    $TmpCnfDir = Join-Path $SamAttTmpRoot "cnf_$TmpRunId"
+    $TmpCnf = Join-Path $TmpCnfDir "sam_att_mysql.cnf"
+
     try {
-      $EscapedPass = $DbPassword.Replace('\', '\\').Replace('"', '\"')
+      if (-not (Test-Path -LiteralPath $SamAttTmpRoot)) {
+        New-Item -ItemType Directory -Path $SamAttTmpRoot -Force -ErrorAction Stop | Out-Null
+      }
+      Set-RestrictedBackupAcl -TargetPath $SamAttTmpRoot
+
+      New-Item -ItemType Directory -Path $TmpCnfDir -Force -ErrorAction Stop | Out-Null
+      Set-RestrictedBackupAcl -TargetPath $TmpCnfDir
+
+      $EscapedPass = $DbPassword.Replace('\', '\\').Replace('"', '\"').Replace("`r", '\r').Replace("`n", '\n')
+      Register-SensitiveSecret -SecretValue $EscapedPass
       $CnfLines = @(
         "[client]",
         "host=$DbHost",
@@ -443,10 +499,98 @@ function New-VerifiedMySqlBackup {
         "user=$DbUser",
         "password=`"$EscapedPass`""
       )
-      Set-Content -Path $TmpCnf -Value ($CnfLines -join "`r`n") -Encoding ASCII -ErrorAction Stop
+      $CnfBody = ($CnfLines -join "`r`n") + "`r`n"
+
+      # Write UTF-8 without BOM (compatible with both PowerShell 5.1 and MariaDB/MySQL option-file parsers)
+      $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+      [System.IO.File]::WriteAllText($TmpCnf, $CnfBody, $Utf8NoBom)
+
+      # Apply file-level ACL (without directory inheritance flags) and fail immediately if icacls returns non-zero
       Set-RestrictedBackupAcl -TargetPath $TmpCnf
 
-      Write-DeployLog -Message "Running real mysqldump for database '$DbName' on ${DbHost}:${DbPort} into $SqlDumpPath..."
+      # Verify existence, non-zero size, ACL grant, and readability by current Windows account BEFORE invoking mysqldump
+      if (-not (Test-Path -LiteralPath $TmpCnf -PathType Leaf)) {
+        throw "BACKUP_FAILED_CNF_MISSING: Temporary defaults-extra-file was not created at $TmpCnf"
+      }
+      $CnfFileInfo = Get-Item -LiteralPath $TmpCnf -ErrorAction Stop
+      if ($CnfFileInfo.Length -le 0) {
+        throw "BACKUP_FAILED_CNF_EMPTY: Temporary defaults-extra-file is empty (0 bytes) at $TmpCnf"
+      }
+
+      $CurrentIdentity = if ($env:OS -like "*Windows*") {
+        [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+      } else {
+        $env:USER
+      }
+
+      if ($env:OS -like "*Windows*") {
+        $WinIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $AccountSids = New-Object System.Collections.Generic.HashSet[string]
+        if ($null -ne $WinIdentity.User) {
+          $AccountSids.Add($WinIdentity.User.Value) | Out-Null
+        }
+        if ($null -ne $WinIdentity.Groups) {
+          foreach ($GrpSid in $WinIdentity.Groups) {
+            if ($null -ne $GrpSid) {
+              $AccountSids.Add($GrpSid.Value) | Out-Null
+            }
+          }
+        }
+        $CnfAcl = Get-Acl -LiteralPath $TmpCnf -ErrorAction Stop
+        $ReadDataBit = [int][System.Security.AccessControl.FileSystemRights]::ReadData
+        $HasReadAllow = $false
+        $HasReadDeny = $false
+        foreach ($Rule in $CnfAcl.Access) {
+          try {
+            $RuleSid = $Rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+          } catch {
+            continue
+          }
+          if (-not $AccountSids.Contains($RuleSid)) {
+            continue
+          }
+          $RuleMask = [int]$Rule.FileSystemRights
+          if (($RuleMask -band $ReadDataBit) -ne 0) {
+            if ($Rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny) {
+              $HasReadDeny = $true
+            } elseif ($Rule.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow) {
+              $HasReadAllow = $true
+            }
+          }
+        }
+        if ($HasReadDeny -or (-not $HasReadAllow)) {
+          throw "BACKUP_FAILED_CNF_ACL_VERIFICATION: Verified ACL on '$TmpCnf' does not grant Read access to active Windows account '$CurrentIdentity' (HasAllow=$HasReadAllow, HasDeny=$HasReadDeny)"
+        }
+      }
+
+      $ReadStream = $null
+      $StreamReader = $null
+      try {
+        $ReadStream = [System.IO.File]::Open($TmpCnf, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+        $StreamReader = New-Object System.IO.StreamReader($ReadStream, $Utf8NoBom, $false)
+        $VerifyText = $StreamReader.ReadToEnd()
+        if ([string]::IsNullOrWhiteSpace($VerifyText) -or (-not $VerifyText.Contains("[client]"))) {
+          throw "Invalid option-file header in temporary defaults file"
+        }
+      } catch {
+        $SafeReadErr = Protect-SensitiveText -InputText $_.Exception.Message
+        throw "BACKUP_FAILED_CNF_UNREADABLE: Account '$CurrentIdentity' cannot read defaults-extra-file '$TmpCnf': $SafeReadErr"
+      } finally {
+        if ($null -ne $StreamReader) {
+          $StreamReader.Dispose()
+        } elseif ($null -ne $ReadStream) {
+          $ReadStream.Dispose()
+        }
+      }
+
+      # Re-confirm file presence and non-zero size right before invoking mysqldump
+      if ((-not (Test-Path -LiteralPath $TmpCnf -PathType Leaf)) -or ((Get-Item -LiteralPath $TmpCnf -ErrorAction Stop).Length -le 0)) {
+        throw "BACKUP_FAILED_CNF_MISSING_BEFORE_DUMP: Temporary defaults-extra-file disappeared before mysqldump execution at $TmpCnf"
+      }
+
+      Write-DeployLog -Message "Verified temporary defaults-extra-file at $TmpCnf ($($CnfFileInfo.Length) bytes) readable by '$CurrentIdentity'. Running mysqldump for '$DbName' on ${DbHost}:${DbPort}..."
+
+      # MariaDB / MySQL requirement: --defaults-extra-file MUST be the first CLI argument
       $DumpRes = Invoke-NativeCli -Executable $MysqlDumpExe -Arguments @(
         "--defaults-extra-file=$TmpCnf",
         "--single-transaction",
@@ -458,11 +602,21 @@ function New-VerifiedMySqlBackup {
         $DbName
       )
       if ($DumpRes.ExitCode -ne 0) {
-        throw "BACKUP_FAILED_MYSQLDUMP_EXIT_CODE: mysqldump exited with code $($DumpRes.ExitCode): $($DumpRes.Output)"
+        $SafeDumpOut = Protect-SensitiveText -InputText $DumpRes.Output
+        throw "BACKUP_FAILED_MYSQLDUMP_EXIT_CODE: mysqldump exited with code $($DumpRes.ExitCode): $SafeDumpOut"
       }
     } finally {
-      if (Test-Path $TmpCnf) {
-        Remove-Item -Path $TmpCnf -Force -ErrorAction SilentlyContinue
+      if (-not [string]::IsNullOrWhiteSpace($TmpCnf) -and (Test-Path -LiteralPath $TmpCnf)) {
+        Remove-Item -LiteralPath $TmpCnf -Force -ErrorAction SilentlyContinue
+      }
+      if (-not [string]::IsNullOrWhiteSpace($TmpCnfDir) -and (Test-Path -LiteralPath $TmpCnfDir)) {
+        Remove-Item -LiteralPath $TmpCnfDir -Recurse -Force -ErrorAction SilentlyContinue
+      }
+      if (-not [string]::IsNullOrWhiteSpace($SamAttTmpRoot) -and (Test-Path -LiteralPath $SamAttTmpRoot)) {
+        $RemainingItems = @(Get-ChildItem -LiteralPath $SamAttTmpRoot -Force -ErrorAction SilentlyContinue)
+        if ($RemainingItems.Count -eq 0) {
+          Remove-Item -LiteralPath $SamAttTmpRoot -Force -ErrorAction SilentlyContinue
+        }
       }
     }
   }

@@ -658,6 +658,87 @@ test('Safe Deployment & Database Migration Governance Suite (18 Scenarios)', asy
       assert.ok(!/^\s*git\s+reset\s+--hard/m.test(deployPs1));
       assert.ok(!/^\s*git\s+clean\s+-fd/m.test(deployPs1));
     });
+
+    // -------------------------------------------------------------------------
+    // Scenario 18: Deploy_Sam_Att.ps1 MySQL .cnf Isolation, ACL & Cleanup Guard
+    // -------------------------------------------------------------------------
+    await t.test('18. Deploy_Sam_Att.ps1 isolates temp .cnf, fixes file icacls flags, verifies read/ACL before mysqldump, masks secrets, and cleans up', async () => {
+      const deployPs1 = fs.readFileSync(path.resolve(process.cwd(), 'deployment/Deploy_Sam_Att.ps1'), 'utf8');
+
+      // Extract Set-RestrictedBackupAcl & New-VerifiedMySqlBackup bodies for precise structural assertions
+      const aclFnMatch = deployPs1.match(/function Set-RestrictedBackupAcl \{[\s\S]*?\r?\n\}\r?\n\r?\nfunction New-VerifiedMySqlBackup/);
+      assert.ok(aclFnMatch, 'Expected Set-RestrictedBackupAcl function in Deploy_Sam_Att.ps1');
+      const aclFn = aclFnMatch[0];
+
+      const backupFnMatch = deployPs1.match(/function New-VerifiedMySqlBackup \{[\s\S]*?\r?\n\}\r?\n\r?\nfunction Invoke-SafeRollback/);
+      assert.ok(backupFnMatch, 'Expected New-VerifiedMySqlBackup function in Deploy_Sam_Att.ps1');
+      const backupFn = backupFnMatch[0];
+
+      // 1 & 5. Set-RestrictedBackupAcl separates directory (OI)(CI)F vs file :F and fails fast on non-zero icacls exit code
+      assert.ok(aclFn.includes('ACL_TARGET_NOT_FOUND'));
+      assert.ok(aclFn.includes('PSIsContainer'));
+      assert.ok(aclFn.includes('SYSTEM:(OI)(CI)F'));
+      assert.ok(aclFn.includes('${CurrentUser}:(OI)(CI)F'));
+      assert.ok(aclFn.includes('SYSTEM:F'));
+      assert.ok(aclFn.includes('${CurrentUser}:F'));
+      assert.ok(aclFn.includes('Invoke-NativeCli -Executable "icacls"'));
+      assert.ok(aclFn.includes('$AclRes.ExitCode -ne 0'));
+      assert.ok(aclFn.includes('ACL_CONFIGURATION_FAILED'));
+      assert.ok(!aclFn.includes('2>$null'), 'icacls errors must never be swallowed with 2>$null');
+      assert.ok(!aclFn.includes('Warning: Failed to apply'), 'icacls failure must throw instead of logging warning');
+
+      // 2. Dedicated Sam_Att temp dir instead of $env:TEMP / [IO.Path]::GetTempPath()
+      const backupCodeOnly = backupFn
+        .split(/\r?\n/)
+        .filter((line) => !line.trim().startsWith('#'))
+        .join('\n');
+      assert.ok(!backupCodeOnly.includes('$env:TEMP'), 'Must not create .cnf inside $env:TEMP');
+      assert.ok(!backupCodeOnly.includes('$env:TMP'), 'Must not create .cnf inside $env:TMP');
+      assert.ok(!backupCodeOnly.includes('GetTempPath'), 'Must not use Windows user GetTempPath');
+      assert.ok(!backupCodeOnly.includes('sam_att_my_backup_'), 'Old $env:TEMP cnf naming must be removed');
+      assert.ok(backupCodeOnly.includes('".sam_att_tmp"'));
+      assert.ok(backupCodeOnly.includes('UTF8Encoding($false)'), 'Option file must be UTF-8 without BOM for MariaDB/PS 5.1');
+
+      // 3 & 4. Explicit ACL check, existence + non-zero size check, and active-account read verification before mysqldump
+      assert.ok(backupFn.includes('BACKUP_FAILED_CNF_MISSING'));
+      assert.ok(backupFn.includes('BACKUP_FAILED_CNF_EMPTY'));
+      assert.ok(backupFn.includes('Get-Acl -LiteralPath $TmpCnf'));
+      assert.ok(backupFn.includes('BACKUP_FAILED_CNF_ACL_VERIFICATION'));
+      assert.ok(backupFn.includes('[System.IO.File]::Open($TmpCnf'));
+      assert.ok(backupFn.includes('BACKUP_FAILED_CNF_UNREADABLE'));
+      assert.ok(backupFn.includes('BACKUP_FAILED_CNF_MISSING_BEFORE_DUMP'));
+
+      // 6. --defaults-extra-file MUST be the very first CLI argument passed to mysqldump
+      const dumpArgsMatch = backupFn.match(/Invoke-NativeCli -Executable \$MysqlDumpExe -Arguments @\(([\s\S]*?)\)/);
+      assert.ok(dumpArgsMatch, 'Expected Invoke-NativeCli call for $MysqlDumpExe');
+      const firstArgLine = dumpArgsMatch[1].trim().split(/\r?\n/)[0].trim();
+      assert.ok(
+        firstArgLine.startsWith('"--defaults-extra-file=$TmpCnf"'),
+        `First mysqldump argument must be "--defaults-extra-file=$TmpCnf", got: ${firstArgLine}`
+      );
+      assert.ok(!dumpArgsMatch[1].includes('--password'), 'DB password must never be in mysqldump CLI args');
+      assert.ok(!dumpArgsMatch[1].includes('-p$'), 'DB password must never be in mysqldump CLI args');
+
+      // 7. Password masking across registers and error output
+      assert.ok(backupFn.includes('Register-SensitiveSecret -SecretValue $DbPassword'));
+      assert.ok(backupFn.includes('Register-SensitiveSecret -SecretValue $EscapedPass'));
+      assert.ok(backupFn.includes('Protect-SensitiveText -InputText $DumpRes.Output'));
+
+      // 8. Guaranteed cleanup of .cnf and temporary directory in finally block
+      const finallyMatch = backupFn.match(/\r?\n    \} finally \{([\s\S]*?)\r?\n    \}/);
+      assert.ok(finallyMatch, 'Expected outer finally cleanup block in New-VerifiedMySqlBackup');
+      assert.ok(finallyMatch[1].includes('Remove-Item -LiteralPath $TmpCnf -Force'));
+      assert.ok(finallyMatch[1].includes('Remove-Item -LiteralPath $TmpCnfDir -Recurse -Force'));
+      assert.ok(finallyMatch[1].includes('Remove-Item -LiteralPath $SamAttTmpRoot -Force'));
+
+      // 9, 10, 13. Backup integrity, SHA256 & Migration Approval Guard remain intact
+      assert.ok(backupFn.includes('BACKUP_FAILED_SQL_DUMP_MISSING'));
+      assert.ok(backupFn.includes('BACKUP_FAILED_SQL_DUMP_EMPTY'));
+      assert.ok(backupFn.includes('BACKUP_FAILED_SQL_DUMP_CORRUPT'));
+      assert.ok(backupFn.includes('Get-FileHash -Path $SqlDumpPath -Algorithm SHA256'));
+      assert.ok(deployPs1.includes('[switch]$ApproveMigrations'));
+      assert.ok(deployPs1.includes('MIGRATION_APPROVAL_REQUIRED'));
+    });
   } finally {
     await closeServer();
     resetSqliteInstanceForTests();
