@@ -1,17 +1,17 @@
 /**
  * ============================================================================
- * โมดูลประสานงานและจำลองการทดสอบระบบ Safe One-Click Deployment (Sam_Att V2 Standalone)
+ * โมดูลประสานงานและทดสอบการอัปเดต Application-Only (Sam_Att V2 Standalone)
  * ไฟล์: deployment/deploy-runner.ts
  * ============================================================================
- * หน้าที่หลัก:
- * - ดำเนินการตรวจสอบ 7 ขั้นตอนของการ Deploy แบบปลอดภัยตามลำดับที่ถูกต้อง:
- *   1. Preflight Check (Git clean, branch, Node>=22, disk, .env REAL/mysql, IIS, Port 4101 owner, external backup dir)
- *   2. GitHub & Migration Inspection (ตรวจ commit + pending migrations + approval binding ก่อนแก้ไขระบบ)
- *   3. Pre-Update Verified Backup (สำรอง MySQL samchuk_attendance_v2 + dist/config นอก Git repo ก่อน git pull --ff-only!)
- *   4. Install Dependencies
- *   5. Typecheck / Test / Build & Approved Database Migration + Post-Migration Schema Verification
- *   6. Isolated Sam_Att Backend Update (Port 4101 เท่านั้น ห้ามกระทบ Procurement / CentralApiGateway / iisreset)
- *   7. Post-Deploy Health Check & Migration-Aware Safe Rollback
+ * มาตรฐาน Phase 0 — Application-Only 8 Steps:
+ *   1. Preflight Check (Git clean, branch, Node>=22, disk, .env REAL/mysql read-only, IIS, Port 4101 owner, external snapshot dir)
+ *   2. GitHub Version Verification (No-Update Protection: หยุดเมื่อ Commit ปัจจุบันตรงกับ Remote)
+ *   3. Change Impact Analysis & App-Only Snapshot (บล็อกทันทีเมื่อมี Pending DB Migration และสำรองเฉพาะ dist/configs นอก Git Repo ก่อน git pull)
+ *   4. Smart Dependency Strategy (ข้าม npm ci เมื่อ package-lock.json ไม่เปลี่ยน; หยุด Sam_Att ก่อนรัน npm ci เมื่อเปลี่ยน; Retry EPERM สูงสุด 3 ครั้ง)
+ *   5. Check & Build (npm run typecheck + npm run build เท่านั้น — ห้ามรัน npm test บน Production)
+ *   6. Deploy Application (Isolated Sam_Att on Port 4101 เท่านั้น ห้ามกระทบ Procurement / CentralApiGateway / iisreset)
+ *   7. Health Check (Read-Only check on https://localhost:4101/api/Sam_Att/health)
+ *   8. Deployment Report (สรุปผล + ปกปิดความลับทุกขั้นตอน)
  */
 import crypto from 'crypto';
 import fs from 'fs';
@@ -25,6 +25,8 @@ export interface DeploymentSimulationHooks {
   remoteCommit?: string;
   pendingMigrations?: string[];
   postPullPendingMigrations?: string[];
+  lockfileChanged?: boolean;
+  nodeModulesBroken?: boolean;
   nodeVersion?: string;
   npmVersion?: string;
   freeDiskMb?: number;
@@ -38,32 +40,30 @@ export interface DeploymentSimulationHooks {
   simulateGitFetchFailure?: boolean;
   simulateGitPullFailure?: boolean;
   simulateBackupFailure?: boolean;
-  simulateDbBackupFailure?: boolean;
+  simulateSnapshotFailure?: boolean;
   simulateNpmInstallFailure?: boolean;
+  simulateNpmLockError?: boolean;
   simulateTypecheckFailure?: boolean;
-  simulateUnitTestFailure?: boolean;
   simulateBuildFailure?: boolean;
-  simulateMigrationFailure?: boolean;
-  simulateSchemaVerificationFailure?: boolean;
   simulateScannerExeTamper?: boolean;
   simulateBackendStartFailure?: boolean;
+  simulateProcessStopTimeout?: boolean;
   simulateHealthApiUnreachable?: boolean;
   simulateMysqlDisconnected?: boolean;
   simulateWrongDbEngineInHealth?: string;
   simulateRollbackFailure?: boolean;
-  onExecuteMigration?: (files: string[]) => Promise<void> | void;
 }
 
 export interface DeploymentRunOptions {
   appDir: string;
   backupRootDir?: string;
+  snapshotRootDir?: string;
   branch?: string;
   remote?: string;
   port?: number;
   checkOnly?: boolean;
-  approveMigrations?: boolean;
-  approvedTargetCommit?: string;
-  approvedMigrations?: string[];
+  rollbackOnly?: boolean;
+  snapshotDirToRestore?: string;
   hooks?: DeploymentSimulationHooks;
 }
 
@@ -76,16 +76,27 @@ export interface StepOutcome {
 
 export interface DeploymentRunResult {
   exitCode: 0 | 1 | 2;
-  finalBanner: 'DEPLOYMENT SUCCESS' | 'DEPLOYMENT ABORTED' | 'DEPLOYMENT ROLLED_BACK' | 'DEPLOYMENT CRITICAL';
+  finalBanner:
+    | 'DEPLOYMENT SUCCESS'
+    | 'DEPLOYMENT NO_CHANGES'
+    | 'DEPLOYMENT ROLLED_BACK_MANUAL'
+    | 'DEPLOYMENT ABORTED'
+    | 'DEPLOYMENT ROLLED_BACK'
+    | 'DEPLOYMENT CRITICAL';
   steps: StepOutcome[];
   consoleOutput: string;
   logContent: string;
   logFilePath: string;
   backupDir: string | null;
-  backupSqlPath: string | null;
-  backupSqlSha256: string | null;
+  snapshotDir: string | null;
+  backupSqlPath: null;
+  backupSqlSha256: null;
   backupStoredOutsideRepo: boolean;
   backupCompletedBeforeGitPull: boolean;
+  noChanges: boolean;
+  npmCiSkipped: boolean;
+  stoppedSamAttBeforeNpmCi: boolean;
+  ranNpmTestInProd: boolean;
   commitBefore: string;
   commitAfter: string;
   migrationsApplied: string[];
@@ -93,7 +104,7 @@ export interface DeploymentRunResult {
   backendRestarted: boolean;
   rolledBack: boolean;
   rollbackSucceeded: boolean;
-  requiresAdminDatabaseRestore: boolean;
+  requiresAdminDatabaseRestore: false;
   procurementTouched: boolean;
   iisResetExecuted: boolean;
   foreignProcessKilled: boolean;
@@ -147,6 +158,7 @@ export function maskSecretsInText(input: string, secrets: string[]): string {
     }
   }
   out = out.replace(/(PASSWORD|SECRET|TOKEN|API_KEY)\s*=\s*([^\s;&"]+)/gi, '$1=***REDACTED***');
+  out = out.replace(/Bearer\s+[A-Za-z0-9_.\-]+/gi, 'Bearer ***REDACTED***');
   return out;
 }
 
@@ -168,20 +180,24 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
   const hooks = options.hooks || {};
 
   const logsDir = path.join(appDir, 'logs');
-  // เก็บ Backup ไว้นอก Git Repository เสมอ (ห้ามเก็บใน appDir/backups)
-  const backupsRoot = options.backupRootDir
-    ? path.resolve(options.backupRootDir)
-    : path.join(os.tmpdir(), `sam_att_external_backups_${crypto.createHash('sha1').update(appDir).digest('hex').slice(0, 8)}`);
+  const rawSnapRoot = options.snapshotRootDir || options.backupRootDir;
+  const snapshotsRoot = rawSnapRoot
+    ? path.resolve(rawSnapRoot)
+    : path.join(
+        os.tmpdir(),
+        `sam_att_deploy_snapshots_${crypto.createHash('sha1').update(appDir).digest('hex').slice(0, 8)}`
+      );
 
   fs.mkdirSync(logsDir, { recursive: true });
-  fs.mkdirSync(backupsRoot, { recursive: true });
+  fs.mkdirSync(snapshotsRoot, { recursive: true });
   try {
-    fs.chmodSync(backupsRoot, 0o700);
+    fs.chmodSync(snapshotsRoot, 0o700);
   } catch {
     // Windows ignores POSIX chmod
   }
 
-  const backupStoredOutsideRepo = !backupsRoot.startsWith(appDir + path.sep) && backupsRoot !== appDir;
+  const backupStoredOutsideRepo =
+    !snapshotsRoot.startsWith(appDir + path.sep) && snapshotsRoot !== appDir;
   const timestamp = `${new Date().toISOString().replace(/[-:T.Z]/g, '').slice(0, 15)}_${crypto.randomBytes(2).toString('hex')}`;
   const logFilePath = path.join(logsDir, `deploy_sam_att_${timestamp}.log`);
 
@@ -193,25 +209,23 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
 
   let currentStepNo = 0;
   let currentStepName = 'Initialization';
-  let commitBefore = hooks.commitBefore || '9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e';
+  const commitBefore = hooks.commitBefore || '9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e';
   let commitAfter = commitBefore;
-  let remoteCommit = hooks.remoteCommit || 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
+  const remoteCommit = hooks.remoteCommit || 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
   let gitPulled = false;
-  let backupCreated = false;
+  let snapshotCreated = false;
   let backupCompletedBeforeGitPull = false;
-  let backupDir: string | null = null;
-  let backupSqlPath: string | null = null;
-  let backupSqlSha256: string | null = null;
+  let snapshotDir: string | null = null;
   let scannerExeShaBefore = '';
   let scannerExePath = '';
-  let migrationsApplied: string[] = [];
-  let databaseMigrationAttempted = false;
-  let databaseMigrationApplied = false;
-  let schemaVerified = false;
+  let noChanges = false;
+  let npmCiSkipped = false;
+  let stoppedSamAttBeforeNpmCi = false;
+  const ranNpmTestInProd = false;
+  const schemaVerified = true;
   let backendRestarted = false;
   let rolledBack = false;
   let rollbackSucceeded = false;
-  let requiresAdminDatabaseRestore = false;
   const procurementTouched = false;
   const iisResetExecuted = false;
   const foreignProcessKilled = false;
@@ -231,23 +245,24 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
 
   const recordStep = (stepNumber: number, stepName: string, status: 'PASS' | 'FAIL' | 'SKIP', detail?: string) => {
     steps.push({ stepNumber, stepName, status, detail });
-    const padded = stepName.padEnd(22, ' ');
-    const line = `[${stepNumber}/7] ${padded} ${status}`;
+    const padded = stepName.padEnd(24, ' ');
+    const line = `[${stepNumber}/8] ${padded} ${status}`;
     printLine(line);
-    writeLog(status === 'PASS' ? 'INFO' : 'ERROR', `${line}${detail ? ` — ${detail}` : ''}`);
+    writeLog(status === 'FAIL' ? 'ERROR' : 'INFO', `${line}${detail ? ` — ${detail}` : ''}`);
   };
 
-  printLine('========================================');
-  printLine(' SAM_ATT V2 STANDALONE DEPLOYMENT');
+  printLine('================================================');
+  printLine(' SAM_ATT V2 STANDALONE DEPLOYMENT (APP-ONLY)');
   printLine(' Samchuk Hospital');
-  printLine('========================================');
+  printLine('================================================');
   printLine('');
 
-  const performSafeRollback = (reason: string): boolean => {
+  const performSafeAppRollback = (reason: string, targetSnapshotDir?: string | null): boolean => {
     rolledBack = true;
-    writeLog('WARN', `Initiating Safe Rollback (Sam_Att only) due to: ${reason}`);
+    const snapPath = targetSnapshotDir || snapshotDir;
+    writeLog('WARN', `Initiating Safe App-Only Rollback (DB & .env untouched) due to: ${reason}`);
     if (hooks.simulateRollbackFailure) {
-      writeLog('ERROR', 'CRITICAL: Rollback failed — unable to restore previous release or restart service.');
+      writeLog('ERROR', 'CRITICAL: Application rollback failed — unable to restore snapshot or restart Sam_Att.');
       return false;
     }
 
@@ -256,24 +271,23 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
         commitAfter = commitBefore;
         writeLog('INFO', `Reverted Git commit safely via git reset --keep back to ${commitBefore}`);
       }
-      if (backupCreated && backupDir && fs.existsSync(path.join(backupDir, 'dist', 'index.html'))) {
+      if (snapPath && fs.existsSync(path.join(snapPath, 'dist', 'index.html'))) {
         const targetDist = path.join(appDir, 'dist');
         fs.rmSync(targetDist, { recursive: true, force: true });
-        fs.cpSync(path.join(backupDir, 'dist'), targetDist, { recursive: true });
-        writeLog('INFO', `Restored dist/ artifact from ${backupDir}`);
+        fs.cpSync(path.join(snapPath, 'dist'), targetDist, { recursive: true });
+        writeLog('INFO', `Restored dist/ artifact from ${snapPath}`);
       }
-      if (databaseMigrationApplied || databaseMigrationAttempted) {
-        requiresAdminDatabaseRestore = true;
-        writeLog(
-          'WARN',
-          `MANUAL_DB_RESTORE_REQUIRED: ห้ามลดระดับ Schema อัตโนมัติ (No DROP/TRUNCATE) — กรุณาตรวจสอบ DB และกู้คืนจาก ${backupSqlPath || 'N/A'}`
-        );
-        return false;
+      for (const cfgFile of ['package.json', 'package-lock.json']) {
+        if (snapPath && fs.existsSync(path.join(snapPath, cfgFile))) {
+          fs.copyFileSync(path.join(snapPath, cfgFile), path.join(appDir, cfgFile));
+        }
       }
-      if (backendRestarted) {
+      writeLog('INFO', 'Production .env and MySQL samchuk_attendance_v2 remain strictly untouched.');
+      if (backendRestarted || stoppedSamAttBeforeNpmCi || options.rollbackOnly) {
+        backendRestarted = true;
         writeLog('INFO', `Restarted isolated Sam_Att process on port ${port} and verified post-rollback health.`);
       } else {
-        writeLog('INFO', `Existing Sam_Att runtime on port ${port} was never touched and remains healthy.`);
+        writeLog('INFO', `Existing Sam_Att runtime on port ${port} was never stopped and remains healthy.`);
       }
       return true;
     } catch (rbErr: unknown) {
@@ -283,9 +297,96 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
     }
   };
 
+  // Handle Manual Application-Only Rollback Mode
+  if (options.rollbackOnly) {
+    try {
+      const snapToUse = options.snapshotDirToRestore ? path.resolve(options.snapshotDirToRestore) : null;
+      if (!snapToUse || !fs.existsSync(snapToUse)) {
+        throw new Error('ROLLBACK_SNAPSHOT_NOT_FOUND: ไม่พบ Snapshot สำหรับย้อนกลับเวอร์ชัน');
+      }
+      if (!snapToUse.startsWith(snapshotsRoot + path.sep) && snapToUse !== snapshotsRoot) {
+        throw new Error('ROLLBACK_SNAPSHOT_OUTSIDE_ROOT: พาธ Snapshot อยู่นอกโฟลเดอร์ที่อนุญาต');
+      }
+      const ok = performSafeAppRollback('Manual admin rollback requested', snapToUse);
+      if (!ok) {
+        throw new Error('ROLLBACK_FAILED: ไม่สามารถย้อนกลับ Application จาก Snapshot ได้');
+      }
+      recordStep(1, 'Verify Snapshot', 'PASS');
+      recordStep(2, 'Stop Sam_Att Process', 'PASS');
+      recordStep(3, 'Restore App Snapshot', 'PASS');
+      recordStep(4, 'Start Sam_Att Process', 'PASS');
+      recordStep(5, 'Verify Health Check', 'PASS');
+      return {
+        exitCode: 0,
+        finalBanner: 'DEPLOYMENT ROLLED_BACK_MANUAL',
+        steps,
+        consoleOutput: consoleLines.join('\n'),
+        logContent: logLines.join('\n'),
+        logFilePath,
+        backupDir: snapToUse,
+        snapshotDir: snapToUse,
+        backupSqlPath: null,
+        backupSqlSha256: null,
+        backupStoredOutsideRepo,
+        backupCompletedBeforeGitPull: false,
+        noChanges: false,
+        npmCiSkipped: true,
+        stoppedSamAttBeforeNpmCi: false,
+        ranNpmTestInProd: false,
+        commitBefore,
+        commitAfter,
+        migrationsApplied: [],
+        schemaVerified: true,
+        backendRestarted: true,
+        rolledBack: true,
+        rollbackSucceeded: true,
+        requiresAdminDatabaseRestore: false,
+        procurementTouched,
+        iisResetExecuted,
+        foreignProcessKilled,
+        scannerExeModified,
+        advisories,
+      };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      recordStep(1, 'Application Rollback', 'FAIL', msg);
+      return {
+        exitCode: 2,
+        finalBanner: 'DEPLOYMENT CRITICAL',
+        steps,
+        consoleOutput: consoleLines.join('\n'),
+        logContent: logLines.join('\n'),
+        logFilePath,
+        backupDir: null,
+        snapshotDir: null,
+        backupSqlPath: null,
+        backupSqlSha256: null,
+        backupStoredOutsideRepo,
+        backupCompletedBeforeGitPull: false,
+        noChanges: false,
+        npmCiSkipped: false,
+        stoppedSamAttBeforeNpmCi: false,
+        ranNpmTestInProd: false,
+        commitBefore,
+        commitAfter,
+        migrationsApplied: [],
+        schemaVerified: false,
+        backendRestarted: false,
+        rolledBack: true,
+        rollbackSucceeded: false,
+        requiresAdminDatabaseRestore: false,
+        procurementTouched,
+        iisResetExecuted,
+        foreignProcessKilled,
+        scannerExeModified,
+        advisories,
+      };
+    }
+  }
+
   try {
     // =========================================================================
-    // [1/7] Preflight Check
+    // [1/8] Preflight Check
     // =========================================================================
     currentStepNo = 1;
     currentStepName = 'Preflight Check';
@@ -298,7 +399,7 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
 
     if (!backupStoredOutsideRepo) {
       throw new Error(
-        `PREFLIGHT_BACKUP_DIR_INSIDE_GIT: โฟลเดอร์สำรองข้อมูล (${backupsRoot}) ต้องอยู่นอก Git Repository (${appDir})`
+        `PREFLIGHT_SNAPSHOT_DIR_INSIDE_GIT: โฟลเดอร์สำรอง Application (${snapshotsRoot}) ต้องอยู่นอก Git Repository (${appDir})`
       );
     }
 
@@ -342,12 +443,12 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
 
     writeLog(
       'INFO',
-      `Loaded .env configuration for host=${envMap.SAM_ATT_DB_HOST || 'N/A'} db=${envMap.SAM_ATT_DB_NAME || 'N/A'} password=${envMap.SAM_ATT_DB_PASSWORD || ''}`
+      `Read-Only .env check for host=${envMap.SAM_ATT_DB_HOST || 'N/A'} db=${envMap.SAM_ATT_DB_NAME || 'N/A'} password=${envMap.SAM_ATT_DB_PASSWORD || ''}`
     );
 
     if (!envMap.SAM_ATT_DATA_MODE) {
       const msg =
-        'ADVISORY_DATA_MODE_DEFAULT: .env ยังไม่ได้กำหนด SAM_ATT_DATA_MODE (backend/src/config/env.ts ใช้ค่าเริ่มต้น REAL เมื่อ SAM_ATT_DB_ENGINE=mysql แนะนำให้เพิ่ม SAM_ATT_DATA_MODE=REAL ใน .env)';
+        'ADVISORY_DATA_MODE_DEFAULT: .env ยังไม่ได้กำหนด SAM_ATT_DATA_MODE (ใช้ค่าเริ่มต้น REAL เมื่อ SAM_ATT_DB_ENGINE=mysql)';
       advisories.push(msg);
       writeLog('WARN', msg);
     } else if (envMap.SAM_ATT_DATA_MODE.toUpperCase() !== 'REAL') {
@@ -411,10 +512,10 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
     recordStep(1, 'Preflight Check', 'PASS');
 
     // =========================================================================
-    // [2/7] GitHub & Migration Inspection (READ-ONLY GATE)
+    // [2/8] GitHub Version Verification (Read-Only + No-Update Protection)
     // =========================================================================
     currentStepNo = 2;
-    currentStepName = 'GitHub Update';
+    currentStepName = 'GitHub Verification';
 
     if (hooks.simulateGitFetchFailure) {
       throw new Error(`GIT_FETCH_FAILED: ไม่สามารถเชื่อมต่อ GitHub (${remote}/${branch}) ได้`);
@@ -423,47 +524,37 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
     writeLog('INFO', `Commit Before Update: ${commitBefore}`);
     writeLog('INFO', `Latest Remote Commit (${remote}/${branch}): ${remoteCommit}`);
 
-    const pendingMigrations = normalizeMigrationFileList(hooks.pendingMigrations || []);
-    if (pendingMigrations.length > 0) {
-      if (!options.approveMigrations) {
-        throw new Error(
-          `MIGRATION_APPROVAL_REQUIRED: ตรวจพบไฟล์ Database Migration ที่ต้องรัน (${pendingMigrations.join(', ')}) ห้ามรัน Migration อัตโนมัติ กรุณาตรวจสอบและอนุมัติก่อนดำเนินการ`
-        );
-      }
-      if (options.approvedTargetCommit && options.approvedTargetCommit !== remoteCommit) {
-        throw new Error(
-          `MIGRATION_APPROVAL_MISMATCH: Commit ที่อนุมัติ (${options.approvedTargetCommit}) ไม่ตรงกับ Target Commit ปัจจุบัน (${remoteCommit})`
-        );
-      }
-      if (options.approvedMigrations) {
-        const normalizedApproved = normalizeMigrationFileList(options.approvedMigrations);
-        if (normalizedApproved.join(',') !== pendingMigrations.join(',')) {
-          throw new Error(
-            `MIGRATION_APPROVAL_MISMATCH: รายการ Migration ที่อนุมัติ (${normalizedApproved.join(', ')}) ไม่ตรงกับรายการที่ตรวจพบ (${pendingMigrations.join(', ')})`
-          );
-        }
-      }
-      writeLog('INFO', `Verified ADMIN approval for migrations (${pendingMigrations.join(', ')}) on commit ${remoteCommit}`);
-    }
-
-    if (options.checkOnly) {
-      recordStep(2, 'GitHub Update', 'PASS', 'Check-Only mode verified');
+    if (commitBefore === remoteCommit) {
+      noChanges = true;
+      recordStep(2, 'GitHub Verification', 'PASS', 'NO_CHANGES: เป็นเวอร์ชันล่าสุดแล้ว');
+      recordStep(3, 'Change Impact & Snapshot', 'SKIP', 'No new commits on remote');
+      recordStep(4, 'Install Dependencies', 'SKIP', 'No new commits on remote');
+      recordStep(5, 'Check & Build', 'SKIP', 'No new commits on remote');
+      recordStep(6, 'Deploy Application', 'SKIP', 'No new commits on remote');
+      recordStep(7, 'Health Check', 'SKIP', 'No new commits on remote');
+      recordStep(8, 'Deployment Report', 'PASS', 'NO_CHANGES');
+      printLine('NO_CHANGES — ระบบเป็นเวอร์ชันล่าสุดแล้ว (ข้ามขั้นตอนที่ 3-7)');
       return {
         exitCode: 0,
-        finalBanner: 'DEPLOYMENT SUCCESS',
+        finalBanner: 'DEPLOYMENT NO_CHANGES',
         steps,
         consoleOutput: consoleLines.join('\n'),
         logContent: logLines.join('\n'),
         logFilePath,
         backupDir: null,
+        snapshotDir: null,
         backupSqlPath: null,
         backupSqlSha256: null,
         backupStoredOutsideRepo,
         backupCompletedBeforeGitPull: false,
+        noChanges: true,
+        npmCiSkipped: true,
+        stoppedSamAttBeforeNpmCi: false,
+        ranNpmTestInProd: false,
         commitBefore,
         commitAfter,
         migrationsApplied: [],
-        schemaVerified: false,
+        schemaVerified: true,
         backendRestarted: false,
         rolledBack: false,
         rollbackSucceeded: false,
@@ -476,108 +567,164 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
       };
     }
 
-    recordStep(2, 'GitHub Update', 'PASS');
+    recordStep(2, 'GitHub Verification', 'PASS');
 
     // =========================================================================
-    // [3/7] Pre-Update Backup (OUTSIDE GIT REPO, BEFORE git pull!) & Git Pull
+    // [3/8] Change Impact Analysis, DB Schema Block & App-Only Snapshot
     // =========================================================================
     currentStepNo = 3;
-    currentStepName = 'Backup';
+    currentStepName = 'Change Impact & Snapshot';
 
-    if (hooks.simulateBackupFailure || hooks.simulateDbBackupFailure) {
+    const pendingMigrations = normalizeMigrationFileList(hooks.pendingMigrations || []);
+    if (pendingMigrations.length > 0) {
       throw new Error(
-        'BACKUP_FAILED: ไม่สามารถสำรองฐานข้อมูล MySQL samchuk_attendance_v2 หรือไฟล์ระบบก่อน git pull ได้ (ยกเลิกการอัปเดตทันที)'
+        `DB_SCHEMA_CHANGE_BLOCKED: เวอร์ชันนี้ต้องมีการปรับปรุงโครงสร้างฐานข้อมูล (${pendingMigrations.join(', ')}) กรุณาติดต่อผู้ดูแลระบบก่อนอัปเดต`
       );
     }
 
-    backupDir = path.join(backupsRoot, `deploy_backup_${timestamp}`);
-    fs.mkdirSync(backupDir, { recursive: true });
+    if (options.checkOnly) {
+      recordStep(3, 'Change Impact & Snapshot', 'PASS', 'Check-Only mode verified (App-Only safe)');
+      return {
+        exitCode: 0,
+        finalBanner: 'DEPLOYMENT SUCCESS',
+        steps,
+        consoleOutput: consoleLines.join('\n'),
+        logContent: logLines.join('\n'),
+        logFilePath,
+        backupDir: null,
+        snapshotDir: null,
+        backupSqlPath: null,
+        backupSqlSha256: null,
+        backupStoredOutsideRepo,
+        backupCompletedBeforeGitPull: false,
+        noChanges: false,
+        npmCiSkipped: false,
+        stoppedSamAttBeforeNpmCi: false,
+        ranNpmTestInProd: false,
+        commitBefore,
+        commitAfter,
+        migrationsApplied: [],
+        schemaVerified: true,
+        backendRestarted: false,
+        rolledBack: false,
+        rollbackSucceeded: false,
+        requiresAdminDatabaseRestore: false,
+        procurementTouched,
+        iisResetExecuted,
+        foreignProcessKilled,
+        scannerExeModified,
+        advisories,
+      };
+    }
+
+    if (hooks.simulateBackupFailure || hooks.simulateSnapshotFailure) {
+      throw new Error(
+        'SNAPSHOT_FAILED: ไม่สามารถสร้าง App Snapshot นอก Git Repository ก่อน git pull ได้ (ยกเลิกการอัปเดตทันที)'
+      );
+    }
+
+    snapshotDir = path.join(snapshotsRoot, `app_snapshot_${timestamp}`);
+    fs.mkdirSync(snapshotDir, { recursive: true });
     try {
-      fs.chmodSync(backupDir, 0o700);
+      fs.chmodSync(snapshotDir, 0o700);
     } catch {
       // ignore on Windows
     }
 
-    // 3.1 Verified MySQL dump file BEFORE git pull
-    const dbName = envMap.SAM_ATT_DB_NAME || 'samchuk_attendance_v2';
-    backupSqlPath = path.join(backupDir, `${dbName}_${timestamp}.sql`);
-    const sqlDumpBody = [
-      `-- MySQL dump — Sam_Att V2 Standalone Pre-Update Verified Backup`,
-      `-- Database: ${dbName} | CommitBefore: ${commitBefore}`,
-      `CREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR(32) NOT NULL PRIMARY KEY, filename VARCHAR(255) NOT NULL, checksum VARCHAR(128) NOT NULL);`,
-      `-- Dump completed on ${new Date().toISOString()}`,
-      '',
-    ].join('\n');
-    fs.writeFileSync(backupSqlPath, sqlDumpBody, { encoding: 'utf8', mode: 0o600 });
-    backupSqlSha256 = crypto.createHash('sha256').update(sqlDumpBody, 'utf8').digest('hex');
-    fs.writeFileSync(`${backupSqlPath}.sha256`, backupSqlSha256, { encoding: 'utf8', mode: 0o600 });
-
-    // 3.2 Snapshot dist/ & config files BEFORE git pull
+    // Snapshot ONLY application build artifacts & lockfiles (ZERO SQL dump, ZERO .env copy)
     const distDir = path.join(appDir, 'dist');
     if (fs.existsSync(distDir)) {
-      fs.cpSync(distDir, path.join(backupDir, 'dist'), { recursive: true });
+      fs.cpSync(distDir, path.join(snapshotDir, 'dist'), { recursive: true });
     }
     for (const cfgFile of ['package.json', 'package-lock.json', 'tsconfig.json']) {
       const src = path.join(appDir, cfgFile);
       if (fs.existsSync(src)) {
-        fs.copyFileSync(src, path.join(backupDir, cfgFile));
+        fs.copyFileSync(src, path.join(snapshotDir, cfgFile));
       }
     }
 
+    const dbName = envMap.SAM_ATT_DB_NAME || 'samchuk_attendance_v2';
     const manifestObj = {
       serviceName: 'Sam_Att V2 Standalone',
-      backupTimestamp: timestamp,
+      snapshotMode: 'APPLICATION_ONLY',
+      snapshotTimestamp: timestamp,
       commitBefore,
       targetCommit: remoteCommit,
       databaseName: dbName,
-      sqlDumpFileName: path.basename(backupSqlPath),
-      sqlDumpSha256: backupSqlSha256,
+      databaseTouched: false,
+      envTouched: false,
       scannerExeShaBefore,
       backupStoredOutsideRepo,
     };
     const manifestJson = JSON.stringify(manifestObj, null, 2);
-    const manifestPath = path.join(backupDir, 'backup-manifest.json');
+    const manifestPath = path.join(snapshotDir, 'snapshot-manifest.json');
     fs.writeFileSync(manifestPath, manifestJson, { encoding: 'utf8', mode: 0o600 });
     const manifestSha = crypto.createHash('sha256').update(manifestJson, 'utf8').digest('hex');
     fs.writeFileSync(`${manifestPath}.sha256`, manifestSha, { encoding: 'utf8', mode: 0o600 });
 
-    backupCreated = true;
+    snapshotCreated = true;
     backupCompletedBeforeGitPull = !gitPulled;
-    writeLog('INFO', `Verified pre-update DB & release backup at ${backupDir} (SQL SHA256=${backupSqlSha256})`);
+    writeLog('INFO', `Created verified App-Only snapshot at ${snapshotDir} (ZERO DB dump, ZERO .env copy)`);
 
-    // 3.3 Execute git pull --ff-only ONLY AFTER backup is verified
+    // Execute git pull --ff-only ONLY AFTER snapshot is verified
     if (hooks.simulateGitPullFailure) {
       throw new Error(`GIT_PULL_FAILED: คำสั่ง git pull --ff-only ${remote} ${branch} ล้มเหลว`);
     }
 
     commitAfter = remoteCommit;
     gitPulled = true;
-    writeLog('INFO', `Updated Git commit after verified backup: ${commitBefore} -> ${commitAfter}`);
-    recordStep(3, 'Backup', 'PASS');
+    writeLog('INFO', `Updated Git commit after App Snapshot: ${commitBefore} -> ${commitAfter}`);
+    recordStep(3, 'Change Impact & Snapshot', 'PASS');
+
+    // Re-check post-pull pending migrations (guard against unexpected schema SQL changes)
+    const postPullMigrations = normalizeMigrationFileList(hooks.postPullPendingMigrations || []);
+    if (postPullMigrations.length > 0) {
+      throw new Error(
+        `DB_SCHEMA_CHANGE_BLOCKED: พบไฟล์ปรับโครงสร้างฐานข้อมูลหลังดึงโค้ด (${postPullMigrations.join(', ')}) กรุณาติดต่อผู้ดูแลระบบก่อนอัปเดต`
+      );
+    }
 
     // =========================================================================
-    // [4/7] Install Dependencies
+    // [4/8] Install Dependencies (Smart Lockfile Strategy)
     // =========================================================================
     currentStepNo = 4;
     currentStepName = 'Install Dependencies';
 
-    if (hooks.simulateNpmInstallFailure) {
-      throw new Error('NPM_INSTALL_FAILED: การติดตั้ง Dependencies จาก package-lock.json ล้มเหลว');
+    const shouldRunNpmCi =
+      Boolean(hooks.lockfileChanged) ||
+      Boolean(hooks.nodeModulesBroken) ||
+      Boolean(hooks.simulateNpmInstallFailure) ||
+      Boolean(hooks.simulateNpmLockError);
+
+    if (!shouldRunNpmCi) {
+      npmCiSkipped = true;
+      writeLog('INFO', 'SKIPPED_LOCKFILE_UNCHANGED: package-lock.json & package.json ไม่เปลี่ยนแปลง — ข้าม npm ci');
+      recordStep(4, 'Install Dependencies', 'SKIP', 'SKIPPED_LOCKFILE_UNCHANGED');
+    } else {
+      // Must stop verified Sam_Att process FIRST to prevent Windows EPERM file locks
+      if (hooks.simulateProcessStopTimeout) {
+        throw new Error('PROCESS_STOP_TIMEOUT: ไม่สามารถหยุดโปรเซส Sam_Att บนพอร์ต 4101 ก่อนรัน npm ci ได้');
+      }
+      stoppedSamAttBeforeNpmCi = true;
+      writeLog('INFO', 'Stopped verified Sam_Att process on Port 4101 before npm ci (EPERM protection)');
+
+      if (hooks.simulateNpmLockError) {
+        throw new Error('NPM_CI_LOCK_ERROR: พบไฟล์ .node / lightningcss ถูกล็อก (EPERM) หลังลองซ้ำสูงสุด 3 ครั้ง');
+      }
+      if (hooks.simulateNpmInstallFailure) {
+        throw new Error('NPM_INSTALL_FAILED: คำสั่ง npm ci --no-audit --no-fund ล้มเหลว');
+      }
+      recordStep(4, 'Install Dependencies', 'PASS', 'npm ci completed cleanly');
     }
 
-    recordStep(4, 'Install Dependencies', 'PASS');
-
     // =========================================================================
-    // [5/7] Typecheck/Test/Build & Approved Database Migration
+    // [5/8] Check & Build (Typecheck + Build ONLY; NO npm test on Production)
     // =========================================================================
     currentStepNo = 5;
-    currentStepName = 'Typecheck/Test/Build';
+    currentStepName = 'Check & Build';
 
     if (hooks.simulateTypecheckFailure) {
-      throw new Error('TYPECHECK_FAILED: ตรวจสอบชนิดข้อมูล TypeScript (tsc --noEmit) ไม่ผ่าน');
-    }
-    if (hooks.simulateUnitTestFailure) {
-      throw new Error('UNIT_TESTS_FAILED: ชุดทดสอบอัตโนมัติ (npm test) ไม่ผ่าน');
+      throw new Error('TYPECHECK_FAILED: ตรวจสอบชนิดข้อมูล TypeScript (npm run typecheck) ไม่ผ่าน');
     }
     if (hooks.simulateBuildFailure) {
       throw new Error('BUILD_FAILED: การคอมไพล์ Frontend (npm run build) ล้มเหลว หรือไม่พบไฟล์ dist/index.html');
@@ -605,51 +752,13 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
       }
     }
 
-    // 5.4 Re-verify approved migrations post-pull and execute
-    const postPullMigrations = normalizeMigrationFileList(
-      hooks.postPullPendingMigrations ?? pendingMigrations
-    );
-    if (postPullMigrations.length > 0) {
-      if (!options.approveMigrations) {
-        throw new Error(
-          `MIGRATION_APPROVAL_REQUIRED: ตรวจพบไฟล์ Migration หลังดึงโค้ด (${postPullMigrations.join(', ')}) โดยยังไม่ได้รับอนุมัติ`
-        );
-      }
-      if (
-        options.approvedMigrations &&
-        normalizeMigrationFileList(options.approvedMigrations).join(',') !== postPullMigrations.join(',')
-      ) {
-        throw new Error(
-          `MIGRATION_APPROVAL_MISMATCH: ไฟล์ Migration หลัง git pull (${postPullMigrations.join(', ')}) ไม่ตรงกับที่ ADMIN อนุมัติ`
-        );
-      }
-
-      databaseMigrationAttempted = true;
-      if (hooks.simulateMigrationFailure) {
-        throw new Error('MIGRATION_EXECUTION_FAILED: การรัน Database Migration ล้มเหลวกลางคัน (หยุดทันทีและไม่ Restart Backend)');
-      }
-      if (hooks.onExecuteMigration) {
-        await hooks.onExecuteMigration(postPullMigrations);
-      }
-      databaseMigrationApplied = true;
-      migrationsApplied = [...postPullMigrations];
-
-      if (hooks.simulateSchemaVerificationFailure) {
-        throw new Error('POST_MIGRATION_SCHEMA_VERIFICATION_FAILED: โครงสร้างตาราง/คอลัมน์หลัง Migration ไม่ตรงตามที่กำหนด');
-      }
-      schemaVerified = true;
-      writeLog('INFO', `Executed & verified database migrations: ${migrationsApplied.join(', ')}`);
-    } else {
-      schemaVerified = true;
-    }
-
-    recordStep(5, 'Typecheck/Test/Build', 'PASS');
+    recordStep(5, 'Check & Build', 'PASS', 'typecheck + build passed (Production skips npm test)');
 
     // =========================================================================
-    // [6/7] IIS / Backend Update (Isolated to Sam_Att on Port 4101 only)
+    // [6/8] Deploy Application (Isolated Sam_Att on Port 4101 only)
     // =========================================================================
     currentStepNo = 6;
-    currentStepName = 'IIS / Backend Update';
+    currentStepName = 'Deploy Application';
 
     if (hooks.simulateBackendStartFailure) {
       throw new Error(`BACKEND_START_FAILED: โปรเซส Sam_Att Backend ไม่สามารถเริ่มทำงานได้บนพอร์ต ${port}`);
@@ -658,12 +767,12 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
     backendRestarted = true;
     writeLog(
       'INFO',
-      `Updated Frontend & restarted isolated Sam_Att backend on HTTPS port ${port} (Routing=${hooks.iisRoutingMode || 'STANDALONE_DIRECT_4101'}, Manager=${hooks.processManager || 'STANDALONE_NODE_TSX'})`
+      `Started isolated Sam_Att backend on HTTPS port ${port} (Routing=${hooks.iisRoutingMode || 'STANDALONE_DIRECT_4101'}, Manager=${hooks.processManager || 'STANDALONE_NODE_TSX'})`
     );
-    recordStep(6, 'IIS / Backend Update', 'PASS');
+    recordStep(6, 'Deploy Application', 'PASS');
 
     // =========================================================================
-    // [7/7] Health Check & Functional Smoke Verification
+    // [7/8] Health Check (Read-Only Check)
     // =========================================================================
     currentStepNo = 7;
     currentStepName = 'Health Check';
@@ -682,16 +791,23 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
 
     recordStep(7, 'Health Check', 'PASS');
 
+    // =========================================================================
+    // [8/8] Deployment Report
+    // =========================================================================
+    currentStepNo = 8;
+    currentStepName = 'Deployment Report';
+    recordStep(8, 'Deployment Report', 'PASS');
+
     printLine('');
     printLine('----------------------------------------');
     printLine('Frontend HTTPS : 200 OK');
     printLine('Backend API    : 200 OK');
-    printLine('MySQL          : CONNECTED');
+    printLine('MySQL          : CONNECTED (READ-ONLY CHECK)');
     printLine(`Database       : ${dbName}`);
     printLine(`Port           : ${port}`);
-    printLine(`BackupDir      : ${backupDir}`);
-    printLine(`BackupSql      : ${backupSqlPath}`);
-    printLine(`Migrations     : ${migrationsApplied.length > 0 ? migrationsApplied.join(', ') : 'NONE'}`);
+    printLine(`SnapshotDir    : ${snapshotDir}`);
+    printLine(`NpmCiAction    : ${npmCiSkipped ? 'SKIPPED_LOCKFILE_UNCHANGED' : 'EXECUTED'}`);
+    printLine(`Migrations     : NOT_MANAGED_BY_UPDATER`);
     printLine('----------------------------------------');
     printLine('');
     printLine('DEPLOYMENT SUCCESS');
@@ -705,15 +821,20 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
       consoleOutput: consoleLines.join('\n'),
       logContent: logLines.join('\n'),
       logFilePath,
-      backupDir,
-      backupSqlPath,
-      backupSqlSha256,
+      backupDir: snapshotDir,
+      snapshotDir,
+      backupSqlPath: null,
+      backupSqlSha256: null,
       backupStoredOutsideRepo,
       backupCompletedBeforeGitPull,
+      noChanges: false,
+      npmCiSkipped,
+      stoppedSamAttBeforeNpmCi,
+      ranNpmTestInProd: false,
       commitBefore,
       commitAfter,
-      migrationsApplied,
-      schemaVerified,
+      migrationsApplied: [],
+      schemaVerified: true,
       backendRestarted,
       rolledBack: false,
       rollbackSucceeded: false,
@@ -728,17 +849,17 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
     const rawMsg = err instanceof Error ? err.message : String(err);
     const safeMsg = maskSecretsInText(rawMsg, secretsToMask);
 
-    if (currentStepNo >= 1 && currentStepNo <= 7) {
+    if (currentStepNo >= 1 && currentStepNo <= 8) {
       recordStep(currentStepNo, currentStepName, 'FAIL', safeMsg);
     }
     printLine('');
     printLine(`ERROR [${currentStepName}]: ${safeMsg}`);
 
-    if (currentStepNo >= 4 || gitPulled || databaseMigrationAttempted) {
-      rollbackSucceeded = performSafeRollback(safeMsg);
+    if (currentStepNo >= 4 || gitPulled || stoppedSamAttBeforeNpmCi) {
+      rollbackSucceeded = performSafeAppRollback(safeMsg);
       if (rollbackSucceeded) {
         printLine('');
-        printLine('DEPLOYMENT FAILED — ROLLED BACK SAFELY TO PREVIOUS VERSION');
+        printLine('DEPLOYMENT FAILED — ROLLED BACK SAFELY TO PREVIOUS APPLICATION SNAPSHOT');
         return {
           exitCode: 1,
           finalBanner: 'DEPLOYMENT ROLLED_BACK',
@@ -746,15 +867,20 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
           consoleOutput: consoleLines.join('\n'),
           logContent: logLines.join('\n'),
           logFilePath,
-          backupDir,
-          backupSqlPath,
-          backupSqlSha256,
+          backupDir: snapshotDir,
+          snapshotDir,
+          backupSqlPath: null,
+          backupSqlSha256: null,
           backupStoredOutsideRepo,
           backupCompletedBeforeGitPull,
+          noChanges,
+          npmCiSkipped,
+          stoppedSamAttBeforeNpmCi,
+          ranNpmTestInProd: false,
           commitBefore,
           commitAfter,
-          migrationsApplied,
-          schemaVerified,
+          migrationsApplied: [],
+          schemaVerified: true,
           backendRestarted,
           rolledBack: true,
           rollbackSucceeded: true,
@@ -767,11 +893,7 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
         };
       } else {
         printLine('');
-        printLine(
-          requiresAdminDatabaseRestore
-            ? 'DEPLOYMENT CRITICAL — ROLLBACK FAILED (CODE REVERTED; ADMIN DATABASE RESTORE REQUIRED)'
-            : 'DEPLOYMENT CRITICAL — ROLLBACK FAILED (MANUAL INTERVENTION REQUIRED)'
-        );
+        printLine('DEPLOYMENT CRITICAL — ROLLBACK FAILED (MANUAL INTERVENTION REQUIRED)');
         return {
           exitCode: 2,
           finalBanner: 'DEPLOYMENT CRITICAL',
@@ -779,19 +901,24 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
           consoleOutput: consoleLines.join('\n'),
           logContent: logLines.join('\n'),
           logFilePath,
-          backupDir,
-          backupSqlPath,
-          backupSqlSha256,
+          backupDir: snapshotDir,
+          snapshotDir,
+          backupSqlPath: null,
+          backupSqlSha256: null,
           backupStoredOutsideRepo,
           backupCompletedBeforeGitPull,
+          noChanges,
+          npmCiSkipped,
+          stoppedSamAttBeforeNpmCi,
+          ranNpmTestInProd: false,
           commitBefore,
           commitAfter,
-          migrationsApplied,
-          schemaVerified,
+          migrationsApplied: [],
+          schemaVerified: false,
           backendRestarted,
           rolledBack: true,
           rollbackSucceeded: false,
-          requiresAdminDatabaseRestore,
+          requiresAdminDatabaseRestore: false,
           procurementTouched,
           iisResetExecuted,
           foreignProcessKilled,
@@ -810,16 +937,21 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
       consoleOutput: consoleLines.join('\n'),
       logContent: logLines.join('\n'),
       logFilePath,
-      backupDir,
-      backupSqlPath,
-      backupSqlSha256,
+      backupDir: snapshotDir,
+      snapshotDir,
+      backupSqlPath: null,
+      backupSqlSha256: null,
       backupStoredOutsideRepo,
       backupCompletedBeforeGitPull,
+      noChanges,
+      npmCiSkipped,
+      stoppedSamAttBeforeNpmCi,
+      ranNpmTestInProd: false,
       commitBefore,
       commitAfter,
-      migrationsApplied,
-      schemaVerified,
-      backendRestarted,
+      migrationsApplied: [],
+      schemaVerified: true,
+      backendRestarted: false,
       rolledBack: false,
       rollbackSucceeded: false,
       requiresAdminDatabaseRestore: false,
@@ -831,4 +963,3 @@ export async function runOneClickDeployment(options: DeploymentRunOptions): Prom
     };
   }
 }
-

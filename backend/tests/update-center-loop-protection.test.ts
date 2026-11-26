@@ -832,12 +832,12 @@ test('Update Center Loop Protection & GitHub Rate Limit Guard (18 Scenarios)', a
       }
     });
 
-    // Scenarios 17 & 18: Safe Deployment Workflow & Migration Approval Protection
-    await t.test('Backend 17 & 18: Preserves Safe Deployment workflow and strict Migration Approval Protection', async () => {
+    // Scenarios 17 & 18: Application-Only Safe Deployment Workflow & DB Schema Hard Block
+    await t.test('Backend 17 & 18: Preserves Safe Deployment workflow, NO_UPDATE_AVAILABLE block, and strict DB_SCHEMA_CHANGE_BLOCKED', async () => {
       const oldSha = '1111222233334444555566667777888899990001';
       const newSha = 'ffff222233334444555566667777888899990002';
 
-      // Scenario 18: Pending migration must block deployment until approved with valid ADMIN password & matching commit/files
+      // Scenario 18: Pending migration must ALWAYS hard-block web deployment (even if approveMigrations is passed!)
       setDeploymentGitInspectorForTests(async () => ({
         available: true,
         branch: 'main',
@@ -849,7 +849,7 @@ test('Update Center Loop Protection & GitHub Rate Limit Guard (18 Scenarios)', a
 
       setDeployBatRunnerForTests(async (scriptPath) => ({
         exitCode: 0,
-        stdout: '[8/8] Service Health Verification ........ PASS',
+        stdout: '[8/8] Deployment Report ........ PASS',
         stderr: '',
         scriptPath,
         durationMs: 42,
@@ -862,9 +862,9 @@ test('Update Center Loop Protection & GitHub Rate Limit Guard (18 Scenarios)', a
           body: { confirmRun: true },
         });
         assert.equal(blocked.status, 409);
-        assert.equal(blocked.data.error, 'MIGRATION_APPROVAL_REQUIRED');
+        assert.equal(blocked.data.error, 'DB_SCHEMA_CHANGE_BLOCKED');
 
-        const mismatch = await apiCall('/api/Sam_Att/deployment/run-bat', {
+        const blockedEvenWithApprove = await apiCall('/api/Sam_Att/deployment/run-bat', {
           method: 'POST',
           token: adminToken,
           body: {
@@ -872,14 +872,31 @@ test('Update Center Loop Protection & GitHub Rate Limit Guard (18 Scenarios)', a
             approveMigrations: true,
             impactAcknowledged: true,
             confirmPassword: 'Admin@SamAtt2026',
-            approvedTargetCommit: oldSha,
+            approvedTargetCommit: newSha,
             approvedMigrationFiles: ['004_pending_guard_test.sql'],
           },
         });
-        assert.equal(mismatch.status, 409);
-        assert.equal(mismatch.data.error, 'MIGRATION_APPROVAL_MISMATCH');
+        assert.equal(blockedEvenWithApprove.status, 409);
+        assert.equal(blockedEvenWithApprove.data.error, 'DB_SCHEMA_CHANGE_BLOCKED');
 
-        // Scenario 17: Clean update (no pending migration) executes safe deployment runner cleanly
+        // No-Update Protection: up-to-date commit returns 409 NO_UPDATE_AVAILABLE
+        setDeploymentGitInspectorForTests(async () => ({
+          available: true,
+          branch: 'main',
+          currentCommit: oldSha,
+          targetCommit: oldSha,
+          hasUpdates: false,
+          gitMigrationFiles: [],
+        }));
+        const upToDateBlock = await apiCall('/api/Sam_Att/deployment/run-bat', {
+          method: 'POST',
+          token: adminToken,
+          body: { confirmRun: true },
+        });
+        assert.equal(upToDateBlock.status, 409);
+        assert.equal(upToDateBlock.data.error, 'NO_UPDATE_AVAILABLE');
+
+        // Scenario 17: Clean update (no pending migration & new commit) executes safe deployment runner cleanly
         setDeploymentGitInspectorForTests(async () => ({
           available: true,
           branch: 'main',

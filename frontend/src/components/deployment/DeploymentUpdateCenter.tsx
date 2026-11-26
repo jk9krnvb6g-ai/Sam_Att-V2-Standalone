@@ -1,15 +1,19 @@
 /**
  * ============================================================================
- * ศูนย์อัปเดตระบบจาก GitHub และจัดการ Database Migration อย่างปลอดภัย
- * (GitHub Update Center & Safe Deployment Control)
+ * ศูนย์อัปเดตระบบจาก GitHub (Application-Only Safe Update & Rollback Center)
  * ไฟล์: frontend/src/components/deployment/DeploymentUpdateCenter.tsx
  * ============================================================================
- * 5 ส่วนหลักตามสถาปัตยกรรม HIS โรงพยาบาลสามชุก:
+ * สถาปัตยกรรม HIS โรงพยาบาลสามชุก (Application-Only 8 Steps):
  * A. สถานะเวอร์ชัน (Installed vs Latest GitHub, Commit SHA, เวลาที่ตรวจสอบล่าสุด)
  * B. รายละเอียดการเปลี่ยนแปลง (Thai Changelog 6 หมวดหมู่จากแหล่งข้อมูลจริง)
- * C. ตรวจสอบความพร้อมก่อนอัปเดต (Readiness Gate Checklist 7 ข้อ)
- * D. ดำเนินการอัปเดต + Migration Approval Modal + วิเคราะห์ข้อผิดพลาด + แนวทาง Rollback
+ * C. ตรวจสอบความพร้อมก่อนอัปเดต (Readiness Gate Checklist + DB Schema Block)
+ * D. ดำเนินการอัปเดต 8 ขั้นตอน (Detached Survival Polling + Log Viewer + App Rollback)
  * E. ประวัติการอัปเดตและ Log ที่ปกปิดข้อมูลความลับ
+ *
+ * นโยบายความปลอดภัย:
+ * - ไม่อนุญาตให้แก้ไข .env หรือจัดการฐานข้อมูล/Migration ผ่านตัวอัปเดตหน้าเว็บ
+ * - หากพบ Pending DB Migration ระบบจะระงับการอัปเดตทันทีและแจ้งให้ติดต่อผู้ดูแลระบบก่อน
+ * - ระหว่าง Sam_Att รีสตาร์ทพอร์ต 4101 UI จะรอเชื่อมต่อใหม่อัตโนมัติโดยไม่แจ้งเตือนผิดพลาด
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -18,6 +22,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  Copy,
   Database,
   ExternalLink,
   Eye,
@@ -32,6 +37,7 @@ import {
   PanelRightOpen,
   RefreshCw,
   Rocket,
+  RotateCcw,
   ShieldAlert,
   ShieldCheck,
   Terminal,
@@ -48,8 +54,6 @@ import {
   NotificationBanner,
   PageHeader,
   ProgressDialog,
-  RequiredMark,
-  SharedModal,
   SlideOverDrawer,
   StatusBadge,
   TableEmptyState,
@@ -128,6 +132,49 @@ interface DeploymentFailureDiagnostic {
   rollbackStatusThai: string;
 }
 
+interface PersistentDeployStep {
+  stepNumber: number;
+  stepName: string;
+  stepLabelThai: string;
+  status: 'PENDING' | 'RUNNING' | 'PASS' | 'FAIL' | 'SKIP';
+  detail?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+}
+
+interface PersistentDeployJob {
+  jobId: string;
+  jobType: 'APP_UPDATE' | 'APP_ROLLBACK';
+  status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'ROLLED_BACK' | 'NO_CHANGES';
+  actorUsername: string;
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+  currentStepNumber: number;
+  currentStepName: string;
+  currentStepLabelThai: string;
+  progressPercent: number;
+  commitBefore?: string | null;
+  commitAfter?: string | null;
+  targetCommit?: string | null;
+  snapshotDir?: string | null;
+  rollbackSnapshotDir?: string | null;
+  npmCiAction?: 'SKIPPED_LOCKFILE_UNCHANGED' | 'EXECUTED' | 'NOT_REACHED' | null;
+  rolledBack?: boolean;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  logTail?: string[];
+  steps: PersistentDeployStep[];
+}
+
+interface AppSnapshotInfo {
+  snapshotName: string;
+  snapshotDir: string;
+  createdAt: string;
+  commitBefore: string | null;
+  targetCommit: string | null;
+}
+
 const CHANGELOG_CATEGORY_META: Array<{
   key: ChangelogCategoryKey;
   label: string;
@@ -139,6 +186,17 @@ const CHANGELOG_CATEGORY_META: Array<{
   { key: 'security', label: 'การเปลี่ยนแปลงด้านความปลอดภัย', tone: 'warning' },
   { key: 'database', label: 'การเปลี่ยนแปลงฐานข้อมูล', tone: 'warning' },
   { key: 'breaking', label: 'การเปลี่ยนแปลงที่อาจกระทบการใช้งาน', tone: 'danger' },
+];
+
+const DEFAULT_8_STEPS_DISPLAY: PersistentDeployStep[] = [
+  { stepNumber: 1, stepName: 'Preflight Check', stepLabelThai: '1. ตรวจสอบความพร้อมก่อนอัปเดต (Preflight Check)', status: 'PENDING' },
+  { stepNumber: 2, stepName: 'GitHub Verification', stepLabelThai: '2. ตรวจสอบเวอร์ชันล่าสุดจาก GitHub', status: 'PENDING' },
+  { stepNumber: 3, stepName: 'Impact & App Snapshot', stepLabelThai: '3. ตรวจผลกระทบ DB และสำรอง App Snapshot', status: 'PENDING' },
+  { stepNumber: 4, stepName: 'Install Dependencies', stepLabelThai: '4. ตรวจสอบ Lockfile และติดตั้ง Dependencies', status: 'PENDING' },
+  { stepNumber: 5, stepName: 'Check & Build', stepLabelThai: '5. ตรวจสอบ TypeScript และ Build แอปพลิเคชัน', status: 'PENDING' },
+  { stepNumber: 6, stepName: 'Deploy Application', stepLabelThai: '6. อัปเดตและเริ่มระบบ Sam_Att ใหม่ (Port 4101)', status: 'PENDING' },
+  { stepNumber: 7, stepName: 'Health Check', stepLabelThai: '7. ตรวจสอบสถานะการทำงานหลังอัปเดต', status: 'PENDING' },
+  { stepNumber: 8, stepName: 'Final Report', stepLabelThai: '8. สรุปผลการอัปเดตระบบ', status: 'PENDING' },
 ];
 
 function getStatusBadgeProps(status: string | undefined): {
@@ -160,6 +218,24 @@ function getStatusBadgeProps(status: string | undefined): {
       return { tone: 'danger', label: 'ไม่สามารถเชื่อมต่อ GitHub ได้' };
     default:
       return { tone: 'neutral', label: 'รอตรวจสอบเวอร์ชัน' };
+  }
+}
+
+function getStepStatusLabelThai(status: PersistentDeployStep['status']): {
+  label: string;
+  tone: 'neutral' | 'info' | 'success' | 'danger' | 'warning';
+} {
+  switch (status) {
+    case 'RUNNING':
+      return { label: 'กำลังดำเนินการ', tone: 'info' };
+    case 'PASS':
+      return { label: 'สำเร็จ', tone: 'success' };
+    case 'FAIL':
+      return { label: 'ไม่สำเร็จ', tone: 'danger' };
+    case 'SKIP':
+      return { label: 'ข้าม', tone: 'neutral' };
+    default:
+      return { label: 'รอดำเนินการ', tone: 'neutral' };
   }
 }
 
@@ -193,20 +269,22 @@ export function DeploymentUpdateCenter({
     breaking: true,
   });
 
-  // Deployment execution & diagnostic state
+  // Deployment execution & detached polling state
   const [deployRunning, setDeployRunning] = useState(false);
   const [deployResult, setDeployResult] = useState<any>(null);
+  const [activeJob, setActiveJob] = useState<PersistentDeployJob | null>(null);
+  const [reconnectingRestart, setReconnectingRestart] = useState(false);
   const [deployConfirmOpen, setDeployConfirmOpen] = useState(false);
   const [deployProgressOpen, setDeployProgressOpen] = useState(false);
   const [deployProgressStatus, setDeployProgressStatus] = useState<'RUNNING' | 'SUCCESS' | 'FAILED'>('RUNNING');
   const [deployProgressStep, setDeployProgressStep] = useState('');
+  const [deployProgressPercent, setDeployProgressPercent] = useState<number | null>(null);
   const [deployProgressError, setDeployProgressError] = useState<string | null>(null);
 
-  // Migration Approval Modal State (Commit/File Binding + ADMIN Password Re-auth)
-  const [migrationModalOpen, setMigrationModalOpen] = useState(false);
-  const [migrationImpactChecked, setMigrationImpactChecked] = useState(false);
-  const [migrationAdminPassword, setMigrationAdminPassword] = useState('');
-  const [migrationModalError, setMigrationModalError] = useState<string | null>(null);
+  // Application-Only Manual Rollback state
+  const [rollbackConfirmOpen, setRollbackConfirmOpen] = useState(false);
+  const [selectedSnapshotDir, setSelectedSnapshotDir] = useState<string>('');
+  const [rollbackRunning, setRollbackRunning] = useState(false);
 
   // GitHub Token configuration state (Admin-only .env persistence)
   const [tokenPanelOpen, setTokenPanelOpen] = useState(false);
@@ -230,13 +308,27 @@ export function DeploymentUpdateCenter({
   const inFlightForceRef = useRef(false);
   const requestSeqRef = useRef(0);
 
+  // Detached progress polling refs (with clean unmount cancellation)
+  const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollControllerRef = useRef<AbortController | null>(null);
+  const pollingJobIdRef = useRef<string | null>(null);
+
+  const stopJobPolling = useCallback(() => {
+    if (pollTimeoutRef.current !== null) {
+      clearTimeout(pollTimeoutRef.current);
+      pollTimeoutRef.current = null;
+    }
+    pollControllerRef.current?.abort();
+    pollControllerRef.current = null;
+    pollingJobIdRef.current = null;
+  }, []);
+
   const runVersionCheck = useCallback(
     async (opts: { force: boolean; showToastOnResult: boolean; isInitial: boolean }) => {
       if (inFlightCheckRef.current) {
         if (!opts.force || inFlightForceRef.current) {
           return inFlightCheckRef.current;
         }
-        // Manual force check supersedes an older non-forced initial load
         activeControllerRef.current?.abort();
       }
 
@@ -283,6 +375,27 @@ export function DeploymentUpdateCenter({
           }
 
           setDeployStatus(statusRes);
+          if (statusRes?.availableSnapshots?.length > 0 && !selectedSnapshotDir) {
+            setSelectedSnapshotDir(statusRes.availableSnapshots[0].snapshotDir || '');
+          }
+
+          const runningDiskJob: PersistentDeployJob | null =
+            statusRes?.activeJob &&
+            (statusRes.activeJob.status === 'PENDING' || statusRes.activeJob.status === 'RUNNING')
+              ? statusRes.activeJob
+              : null;
+
+          if (runningDiskJob) {
+            setActiveJob(runningDiskJob);
+            setDeployRunning(true);
+            setDeployProgressOpen(true);
+            setDeployProgressStatus('RUNNING');
+            setDeployProgressStep(runningDiskJob.currentStepLabelThai || 'กำลังอัปเดต Application...');
+            setDeployProgressPercent(runningDiskJob.progressPercent ?? null);
+          } else if (statusRes?.latestJob && !activeJob) {
+            setActiveJob(statusRes.latestJob);
+          }
+
           if (checkRes) {
             setCheckResult(checkRes);
             if (checkRes.readiness) {
@@ -321,8 +434,8 @@ export function DeploymentUpdateCenter({
             } else if (checkRes.pendingMigrations?.length > 0) {
               showToast({
                 type: 'warning',
-                title: `พบ Database Migration ${checkRes.pendingMigrations.length} ไฟล์`,
-                message: 'กรุณาตรวจสอบรายละเอียดและอนุมัติด้วยรหัสผ่านผู้ดูแลระบบก่อนอัปเดต',
+                title: 'เวอร์ชันนี้มีการปรับปรุงโครงสร้างฐานข้อมูล',
+                message: 'เวอร์ชันนี้ต้องมีการปรับปรุงโครงสร้างฐานข้อมูล กรุณาติดต่อผู้ดูแลระบบก่อนอัปเดต',
               });
             } else if (checkRes.hasUpdates) {
               showToast({
@@ -375,6 +488,176 @@ export function DeploymentUpdateCenter({
     [showToast]
   );
 
+  const startDetachedJobPolling = useCallback(
+    (jobId: string, isRollback = false) => {
+      if (!jobId || !mountedRef.current) return;
+      if (pollingJobIdRef.current === jobId) return;
+
+      stopJobPolling();
+      pollingJobIdRef.current = jobId;
+      let reconnectAttempts = 0;
+
+      const pollOnce = async () => {
+        if (!mountedRef.current || pollingJobIdRef.current !== jobId) return;
+        const controller = new AbortController();
+        pollControllerRef.current = controller;
+
+        try {
+          const progressRes = await apiRequest<any>(
+            `/deployment/progress?jobId=${encodeURIComponent(jobId)}`,
+            { signal: controller.signal }
+          );
+          if (!mountedRef.current || controller.signal.aborted || pollingJobIdRef.current !== jobId) {
+            return;
+          }
+
+          // Backend reachable — clear reconnection banner
+          reconnectAttempts = 0;
+          setReconnectingRestart(false);
+
+          const job: PersistentDeployJob | null = progressRes?.job || null;
+          if (job) {
+            setActiveJob(job);
+            setDeployProgressStep(
+              job.currentStepLabelThai ||
+                (isRollback ? 'กำลังย้อนกลับ Application...' : 'กำลังอัปเดต Application...')
+            );
+            setDeployProgressPercent(typeof job.progressPercent === 'number' ? job.progressPercent : null);
+
+            if (job.status === 'PENDING' || job.status === 'RUNNING') {
+              pollTimeoutRef.current = setTimeout(() => {
+                void pollOnce();
+              }, 2000);
+              return;
+            }
+
+            // Terminal job state reached!
+            stopJobPolling();
+            setDeployRunning(false);
+            setRollbackRunning(false);
+
+            if (job.status === 'SUCCESS' || job.status === 'NO_CHANGES') {
+              const successMsg =
+                job.status === 'NO_CHANGES'
+                  ? 'เป็นเวอร์ชันล่าสุดแล้ว (ไม่มีการเปลี่ยนแปลงเพิ่มเติม)'
+                  : isRollback
+                    ? 'ย้อนกลับ Application ไปยังเวอร์ชันก่อนหน้าสำเร็จแล้ว (ไม่แตะต้องฐานข้อมูล)'
+                    : 'อัปเดต Application และตรวจสอบ Health Check สำเร็จเรียบร้อยแล้ว';
+              setDeployProgressStatus('SUCCESS');
+              setDeployProgressPercent(100);
+              setDeployProgressStep(successMsg);
+              setDeployResult({
+                status: job.status,
+                exitCode: 0,
+                backupDir: job.snapshotDir || job.rollbackSnapshotDir || null,
+                output: (job.logTail || []).join('\n'),
+                message: successMsg,
+              });
+              setNotice(successMsg);
+              showToast({
+                type: 'success',
+                title: isRollback ? 'ย้อนกลับ Application สำเร็จ' : 'อัปเดตระบบสำเร็จ',
+                message: successMsg,
+              });
+              await runVersionCheck({ force: false, showToastOnResult: false, isInitial: false });
+              return;
+            }
+
+            // FAILED or ROLLED_BACK
+            const failMsg =
+              job.errorMessage ||
+              (job.rolledBack
+                ? 'การอัปเดตล้มเหลว แต่ระบบย้อนกลับ Application รุ่นเดิมอัตโนมัติแล้ว (ฐานข้อมูลไม่ถูกกระทบ)'
+                : 'การดำเนินการไม่สำเร็จ กรุณาตรวจสอบ Log');
+            setDeployProgressStatus('FAILED');
+            setDeployProgressStep(
+              job.rolledBack
+                ? 'ไม่สำเร็จ — ย้อนกลับ Application รุ่นเดิมอัตโนมัติแล้ว'
+                : `ไม่สำเร็จที่ขั้นตอน: ${job.currentStepName}`
+            );
+            setDeployProgressError(failMsg);
+            setDeployResult({
+              status: job.status,
+              exitCode: 1,
+              error: job.errorCode || 'DEPLOYMENT_FAILED',
+              backupDir: job.snapshotDir || null,
+              output: (job.logTail || []).join('\n'),
+              message: failMsg,
+            });
+            setError({ code: job.errorCode || 'DEPLOYMENT_FAILED', message: failMsg });
+            showToast({
+              type: 'error',
+              title: job.rolledBack ? 'อัปเดตไม่สำเร็จ (ย้อนกลับ Application แล้ว)' : 'อัปเดตระบบไม่สำเร็จ',
+              message: failMsg,
+            });
+            await runVersionCheck({ force: false, showToastOnResult: false, isInitial: false });
+            return;
+          }
+
+          // Fallback if job object wasn't returned yet
+          if (progressRes?.inProgress) {
+            pollTimeoutRef.current = setTimeout(() => {
+              void pollOnce();
+            }, 2000);
+          } else {
+            stopJobPolling();
+            setDeployRunning(false);
+            setRollbackRunning(false);
+          }
+        } catch (err) {
+          if (!mountedRef.current || controller.signal.aborted || pollingJobIdRef.current !== jobId) {
+            return;
+          }
+          // Transient network/502/503/504 during Sam_Att service restart -> keep waiting calmly!
+          const isTransientRestartErr =
+            !(err instanceof ApiClientError) ||
+            err.status === 0 ||
+            err.status === 502 ||
+            err.status === 503 ||
+            err.status === 504;
+
+          if (isTransientRestartErr && reconnectAttempts < 90) {
+            reconnectAttempts++;
+            setReconnectingRestart(true);
+            setDeployProgressStatus('RUNNING');
+            setDeployProgressStep('กำลังเริ่มต้นระบบเวอร์ชันใหม่ กรุณารอสักครู่');
+            pollTimeoutRef.current = setTimeout(() => {
+              void pollOnce();
+            }, 2000);
+            return;
+          }
+
+          stopJobPolling();
+          setReconnectingRestart(false);
+          setDeployRunning(false);
+          setRollbackRunning(false);
+          const msg =
+            err instanceof ApiClientError
+              ? err.message
+              : 'ขาดการเชื่อมต่อกับเซิร์ฟเวอร์เกินกำหนด กรุณาตรวจสอบสถานะบริการ Sam_Att';
+          setDeployProgressStatus('FAILED');
+          setDeployProgressError(msg);
+          setError({ message: msg });
+        }
+      };
+
+      void pollOnce();
+    },
+    [runVersionCheck, showToast, stopJobPolling]
+  );
+
+  // Resume polling automatically ONLY if backend explicitly reported an active PENDING/RUNNING job
+  useEffect(() => {
+    const diskJob = deployStatus?.activeJob as PersistentDeployJob | null | undefined;
+    if (
+      diskJob?.jobId &&
+      (diskJob.status === 'PENDING' || diskJob.status === 'RUNNING') &&
+      pollingJobIdRef.current !== diskJob.jobId
+    ) {
+      startDetachedJobPolling(diskJob.jobId, diskJob.jobType === 'APP_ROLLBACK');
+    }
+  }, [deployStatus?.activeJob, startDetachedJobPolling]);
+
   const loadInitialData = useCallback(async () => {
     return runVersionCheck({ force: false, showToastOnResult: false, isInitial: true });
   }, [runVersionCheck]);
@@ -388,8 +671,9 @@ export function DeploymentUpdateCenter({
       activeControllerRef.current = null;
       inFlightCheckRef.current = null;
       inFlightForceRef.current = false;
+      stopJobPolling();
     };
-  }, [loadInitialData]);
+  }, [loadInitialData, stopJobPolling]);
 
   async function handleRecheckVersion() {
     await runVersionCheck({ force: true, showToastOnResult: true, isInitial: false });
@@ -511,23 +795,15 @@ export function DeploymentUpdateCenter({
     }
   }
 
-  async function executeSafeDeployment(payload: {
-    approveMigrations?: boolean;
-    approvedTargetCommit?: string;
-    approvedMigrationFiles?: string[];
-    impactAcknowledged?: boolean;
-    confirmPassword?: string;
-  }) {
+  async function executeSafeDeployment() {
     setDeployRunning(true);
     setDeployConfirmOpen(false);
     setDeployProgressOpen(true);
     setDeployProgressStatus('RUNNING');
+    setDeployProgressPercent(5);
     setDeployProgressError(null);
-    setDeployProgressStep(
-      payload.approveMigrations
-        ? 'กำลังยืนยันการอนุมัติ Migration, สำรองฐานข้อมูล MySQL นอก Git Repo และเริ่มอัปเดตระบบ...'
-        : 'กำลังตรวจสอบความพร้อม, สำรองฐานข้อมูล MySQL นอก Git Repo และรันสคริปต์อัปเดต...'
-    );
+    setReconnectingRestart(false);
+    setDeployProgressStep('กำลังเริ่มต้นการอัปเดต Application 8 ขั้นตอน (ไม่แตะต้องฐานข้อมูลและ .env)...');
     setError(null);
     setNotice(null);
 
@@ -536,112 +812,157 @@ export function DeploymentUpdateCenter({
         method: 'POST',
         body: JSON.stringify({
           confirmRun: true,
-          ...payload,
         }),
       });
-      setMigrationModalOpen(false);
-      setMigrationAdminPassword('');
-      setMigrationImpactChecked(false);
+
+      if (res.job) {
+        setActiveJob(res.job);
+      }
+
+      // Detached Windows execution (HTTP 202) -> survive Sam_Att restart via polling!
+      if (res.detached || res.status === 'RUNNING') {
+        const jobId = res.jobId || res.job?.jobId;
+        if (jobId) {
+          startDetachedJobPolling(jobId, false);
+          return;
+        }
+      }
+
+      // Synchronous completion (e.g. test double or instant finish)
       setDeployResult(res);
       setDeployProgressStatus('SUCCESS');
-      setDeployProgressStep(res.message || 'อัปเดตระบบและตรวจสอบ Health Check สำเร็จ');
+      setDeployProgressPercent(100);
+      setDeployProgressStep(res.message || 'อัปเดต Application และตรวจสอบ Health Check สำเร็จ');
       setNotice(
-        `${res.message || 'อัปเดตระบบสำเร็จ'}${res.backupDir ? ` · Backup: ${res.backupDir}` : ''}`
+        `${res.message || 'อัปเดต Application สำเร็จ'}${res.snapshotDir || res.backupDir ? ` · Snapshot: ${res.snapshotDir || res.backupDir}` : ''}`
       );
       showToast({
         type: 'success',
-        title: 'อัปเดตระบบสำเร็จ',
-        message: 'สำรองข้อมูล อัปเดตซอร์สโค้ด และตรวจสอบ Health Check เรียบร้อยแล้ว',
+        title: 'อัปเดต Application สำเร็จ',
+        message: 'สำรอง Snapshot อัปเดตซอร์สโค้ด และตรวจสอบ Health Check เรียบร้อยแล้ว',
       });
+      setDeployRunning(false);
       await loadInitialData();
     } catch (err) {
+      setDeployRunning(false);
       if (err instanceof ApiClientError) {
         const body = err.data as any;
-        if (err.code === 'MIGRATION_APPROVAL_REQUIRED') {
-          setDeployProgressOpen(false);
-          setMigrationModalOpen(true);
-          setMigrationModalError(null);
-          showToast({
-            type: 'warning',
-            title: 'ต้องอนุมัติ Database Migration',
-            message: 'กรุณาตรวจสอบรายการและยืนยันด้วยรหัสผ่านผู้ดูแลระบบ',
-          });
-        } else if (
-          err.code === 'INVALID_CONFIRM_PASSWORD' ||
-          err.code === 'CONFIRM_PASSWORD_REQUIRED' ||
-          err.code === 'IMPACT_ACK_REQUIRED' ||
-          err.code === 'REAUTH_RATE_LIMITED' ||
-          err.code === 'MIGRATION_APPROVAL_MISMATCH'
-        ) {
-          setDeployProgressOpen(false);
-          setMigrationModalOpen(true);
-          setMigrationModalError(err.message);
-          showToast({ type: 'error', title: 'การอนุมัติไม่ผ่าน', message: err.message });
-        } else {
-          setDeployResult({
-            status: 'FAILED',
-            error: err.code,
-            exitCode: body?.exitCode ?? 1,
-            diagnostic: body?.diagnostic || null,
-            output: body?.output || '',
-            errorOutput: body?.errorOutput || '',
-            backupDir: body?.backupDir || null,
-            backupSqlPath: body?.backupSqlPath || null,
-            requiresAdminDatabaseRestore: Boolean(body?.requiresAdminDatabaseRestore),
-            message: err.message,
-          });
-          setDeployProgressStatus('FAILED');
-          setDeployProgressStep(
-            body?.diagnostic?.failedStepName
-              ? `ล้มเหลวที่ขั้นตอน ${body.diagnostic.failedStepName} (${body.diagnostic.errorCode})`
-              : 'การอัปเดตระบบไม่สำเร็จ'
-          );
-          setDeployProgressError(err.message);
-          setError({ code: err.code, message: err.message });
-          showToast({ type: 'error', title: 'อัปเดตระบบไม่สำเร็จ', message: err.message });
-          await loadInitialData();
+        if (body?.job) {
+          setActiveJob(body.job);
         }
+        setDeployResult({
+          status: 'FAILED',
+          error: err.code,
+          exitCode: body?.exitCode ?? 1,
+          diagnostic: body?.diagnostic || null,
+          output: body?.output || '',
+          errorOutput: body?.errorOutput || '',
+          backupDir: body?.snapshotDir || body?.backupDir || null,
+          message: err.message,
+        });
+        setDeployProgressStatus('FAILED');
+        setDeployProgressStep(
+          body?.diagnostic?.failedStepName
+            ? `ล้มเหลวที่ขั้นตอน ${body.diagnostic.failedStepName} (${body.diagnostic.errorCode})`
+            : 'การอัปเดตระบบไม่สำเร็จ'
+        );
+        setDeployProgressError(err.message);
+        setError({ code: err.code, message: err.message });
+        showToast({ type: 'error', title: 'อัปเดตระบบไม่สำเร็จ', message: err.message });
+        await loadInitialData();
       } else {
         setDeployProgressStatus('FAILED');
         setDeployProgressStep('การอัปเดตระบบไม่สำเร็จ');
         setDeployProgressError('เกิดข้อผิดพลาดขณะเชื่อมต่อเซิร์ฟเวอร์อัปเดต');
         setError({ message: 'เกิดข้อผิดพลาดขณะสั่งอัปเดตระบบ' });
       }
-    } finally {
+    }
+  }
+
+  async function executeAppRollback() {
+    setRollbackRunning(true);
+    setDeployRunning(true);
+    setRollbackConfirmOpen(false);
+    setDeployProgressOpen(true);
+    setDeployProgressStatus('RUNNING');
+    setDeployProgressPercent(10);
+    setDeployProgressError(null);
+    setReconnectingRestart(false);
+    setDeployProgressStep('กำลังเริ่มต้นการย้อนกลับ Application (ไม่แตะต้องฐานข้อมูล MySQL และ .env)...');
+    setError(null);
+    setNotice(null);
+
+    try {
+      const res = await apiRequest<any>('/deployment/rollback-app', {
+        method: 'POST',
+        body: JSON.stringify({
+          confirmRollback: true,
+          snapshotDir: selectedSnapshotDir || undefined,
+        }),
+      });
+
+      if (res.job) {
+        setActiveJob(res.job);
+      }
+
+      if (res.detached || res.status === 'RUNNING') {
+        const jobId = res.jobId || res.job?.jobId;
+        if (jobId) {
+          startDetachedJobPolling(jobId, true);
+          return;
+        }
+      }
+
+      setDeployResult(res);
+      setDeployProgressStatus('SUCCESS');
+      setDeployProgressPercent(100);
+      setDeployProgressStep(res.message || 'ย้อนกลับ Application สำเร็จแล้ว');
+      setNotice(res.message || 'ย้อนกลับ Application ไปยังเวอร์ชันก่อนหน้าสำเร็จแล้ว (ไม่แตะต้องฐานข้อมูล)');
+      showToast({
+        type: 'success',
+        title: 'ย้อนกลับ Application สำเร็จ',
+        message: 'กู้คืน dist/ และซอร์สโค้ดพร้อมตรวจ Health Check เรียบร้อยแล้ว',
+      });
+      setRollbackRunning(false);
       setDeployRunning(false);
+      await loadInitialData();
+    } catch (err) {
+      setRollbackRunning(false);
+      setDeployRunning(false);
+      if (err instanceof ApiClientError) {
+        setDeployProgressStatus('FAILED');
+        setDeployProgressStep('การย้อนกลับ Application ไม่สำเร็จ');
+        setDeployProgressError(err.message);
+        setError({ code: err.code, message: err.message });
+        showToast({ type: 'error', title: 'ย้อนกลับ Application ไม่สำเร็จ', message: err.message });
+      } else {
+        setDeployProgressStatus('FAILED');
+        setDeployProgressError('เกิดข้อผิดพลาดขณะสั่งย้อนกลับ Application');
+        setError({ message: 'เกิดข้อผิดพลาดขณะสั่งย้อนกลับ Application' });
+      }
+    }
+  }
+
+  async function handleCopyLogs(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast({
+        type: 'success',
+        title: 'คัดลอก Log แล้ว',
+        message: 'คัดลอกบันทึกการทำงาน (ที่ปกปิดรหัสผ่านแล้ว) ลงคลิปบอร์ดเรียบร้อย',
+      });
+    } catch {
+      showToast({
+        type: 'warning',
+        title: 'ไม่สามารถคัดลอกอัตโนมัติได้',
+        message: 'กรุณาเลือกข้อความ Log เพื่อคัดลอกด้วยตนเอง',
+      });
     }
   }
 
   function handleClickUpdateButton() {
     if (!canRunUpdate) return;
-    if (pendingMigrations.length > 0) {
-      setMigrationModalError(null);
-      setMigrationAdminPassword('');
-      setMigrationImpactChecked(false);
-      setMigrationModalOpen(true);
-    } else {
-      setDeployConfirmOpen(true);
-    }
-  }
-
-  async function handleConfirmMigrationApproval(e: React.FormEvent) {
-    e.preventDefault();
-    setMigrationModalError(null);
-    if (!migrationImpactChecked) {
-      setMigrationModalError('กรุณาทำเครื่องหมายรับทราบผลกระทบต่อฐานข้อมูลก่อนอนุมัติ');
-      return;
-    }
-    if (!migrationAdminPassword.trim()) {
-      setMigrationModalError('กรุณากรอกรหัสผ่านบัญชีผู้ดูแลระบบ (ADMIN) เพื่อยืนยันตัวตน');
-      return;
-    }
-    await executeSafeDeployment({
-      approveMigrations: true,
-      approvedTargetCommit: targetCommitSha,
-      approvedMigrationFiles: pendingMigrations,
-      impactAcknowledged: true,
-      confirmPassword: migrationAdminPassword,
-    });
+    setDeployConfirmOpen(true);
   }
 
   const repository = checkResult?.repository || deployStatus?.repository || 'jk9krnvb6g-ai/Sam_Att-V2-Standalone';
@@ -660,7 +981,26 @@ export function DeploymentUpdateCenter({
   const pendingMigrationDetails: any[] = checkResult?.pendingMigrationDetails || [];
   const checksumMismatches: any[] = checkResult?.checksumMismatches || [];
   const hasChecksumMismatch = checksumMismatches.length > 0;
+  const hasDbSchemaBlock = pendingMigrations.length > 0 || hasChecksumMismatch;
   const historyRows: any[] = deployStatus?.history || [];
+  const availableSnapshots: AppSnapshotInfo[] = deployStatus?.availableSnapshots || [];
+  const rollbackAvailable = Boolean(deployStatus?.rollbackAvailable && availableSnapshots.length > 0);
+  const snapshotRoot =
+    checkResult?.backupPolicy?.defaultBackupRoot ||
+    deployStatus?.snapshotRootPolicy ||
+    'C:\\SamAttDeploySnapshots';
+
+  const isAlreadyUpToDate =
+    updateStatus === 'UP_TO_DATE' ||
+    Boolean(
+      checkResult &&
+        checkResult.githubReachable === true &&
+        !checkResult.hasUpdates &&
+        !hasDbSchemaBlock &&
+        currentCommitSha !== 'unknown' &&
+        targetCommitSha !== 'unknown' &&
+        currentCommitSha === targetCommitSha
+    );
 
   const blockingReasons = useMemo(() => {
     if (!readiness) return [];
@@ -669,7 +1009,8 @@ export function DeploymentUpdateCenter({
 
   const canRunUpdate =
     Boolean(readiness?.canDeploy) &&
-    !hasChecksumMismatch &&
+    !isAlreadyUpToDate &&
+    !hasDbSchemaBlock &&
     !deployRunning &&
     !Boolean(deployStatus?.inProgress);
 
@@ -682,12 +1023,33 @@ export function DeploymentUpdateCenter({
     checkResult?.tokenMaskedHint ?? deployStatus?.tokenMaskedHint ?? null;
   const rateLimit = checkResult?.rateLimit || null;
 
+  const displayedSteps: PersistentDeployStep[] =
+    activeJob?.steps && activeJob.steps.length > 0 ? activeJob.steps : DEFAULT_8_STEPS_DISPLAY;
+
+  const displayedLogText = useMemo(() => {
+    if (activeJob?.logTail && activeJob.logTail.length > 0) {
+      return activeJob.logTail.join('\n');
+    }
+    if (deployResult && (deployResult.output || deployResult.errorOutput)) {
+      return [deployResult.output, deployResult.errorOutput].filter(Boolean).join('\n--- STDERR ---\n');
+    }
+    return '';
+  }, [activeJob?.logTail, deployResult]);
+
+  const primaryUpdateButtonLabel = deployRunning
+    ? 'กำลังอัปเดตระบบ...'
+    : isAlreadyUpToDate
+      ? 'เป็นเวอร์ชันล่าสุดแล้ว'
+      : hasDbSchemaBlock
+        ? 'ต้องปรับปรุง DB ก่อนอัปเดต'
+        : 'อัปเดตระบบ';
+
   return (
     <div className="space-y-6">
       <PageHeader
         category="ระบบและผู้ดูแล"
         title="ศูนย์อัปเดตระบบ (GitHub Update Center)"
-        subtitle="ตรวจสอบเวอร์ชันและรายละเอียดการเปลี่ยนแปลงจาก GitHub ตรวจความพร้อมก่อนอัปเดต อนุมัติ Database Migration และดูประวัติการอัปเดต"
+        subtitle="อัปเดต Application จาก GitHub ผ่านหน้าเว็บแบบ 8 ขั้นตอน (ไม่แตะต้องฐานข้อมูล MySQL หรือ .env พร้อม Snapshot และ App Rollback)"
         actions={
           <>
             <PageHelpAction guideKey="deployment" userRole={userRole} onNavigate={onNavigate} />
@@ -708,24 +1070,22 @@ export function DeploymentUpdateCenter({
               disabled={!canRunUpdate}
               onClick={handleClickUpdateButton}
               title={
-                !canRunUpdate && blockingReasons.length > 0
-                  ? `ยังไม่พร้อมอัปเดต: ${blockingReasons[0].label}`
-                  : 'เริ่มขั้นตอนอัปเดตระบบอย่างปลอดภัย'
+                isAlreadyUpToDate
+                  ? 'ระบบเป็นเวอร์ชันล่าสุดแล้ว'
+                  : hasDbSchemaBlock
+                    ? 'เวอร์ชันนี้ต้องมีการปรับปรุงโครงสร้างฐานข้อมูล กรุณาติดต่อผู้ดูแลระบบก่อนอัปเดต'
+                    : !canRunUpdate && blockingReasons.length > 0
+                      ? `ยังไม่พร้อมอัปเดต: ${blockingReasons[0].label}`
+                      : 'เริ่มขั้นตอนอัปเดต Application 8 ขั้นตอน'
               }
               className="ent-btn-primary"
             >
-              {pendingMigrations.length > 0 ? (
+              {hasDbSchemaBlock ? (
                 <Lock className="w-4 h-4" aria-hidden="true" />
               ) : (
                 <Rocket className="w-4 h-4" aria-hidden="true" />
               )}
-              <span>
-                {deployRunning
-                  ? 'กำลังอัปเดตระบบ...'
-                  : pendingMigrations.length > 0
-                    ? `อนุมัติ Migration (${pendingMigrations.length}) และอัปเดต`
-                    : 'อัปเดตระบบ'}
-              </span>
+              <span>{primaryUpdateButtonLabel}</span>
             </button>
           </>
         }
@@ -733,6 +1093,22 @@ export function DeploymentUpdateCenter({
 
       <ErrorBanner error={error} onRetry={handleRecheckVersion} />
       <NotificationBanner message={notice} onClose={() => setNotice(null)} />
+
+      {/* Calm Reconnection Banner while Sam_Att restarts on Port 4101 */}
+      {reconnectingRestart && (
+        <div
+          role="status"
+          className="p-4 rounded-xl bg-[#F1ECFA] border border-[#C7B8E8] text-[#4E3978] flex items-center gap-3"
+        >
+          <Loader2 className="w-5 h-5 animate-spin shrink-0 text-[#8066B5]" aria-hidden="true" />
+          <div>
+            <div className="font-bold text-[14px]">กำลังเริ่มต้นระบบเวอร์ชันใหม่ กรุณารอสักครู่</div>
+            <div className="text-[12.5px] text-[#5B556B]">
+              สคริปต์อัปเดตกำลังรีสตาร์ทเฉพาะบริการ Sam_Att บนพอร์ต 4101 — หน้าจอนี้จะเชื่อมต่อและสรุปผลอัตโนมัติทันทีที่บริการพร้อม
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ===================================================================
           ส่วน A: สถานะเวอร์ชัน (Version Status & GitHub Token / Cache)
@@ -821,7 +1197,7 @@ export function DeploymentUpdateCenter({
           </button>
         </div>
 
-        {/* GitHub Unreachable Explicit Alert with Distinct Cause, Rate-Limit Cooldown & Stale Fallback Notice */}
+        {/* GitHub Unreachable Explicit Alert */}
         {checkResult && checkResult.githubReachable === false && (
           <div
             role="alert"
@@ -863,7 +1239,7 @@ export function DeploymentUpdateCenter({
           </div>
         )}
 
-        {/* Admin UI Form to Save / Update / Clear GITHUB_TOKEN directly into Server .env */}
+        {/* Admin UI Form to Save / Update / Clear GITHUB_TOKEN */}
         {tokenPanelOpen && (
           <form
             onSubmit={handleSaveGitHubToken}
@@ -997,7 +1373,7 @@ export function DeploymentUpdateCenter({
               subtext:
                 checkResult?.commitsBehind > 0
                   ? `ตามหลัง GitHub ${checkResult.commitsBehind} Commit`
-                  : checkResult?.status === 'UP_TO_DATE'
+                  : isAlreadyUpToDate
                     ? 'ตรงกับ GitHub Branch ล่าสุด'
                     : checkResult?.statusLabelThai || '—',
               tone:
@@ -1008,21 +1384,17 @@ export function DeploymentUpdateCenter({
                     : 'success',
             },
             {
-              label: 'สถานะ Database Migration',
+              label: 'นโยบายฐานข้อมูล (Application-Only)',
               value: hasChecksumMismatch
                 ? 'Checksum ไม่ตรงกัน'
                 : pendingMigrations.length > 0
-                  ? `รออนุมัติ ${pendingMigrations.length} ไฟล์`
-                  : `พร้อมใช้งาน (${checkResult?.appliedMigrations?.length ?? 0} รุ่น)`,
+                  ? `พบ Migration ใหม่ (${pendingMigrations.length} ไฟล์)`
+                  : `ไม่แตะต้องฐานข้อมูล`,
               subtext:
                 pendingMigrations.length > 0
-                  ? 'ต้องอนุมัติด้วยรหัสผ่าน ADMIN ก่อนรัน'
-                  : 'สำรอง MySQL นอก Git Repo ก่อนอัปเดตเสมอ',
-              tone: hasChecksumMismatch
-                ? 'danger'
-                : pendingMigrations.length > 0
-                  ? 'warning'
-                  : 'success',
+                  ? 'ระงับการอัปเดตหน้าเว็บ — กรุณาติดต่อผู้ดูแลระบบ'
+                  : 'MySQL และ .env ไม่ถูกแก้ไขระหว่างอัปเดต',
+              tone: hasChecksumMismatch || pendingMigrations.length > 0 ? 'danger' : 'success',
             },
           ]}
         />
@@ -1038,7 +1410,7 @@ export function DeploymentUpdateCenter({
               2. รายละเอียดการเปลี่ยนแปลง (Changelog ภาษาไทย)
             </h2>
             <p className="text-[13px] text-[#777287] mt-0.5">
-              {changelog?.noticeThai || 'กด "ตรวจสอบเวอร์ชันอีกครั้ง" เพื่อดึงรายการเปลี่ยนแปลงจาก GitHub'}
+              {changelog?.noticeThai || 'กด "ตรวจสอบเวอร์ชันล่าสุดใหม่" เพื่อดึงรายการเปลี่ยนแปลงจาก GitHub'}
             </p>
           </div>
           {changelog && (
@@ -1061,12 +1433,12 @@ export function DeploymentUpdateCenter({
               <Info className="w-5 h-5 text-[#8066B5] shrink-0 mt-0.5" aria-hidden="true" />
               <div className="space-y-1">
                 <div className="font-semibold text-[#292638]">
-                  {checkResult?.status === 'UP_TO_DATE'
+                  {isAlreadyUpToDate
                     ? 'ไม่มีรายการเปลี่ยนแปลงเพิ่มเติม — ระบบเป็นเวอร์ชันล่าสุดแล้ว'
                     : 'ยังไม่มีรายการเปลี่ยนแปลงที่สามารถสรุปได้'}
                 </div>
                 <p className="text-[13px] text-[#777287]">
-                  {changelog?.noticeThai || 'กดปุ่ม "ตรวจสอบเวอร์ชันอีกครั้ง" เพื่อดึงข้อมูลล่าสุดจาก GitHub'}
+                  {changelog?.noticeThai || 'กดปุ่ม "ตรวจสอบเวอร์ชันล่าสุดใหม่" เพื่อดึงข้อมูลล่าสุดจาก GitHub'}
                 </p>
               </div>
             </div>
@@ -1160,14 +1532,24 @@ export function DeploymentUpdateCenter({
               <span>3. ตรวจสอบความพร้อมก่อนอัปเดต (Readiness Gate)</span>
             </h2>
             <p className="text-[13px] text-[#777287] mt-0.5">
-              ปุ่ม "อัปเดตระบบ" จะเปิดใช้งานได้เมื่อเงื่อนไขความปลอดภัยหลักผ่านครบทุกข้อเท่านั้น
+              ปุ่ม "อัปเดตระบบ" จะเปิดใช้งานได้เมื่อเงื่อนไขความปลอดภัยหลักผ่านครบทุกข้อและมีเวอร์ชันใหม่พร้อมอัปเดต
             </p>
           </div>
           {readiness && (
-            <StatusBadge tone={readiness.canDeploy ? 'success' : 'danger'}>
-              {readiness.canDeploy
-                ? `ผ่านเกณฑ์พร้อมอัปเดต (${readiness.passedCount}/${readiness.totalChecks})`
-                : `ยังไม่พร้อมอัปเดต (ติดเงื่อนไข ${readiness.blockingFailures} ข้อ)`}
+            <StatusBadge
+              tone={
+                isAlreadyUpToDate
+                  ? 'success'
+                  : readiness.canDeploy && !hasDbSchemaBlock
+                    ? 'success'
+                    : 'danger'
+              }
+            >
+              {isAlreadyUpToDate
+                ? 'เป็นเวอร์ชันล่าสุดแล้ว'
+                : readiness.canDeploy && !hasDbSchemaBlock
+                  ? `ผ่านเกณฑ์พร้อมอัปเดต (${readiness.passedCount}/${readiness.totalChecks})`
+                  : `ยังไม่พร้อมอัปเดต (ติดเงื่อนไข ${Math.max(1, readiness.blockingFailures)} ข้อ)`}
             </StatusBadge>
           )}
         </div>
@@ -1241,30 +1623,23 @@ export function DeploymentUpdateCenter({
         </div>
       )}
 
-      {/* Pending Migration Gate */}
+      {/* Database Schema Change Hard Block Banner (Zero Web Migration Execution) */}
       {pendingMigrations.length > 0 && !hasChecksumMismatch && (
-        <div className="rounded-xl bg-[#FEF7EA]/60 border border-[#F2DCBA] p-5 space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
-            <div className="space-y-1">
-              <div className="flex items-center gap-2 text-[#B87516] font-bold text-[15px]">
-                <Database className="w-5 h-5 shrink-0" aria-hidden="true" />
-                <span>พบ Database Migration รออนุมัติ ({pendingMigrations.length} ไฟล์)</span>
-              </div>
-              <p className="text-[13.5px] text-[#5B556B]">
-                ระบบล็อกไม่ให้รัน Migration อัตโนมัติ (MIGRATION_APPROVAL_REQUIRED) ผู้ดูแลระบบต้องตรวจสอบรายการด้านล่างและอนุมัติด้วยรหัสผ่าน ADMIN พร้อมผูกกับ Target Commit ({targetCommitShort})
-              </p>
+        <div
+          role="alert"
+          className="rounded-xl bg-[#FDF2F4] border border-[#E5B8BF] p-5 space-y-4 text-[#8E2837]"
+        >
+          <div className="space-y-1">
+            <div className="flex items-center gap-2 font-bold text-[15px]">
+              <Database className="w-5 h-5 shrink-0" aria-hidden="true" />
+              <span>เวอร์ชันนี้ต้องมีการปรับปรุงโครงสร้างฐานข้อมูล กรุณาติดต่อผู้ดูแลระบบก่อนอัปเดต</span>
             </div>
-            <button
-              type="button"
-              disabled={!canRunUpdate}
-              onClick={handleClickUpdateButton}
-              className="ent-btn-primary shrink-0"
-            >
-              <Lock className="w-4 h-4" aria-hidden="true" />
-              <span>ตรวจสอบและอนุมัติ Migration</span>
-            </button>
+            <p className="text-[13.5px] text-[#5B556B]">
+              ระบบอัปเดตผ่านหน้าเว็บเป็นโหมด Application-Only จึงระงับการอัปเดตอัตโนมัติ (DB_SCHEMA_CHANGE_BLOCKED) เพื่อปกป้องฐานข้อมูล{' '}
+              <span className="font-mono font-semibold">samchuk_attendance_v2</span> — ผู้ดูแลระบบ/DBA ต้องตรวจสอบและดำเนินการฐานข้อมูลแยกต่างหากก่อน
+            </p>
           </div>
-          <div className="bg-white rounded-lg border border-[#F2DCBA] divide-y divide-[#F1ECFA]">
+          <div className="bg-white rounded-lg border border-[#E5B8BF]/70 divide-y divide-[#F1ECFA]">
             {pendingMigrations.map((filename) => {
               const detail = pendingMigrationDetails.find((d: any) => d.filename === filename);
               return (
@@ -1277,7 +1652,7 @@ export function DeploymentUpdateCenter({
                       </div>
                     )}
                   </div>
-                  <StatusBadge tone="warning">รออนุมัติจาก ADMIN</StatusBadge>
+                  <StatusBadge tone="danger">ระงับการอัปเดตผ่านเว็บ</StatusBadge>
                 </div>
               );
             })}
@@ -1286,17 +1661,17 @@ export function DeploymentUpdateCenter({
       )}
 
       {/* ===================================================================
-          ส่วน D: ดำเนินการอัปเดต ผลการวิเคราะห์ข้อผิดพลาด และแนวทาง Rollback
+          ส่วน D: ดำเนินการอัปเดต 8 ขั้นตอน, Log, และ Application-Only Rollback
          =================================================================== */}
       <section aria-labelledby="section-deploy-action" className="his-surface p-5 space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
             <h2 id="section-deploy-action" className="text-[15.5px] font-bold text-[#292638]">
-              4. ดำเนินการอัปเดตและแนวทางกู้คืน (Rollback Safety)
+              4. ดำเนินการอัปเดต Application 8 ขั้นตอน และย้อนกลับเวอร์ชัน (App-Only Rollback)
             </h2>
             <p className="text-[13px] text-[#777287] mt-0.5">
-              สำรองฐานข้อมูล <span className="font-mono">{checkResult?.backupPolicy?.databaseTarget || 'samchuk_attendance_v2'}</span> ไว้ที่{' '}
-              <span className="font-mono">{checkResult?.backupPolicy?.defaultBackupRoot || 'C:\\SamAttBackups'}</span> ก่อน git pull เสมอ และไม่แตะต้อง Procurement หรือรัน iisreset
+              สำรองเฉพาะ Application Snapshot (<span className="font-mono">dist/</span> และ config) ไว้ที่{' '}
+              <span className="font-mono">{snapshotRoot}</span> ก่อน <span className="font-mono">git pull</span> — ไม่แตะต้อง MySQL, <span className="font-mono">.env</span>, Procurement และไม่รัน <span className="font-mono">iisreset</span>
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -1315,21 +1690,99 @@ export function DeploymentUpdateCenter({
               onClick={handleClickUpdateButton}
               className="ent-btn-primary"
             >
-              <Rocket className="w-4 h-4" aria-hidden="true" />
-              <span>{deployRunning ? 'กำลังอัปเดต...' : 'อัปเดตระบบ'}</span>
+              {hasDbSchemaBlock ? (
+                <Lock className="w-4 h-4" aria-hidden="true" />
+              ) : (
+                <Rocket className="w-4 h-4" aria-hidden="true" />
+              )}
+              <span>{primaryUpdateButtonLabel}</span>
             </button>
           </div>
         </div>
 
         {/* Clear explanation when Update button is disabled */}
-        {!canRunUpdate && blockingReasons.length > 0 && (
+        {!canRunUpdate && (isAlreadyUpToDate || hasDbSchemaBlock || blockingReasons.length > 0) && (
           <div className="p-3.5 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] text-[13px] text-[#5B556B]">
-            <span className="font-semibold text-[#292638]">ปุ่มอัปเดตถูกปิดชั่วคราวเนื่องจาก: </span>
-            {blockingReasons.map((b) => b.label).join(', ')} — กรุณาแก้ไขตามรายการในส่วนที่ 3 ก่อนดำเนินการ
+            {isAlreadyUpToDate ? (
+              <span>
+                <span className="font-semibold text-[#198568]">เป็นเวอร์ชันล่าสุดแล้ว: </span>
+                Commit ปัจจุบัน ({currentCommitShort}) ตรงกับ GitHub Branch {branch} แล้ว จึงปิดปุ่มอัปเดตเพื่อป้องกันการรันซ้ำ
+              </span>
+            ) : hasDbSchemaBlock ? (
+              <span className="text-[#8E2837]">
+                <span className="font-semibold">ระงับการอัปเดตผ่านหน้าเว็บ: </span>
+                เวอร์ชันนี้ต้องมีการปรับปรุงโครงสร้างฐานข้อมูล กรุณาติดต่อผู้ดูแลระบบก่อนอัปเดต
+              </span>
+            ) : (
+              <span>
+                <span className="font-semibold text-[#292638]">ปุ่มอัปเดตถูกปิดชั่วคราวเนื่องจาก: </span>
+                {blockingReasons.map((b) => b.label).join(', ')} — กรุณาแก้ไขตามรายการในส่วนที่ 3 ก่อนดำเนินการ
+              </span>
+            )}
           </div>
         )}
 
-        {/* Structured Failure Diagnostic Panel (HTTP 422 / Exit Code 1) */}
+        {/* Real 8-Step Progress Checklist (Live during detached execution or showing latest job) */}
+        {(activeJob || deployRunning) && (
+          <div className="rounded-xl border border-[#D8CEEA] bg-[#F8F7FC] p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 font-bold text-[14px] text-[#292638]">
+                {activeJob?.status === 'RUNNING' || activeJob?.status === 'PENDING' ? (
+                  <Loader2 className="w-4 h-4 animate-spin text-[#8066B5]" aria-hidden="true" />
+                ) : activeJob?.status === 'SUCCESS' || activeJob?.status === 'NO_CHANGES' ? (
+                  <CheckCircle2 className="w-4 h-4 text-[#198568]" aria-hidden="true" />
+                ) : (
+                  <XCircle className="w-4 h-4 text-[#C74455]" aria-hidden="true" />
+                )}
+                <span>
+                  {activeJob?.jobType === 'APP_ROLLBACK'
+                    ? 'สถานะการย้อนกลับ Application'
+                    : 'สถานะการอัปเดต Application 8 ขั้นตอน'}
+                </span>
+              </div>
+              {activeJob && (
+                <div className="flex items-center gap-2 text-[12px] font-mono text-[#4E3978]">
+                  <span>Job: {activeJob.jobId}</span>
+                  <StatusBadge
+                    tone={
+                      activeJob.status === 'SUCCESS' || activeJob.status === 'NO_CHANGES'
+                        ? 'success'
+                        : activeJob.status === 'RUNNING' || activeJob.status === 'PENDING'
+                          ? 'info'
+                          : 'danger'
+                    }
+                  >
+                    {activeJob.status} ({activeJob.progressPercent}%)
+                  </StatusBadge>
+                </div>
+              )}
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              {displayedSteps.map((step) => {
+                const badge = getStepStatusLabelThai(step.status);
+                return (
+                  <div
+                    key={step.stepNumber}
+                    className="px-3 py-2.5 rounded-lg bg-white border border-[#E8E4EF] flex items-center justify-between gap-2 text-[12.5px]"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-semibold text-[#292638] truncate">{step.stepLabelThai}</div>
+                      {step.detail && (
+                        <div className="text-[11.5px] text-[#777287] truncate" title={step.detail}>
+                          {step.detail}
+                        </div>
+                      )}
+                    </div>
+                    <StatusBadge tone={badge.tone}>{badge.label}</StatusBadge>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* Structured Failure Diagnostic Panel */}
         {diagnostic && (
           <div
             role="alert"
@@ -1359,44 +1812,94 @@ export function DeploymentUpdateCenter({
             <div className="text-[13px] text-[#5B556B] bg-white/80 px-3.5 py-2.5 rounded-lg border border-[#E5B8BF]/50">
               <span className="font-semibold text-[#292638]">สถานะการย้อนกลับ: </span>
               {diagnostic.rollbackStatusThai}
-              {deployResult?.backupDir && (
+              {(deployResult?.snapshotDir || deployResult?.backupDir) && (
                 <span className="block font-mono text-[12px] text-[#4E3978] mt-1">
-                  Backup Path: {deployResult.backupDir}
+                  Snapshot Path: {deployResult.snapshotDir || deployResult.backupDir}
                 </span>
               )}
             </div>
           </div>
         )}
 
-        {/* Masked Execution Console Output (when available) */}
-        {deployResult && (deployResult.output || deployResult.errorOutput) && (
+        {/* Masked Execution Console Output + Copy Log */}
+        {displayedLogText && (
           <div className="space-y-2">
-            <div className="flex items-center gap-2 text-[13px] font-bold text-[#4E3978]">
-              <Terminal className="w-4 h-4" aria-hidden="true" />
-              <span>บันทึกการทำงานล่าสุด (ปกปิดรหัสผ่านและ Token อัตโนมัติ)</span>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-[13px] font-bold text-[#4E3978]">
+                <Terminal className="w-4 h-4" aria-hidden="true" />
+                <span>บันทึกการทำงานล่าสุด (ปกปิดรหัสผ่านและ Token อัตโนมัติ)</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleCopyLogs(displayedLogText)}
+                className="ent-btn-secondary h-7 px-2.5 text-[12px]"
+              >
+                <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+                <span>คัดลอก Log</span>
+              </button>
             </div>
             <pre className="p-4 rounded-xl bg-[#292638] text-[#F8F7FC] text-[12px] font-mono overflow-x-auto max-h-64 whitespace-pre-wrap">
-              {[deployResult.output, deployResult.errorOutput].filter(Boolean).join('\n--- STDERR ---\n')}
+              {displayedLogText}
             </pre>
           </div>
         )}
 
-        {/* Rollback Separation Policy (Source Code vs Database) */}
+        {/* Application-Only Rollback Card & Safety Separation */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2 border-t border-[#E8E4EF]">
-          <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-1.5">
-            <div className="font-bold text-[13.5px] text-[#4E3978]">
-              การย้อนกลับซอร์สโค้ด (Source Code Rollback)
+          <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="font-bold text-[13.5px] text-[#4E3978]">
+                ย้อนกลับ Application รุ่นก่อนหน้า (Application-Only Rollback)
+              </div>
+              <StatusBadge tone={rollbackAvailable ? 'info' : 'neutral'}>
+                {rollbackAvailable ? `${availableSnapshots.length} Snapshot` : 'ยังไม่มี Snapshot'}
+              </StatusBadge>
             </div>
             <p className="text-[13px] text-[#5B556B] leading-relaxed">
-              หากขั้น Install, Typecheck, Test, Build หรือ Health Check ล้มเหลว สคริปต์จะย้อนกลับไปยัง Commit และโฟลเดอร์ <span className="font-mono">dist/</span> เดิมโดยอัตโนมัติ (โดยไม่ใช้ <span className="font-mono">git reset --hard</span>)
+              หากพบปัญหาหลังอัปเดต Application สามารถสั่งย้อนกลับเฉพาะโค้ดและโฟลเดอร์{' '}
+              <span className="font-mono">dist/</span> จาก{' '}
+              <span className="font-mono">{snapshotRoot}</span> ได้ทันที —{' '}
+              <strong>ไม่แตะต้องฐานข้อมูล MySQL หรือไฟล์ .env</strong>
             </p>
+
+            {rollbackAvailable && (
+              <div className="space-y-2">
+                <select
+                  aria-label="เลือก Application Snapshot สำหรับย้อนกลับ"
+                  value={selectedSnapshotDir}
+                  onChange={(e) => setSelectedSnapshotDir(e.target.value)}
+                  disabled={deployRunning || rollbackRunning}
+                  className="ent-input w-full text-[12.5px] font-mono"
+                >
+                  {availableSnapshots.map((snap) => (
+                    <option key={snap.snapshotDir} value={snap.snapshotDir}>
+                      {snap.snapshotName}
+                      {snap.commitBefore ? ` (${snap.commitBefore.slice(0, 8)})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
+            <button
+              type="button"
+              disabled={!rollbackAvailable || deployRunning || rollbackRunning || Boolean(deployStatus?.inProgress)}
+              onClick={() => setRollbackConfirmOpen(true)}
+              className="ent-btn-secondary w-full justify-center"
+            >
+              <RotateCcw className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+              <span>ย้อนกลับเวอร์ชันก่อนหน้า (Application Only)</span>
+            </button>
           </div>
+
           <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-1.5">
             <div className="font-bold text-[13.5px] text-[#4E3978]">
-              การกู้คืนฐานข้อมูล (Database Restore — แยกส่วนชัดเจน)
+              การแยกส่วนฐานข้อมูลและการกู้คืน (Database Safety Boundary)
             </div>
             <p className="text-[13px] text-[#5B556B] leading-relaxed">
-              ห้ามรันคำสั่ง DROP หรือกู้คืนฐานข้อมูลทับอัตโนมัติ หากเกิดข้อผิดพลาดหลัง Migration ให้ผู้ดูแลระบบทดสอบและกู้คืนจากไฟล์ Backup ใน <span className="font-mono">C:\SamAttBackups</span> ผ่าน <span className="font-mono">scripts\restore-test.ps1</span>
+              ระบบอัปเดตหน้าเว็บจะไม่สำรองฐานข้อมูล (mysqldump), ไม่รัน Migration อัตโนมัติ, และไม่รัน{' '}
+              <span className="font-mono">npm test</span> บน Production หากมีไฟล์ปรับโครงสร้างฐานข้อมูลใหม่ ผู้ดูแลระบบ/DBA ต้องตรวจและรัน{' '}
+              <span className="font-mono">npm run db:migrate</span> แยกต่างหากก่อนสั่งอัปเดต Application
             </p>
           </div>
         </div>
@@ -1444,7 +1947,7 @@ export function DeploymentUpdateCenter({
                     </div>
                     {row.backup_archive_path && (
                       <div className="text-[12px] font-mono text-[#777287] break-all">
-                        Backup: {row.backup_archive_path}
+                        Snapshot: {row.backup_archive_path}
                       </div>
                     )}
                     <button
@@ -1470,7 +1973,7 @@ export function DeploymentUpdateCenter({
                     <th>เวอร์ชัน / Commit</th>
                     <th>ประเภท</th>
                     <th>สถานะ</th>
-                    <th>Backup Path</th>
+                    <th>Snapshot Path</th>
                     <th className="text-right">รายละเอียด</th>
                   </tr>
                 </thead>
@@ -1519,127 +2022,75 @@ export function DeploymentUpdateCenter({
         )}
       </section>
 
-      {/* Confirm Standard Update Dialog (No Pending Migrations) */}
+      {/* Confirm Application-Only Update Dialog */}
       <ConfirmDialog
         open={deployConfirmOpen}
         onCancel={() => !deployRunning && setDeployConfirmOpen(false)}
-        onConfirm={() => executeSafeDeployment({})}
-        title="ยืนยันการอัปเดตระบบ Sam_Att V2 Standalone"
-        description={`ระบบจะสำรองฐานข้อมูล MySQL นอก Git Repository (${checkResult?.backupPolicy?.defaultBackupRoot || 'C:\\SamAttBackups'}) ก่อนดึงโค้ด Commit ${targetCommitShort} จาก GitHub และรีสตาร์ทเฉพาะบริการ Sam_Att บนพอร์ต 4101 โดยไม่แตะต้อง Procurement`}
+        onConfirm={executeSafeDeployment}
+        title="ยืนยันการอัปเดต Application Sam_Att V2 Standalone"
+        description={`ระบบจะสร้าง Application Snapshot (dist/ และ config) นอก Git Repository (${snapshotRoot}) ก่อนดึงโค้ด Commit ${targetCommitShort} จาก GitHub และรีสตาร์ทเฉพาะบริการ Sam_Att บนพอร์ต 4101 — ไม่แตะต้องฐานข้อมูล MySQL, ไฟล์ .env, Procurement และไม่รัน iisreset`}
         confirmLabel={deployRunning ? 'กำลังดำเนินการ...' : 'ยืนยันอัปเดตระบบ'}
         cancelLabel="ยกเลิก"
         variant="primary"
         loading={deployRunning}
       />
 
-      {/* Migration Approval Modal (Target Commit & File Binding + ADMIN Re-auth) */}
-      <SharedModal
-        open={migrationModalOpen}
-        onClose={() => {
-          if (!deployRunning) {
-            setMigrationModalOpen(false);
-            setMigrationAdminPassword('');
-            setMigrationModalError(null);
-          }
-        }}
-        kickerText="ขั้นตอนความปลอดภัยก่อนเปลี่ยนโครงสร้างฐานข้อมูล"
-        title="อนุมัติ Database Migration และอัปเดตระบบ"
-        subtitle="การอนุมัติจะผูกกับ Target Commit และรายการไฟล์ SQL ด้านล่างอย่างเคร่งครัด"
-        maxWidthClass="max-w-2xl"
-        disableEscapeClose={deployRunning}
-      >
-        <form onSubmit={handleConfirmMigrationApproval} className="space-y-5">
-          {migrationModalError && (
-            <div
-              role="alert"
-              className="p-3.5 rounded-xl bg-[#FDF2F4] border border-[#E5B8BF] text-[#8E2837] text-[13.5px] font-medium"
-            >
-              {migrationModalError}
-            </div>
-          )}
+      {/* Confirm Application-Only Rollback Dialog */}
+      <ConfirmDialog
+        open={rollbackConfirmOpen}
+        onCancel={() => !rollbackRunning && setRollbackConfirmOpen(false)}
+        onConfirm={executeAppRollback}
+        title="ยืนยันการย้อนกลับเวอร์ชัน Application (Application Only)"
+        description={`ระบบจะคืนค่าซอร์สโค้ดและโฟลเดอร์ dist/ จาก Snapshot (${selectedSnapshotDir || 'ล่าสุด'}) และรีสตาร์ทเฉพาะบริการ Sam_Att บนพอร์ต 4101 — ฐานข้อมูล MySQL samchuk_attendance_v2 และไฟล์ .env จะไม่ถูกแก้ไข`}
+        confirmLabel={rollbackRunning ? 'กำลังย้อนกลับ...' : 'ยืนยันย้อนกลับ Application'}
+        cancelLabel="ยกเลิก"
+        variant="danger"
+        loading={rollbackRunning}
+      />
 
-          <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-2 text-[13px]">
-            <div className="flex flex-wrap justify-between gap-2">
-              <span className="text-[#777287]">Target Commit ที่ผูกการอนุมัติ:</span>
-              <span className="font-mono font-bold text-[#4E3978]">{targetCommitSha}</span>
-            </div>
-            <div>
-              <span className="text-[#777287]">ไฟล์ Migration ที่จะรัน ({pendingMigrations.length} ไฟล์):</span>
-              <ul className="list-disc pl-5 mt-1 font-mono font-semibold text-[#292638] space-y-0.5">
-                {pendingMigrations.map((f) => (
-                  <li key={f}>{f}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
-
-          <label className="flex items-start gap-2.5 p-3.5 rounded-xl bg-[#FEF7EA]/70 border border-[#F2DCBA] cursor-pointer">
-            <input
-              type="checkbox"
-              checked={migrationImpactChecked}
-              onChange={(e) => setMigrationImpactChecked(e.target.checked)}
-              className="mt-1 rounded border-[#B87516] text-[#8066B5] focus:ring-[#8066B5]"
-            />
-            <span className="text-[13.5px] text-[#292638] leading-relaxed">
-              ข้าพเจ้าได้ตรวจสอบรายการไฟล์ Database Migration ข้างต้นแล้ว และรับทราบว่าระบบจะสำรองฐานข้อมูล MySQL ไว้นอก Git Repo ก่อนดำเนินการเปลี่ยนแปลงโครงสร้างตาราง
-            </span>
-          </label>
-
-          <div>
-            <label className="ent-label">
-              ยืนยันรหัสผ่านบัญชีผู้ดูแลระบบ (ADMIN) ที่กำลังใช้งาน <RequiredMark />
-            </label>
-            <input
-              type="password"
-              required
-              autoComplete="current-password"
-              value={migrationAdminPassword}
-              onChange={(e) => setMigrationAdminPassword(e.target.value)}
-              placeholder="กรอกรหัสผ่านบัญชีผู้ดูแลระบบ"
-              className="ent-input w-full"
-            />
-            <p className="text-[12px] text-[#777287] mt-1">
-              รหัสผ่านใช้เพื่อยืนยันตัวตนเท่านั้น จะไม่ถูกบันทึกใน Log หรือฐานข้อมูล
-            </p>
-          </div>
-
-          <div className="flex flex-col sm:flex-row justify-end gap-2.5 pt-3 border-t border-[#E8E4EF]">
-            <button
-              type="button"
-              disabled={deployRunning}
-              onClick={() => {
-                setMigrationModalOpen(false);
-                setMigrationAdminPassword('');
-              }}
-              className="ent-btn-secondary w-full sm:w-auto"
-            >
-              ยกเลิก
-            </button>
-            <button
-              type="submit"
-              disabled={deployRunning || !migrationImpactChecked || !migrationAdminPassword.trim()}
-              className="ent-btn-primary w-full sm:w-auto"
-            >
-              {deployRunning ? (
-                <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <Lock className="w-4 h-4" aria-hidden="true" />
-              )}
-              <span>{deployRunning ? 'กำลังอัปเดตระบบ...' : 'ยืนยันอนุมัติและอัปเดตระบบ'}</span>
-            </button>
-          </div>
-        </form>
-      </SharedModal>
-
-      {/* Non-Simulated Progress Dialog */}
+      {/* Live 8-Step Progress Dialog (Detached Survival) */}
       <ProgressDialog
         open={deployProgressOpen}
-        title="กำลังดำเนินการอัปเดตระบบ Sam_Att"
-        stageLabel="Safe Deployment"
+        title={
+          activeJob?.jobType === 'APP_ROLLBACK'
+            ? 'กำลังย้อนกลับ Application Sam_Att'
+            : 'กำลังดำเนินการอัปเดต Application Sam_Att'
+        }
+        stageLabel={reconnectingRestart ? 'กำลังรอ Sam_Att รีสตาร์ท' : 'Application-Only 8 Steps'}
         stepLabel={deployProgressStep}
+        percent={deployProgressPercent}
         status={deployProgressStatus}
+        summaryText={deployProgressStatus === 'SUCCESS' ? deployProgressStep : null}
         errorMessage={deployProgressError}
         onClose={() => setDeployProgressOpen(false)}
+        details={
+          <div className="space-y-3">
+            {reconnectingRestart && (
+              <div className="p-2.5 rounded-lg bg-[#F1ECFA] border border-[#C7B8E8] text-[12px] text-[#4E3978] font-medium">
+                กำลังเริ่มต้นระบบเวอร์ชันใหม่ กรุณารอสักครู่ (ไม่ต้องรีเฟรชหน้าเว็บ)
+              </div>
+            )}
+            <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1">
+              {displayedSteps.map((step) => {
+                const badge = getStepStatusLabelThai(step.status);
+                return (
+                  <div
+                    key={step.stepNumber}
+                    className="px-3 py-2 rounded-lg bg-[#F8F7FC] border border-[#E8E4EF] flex items-center justify-between gap-2 text-[12px]"
+                  >
+                    <span className="font-medium text-[#292638] truncate">{step.stepLabelThai}</span>
+                    <StatusBadge tone={badge.tone}>{badge.label}</StatusBadge>
+                  </div>
+                );
+              })}
+            </div>
+            {displayedLogText && (
+              <pre className="p-3 rounded-lg bg-[#292638] text-[#F8F7FC] font-mono text-[11px] max-h-40 overflow-auto whitespace-pre-wrap">
+                {displayedLogText}
+              </pre>
+            )}
+          </div>
+        }
       />
 
       {/* History Detail Slide-Over Drawer */}
@@ -1670,8 +2121,8 @@ export function DeploymentUpdateCenter({
               <div>ผู้ดำเนินการ: {selectedHistoryRow.executed_by}</div>
               <div>ประเภท: {selectedHistoryRow.action_type}</div>
               <div>Commit SHA: {selectedHistoryRow.commit_sha}</div>
-              <div>Backup Path: {selectedHistoryRow.backup_archive_path || '—'}</div>
-              <div>Artifact / SQL SHA-256: {selectedHistoryRow.artifact_sha256 || '—'}</div>
+              <div>Snapshot Path: {selectedHistoryRow.backup_archive_path || '—'}</div>
+              <div>Artifact Verification: {selectedHistoryRow.artifact_sha256 || '—'}</div>
             </div>
             <div>
               <div className="font-bold text-[#292638] mb-2">

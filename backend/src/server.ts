@@ -180,10 +180,10 @@ export async function startStandaloneServers(): Promise<{
   // ขั้นตอนที่ 2: ตรวจสอบความถูกต้องของค่าตั้งค่าก่อนเปิด Listener (Fail-Closed Production Validation — แก้ไข P1 ข้อ 15)
   validateProductionConfig(cfg);
 
-  // ขั้นตอนที่ 3: รันสร้างตารางฐานข้อมูลทั้งหมด และเตรียมข้อมูลตั้งต้นที่จำเป็นของระบบ (System Baseline Catalog)
-  // ห้ามเติมข้อมูลจำลอง (Synthetic Data) ในโหมด REAL หรือ Production เด็ดขาด
-  await runMigrations();
-  await ensureBaselineSystemCatalog();
+  // ขั้นตอนที่ 3: ตรวจสอบสถานะฐานข้อมูลแบบ Read-Only (MySQL Production/Standalone ห้ามแก้ Schema อัตโนมัติตอน Startup)
+  // หากต้องการปรับปรุง Schema ให้รัน `npm run db:migrate` โดยตรงจาก CLI เท่านั้น
+  await runMigrations({ startupReadOnlyOnMysql: true });
+  await ensureBaselineSystemCatalog({ startupReadOnlyOnMysql: true });
 
   if (cfg.dataMode === 'DEMO' && cfg.nodeEnv !== 'production' && cfg.dbEngine === 'sqlite_sandbox') {
     const demoSeed = await seedDemoSyntheticData();

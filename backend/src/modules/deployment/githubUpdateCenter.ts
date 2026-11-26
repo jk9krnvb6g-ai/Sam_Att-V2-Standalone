@@ -1507,7 +1507,7 @@ export async function checkGitHubUpdates(options?: {
         categories.database.push({
           id: `mig-${migFile}`,
           category: 'database',
-          title: `พบไฟล์ Database Migration ใหม่: ${migFile} (ต้องให้ผู้ดูแลระบบตรวจสอบและอนุมัติก่อนรัน)`,
+          title: `พบไฟล์ Database Migration ใหม่: ${migFile} (เวอร์ชันนี้ต้องมีการปรับปรุงโครงสร้างฐานข้อมูล กรุณาติดต่อผู้ดูแลระบบก่อนอัปเดต)`,
           rawText: `database/migrations/${migFile}`,
           sourceRef: targetCommitShort,
           url: `${repoUrl}/blob/${branch}/database/migrations/${migFile}`,
@@ -1756,58 +1756,70 @@ export function evaluateDeploymentReadiness(params: {
     remediation: majorNode < 22 ? 'ติดตั้ง Node.js v22 LTS ขึ้นไปบนเซิร์ฟเวอร์' : null,
   });
 
-  // 6. Database Migrations & Checksums
+  // 6. Database Schema / Migration Policy (Application-Only: ห้ามอัปเดตผ่านหน้าเว็บเมื่อมี Schema/Migration เปลี่ยน)
   const mismatchCount = params.dbInspection.checksumMismatches.length;
   const pendingCount = params.combinedPendingMigrations.length;
   if (mismatchCount > 0) {
     checks.push({
       id: 'DATABASE_MIGRATIONS',
-      label: 'ความถูกต้องของ Database Migration & Checksum',
+      label: 'นโยบายแยกการจัดการฐานข้อมูล (Application-Only Safety)',
       status: 'FAIL',
       blocking: true,
       detail: `ตรวจพบ Checksum ไม่ตรงกัน ${mismatchCount} ไฟล์ (${params.dbInspection.checksumMismatches.map((m) => m.filename).join(', ')})`,
-      remediation: 'ห้ามแก้ไขไฟล์ Migration ที่เคยรันแล้ว ตรวจสอบ schema_migrations และไฟล์ใน database/migrations/ ก่อนดำเนินการต่อ',
+      remediation: 'ห้ามแก้ไขไฟล์ Migration ที่เคยรันแล้ว กรุณาติดต่อผู้ดูแลระบบ/DBA เพื่อตรวจสอบ schema_migrations ก่อนดำเนินการต่อ',
     });
   } else if (pendingCount > 0) {
     checks.push({
       id: 'DATABASE_MIGRATIONS',
-      label: 'ความถูกต้องของ Database Migration & Checksum',
-      status: 'WARN',
-      blocking: false,
-      detail: `พบ Migration ใหม่ ${pendingCount} ไฟล์ (${params.combinedPendingMigrations.join(', ')}) — ต้องอนุมัติด้วยรหัสผ่าน ADMIN ก่อนรัน`,
-      remediation: 'ตรวจสอบผลกระทบต่อตารางและยืนยันอนุมัติ Migration ในขั้นตอนถัดไป',
+      label: 'นโยบายแยกการจัดการฐานข้อมูล (Application-Only Safety)',
+      status: 'FAIL',
+      blocking: true,
+      detail: `เวอร์ชันนี้ต้องมีการปรับปรุงโครงสร้างฐานข้อมูล กรุณาติดต่อผู้ดูแลระบบก่อนอัปเดต (${params.combinedPendingMigrations.join(', ')})`,
+      remediation: 'หน้าเว็บนี้สงวนไว้สำหรับอัปเดต Application เท่านั้น กรุณาให้ผู้ดูแลระบบรัน `npm run db:migrate` บนเซิร์ฟเวอร์ให้เสร็จก่อนแล้วจึงกดตรวจสอบเวอร์ชันใหม่',
     });
   } else {
     checks.push({
       id: 'DATABASE_MIGRATIONS',
-      label: 'ความถูกต้องของ Database Migration & Checksum',
+      label: 'นโยบายแยกการจัดการฐานข้อมูล (Application-Only Safety)',
       status: 'PASS',
       blocking: false,
-      detail: `Checksum ถูกต้องครบถ้วน (รันแล้ว ${params.dbInspection.appliedMigrations.length} รุ่น ไม่มี Migration ค้าง)`,
+      detail: `ไม่มีการเปลี่ยนแปลงโครงสร้างฐานข้อมูลค้างอยู่ (รันแล้ว ${params.dbInspection.appliedMigrations.length} รุ่น) — อัปเดตเฉพาะ Application โดยไม่แตะต้องฐานข้อมูล`,
       remediation: null,
     });
   }
 
-  // 7. นโยบาย Backup นอก Git Repo และ Isolation Guard
-  const backupRoot = process.env.SAM_ATT_BACKUP_DIR || 'C:\\SamAttBackups';
-  const backupInsideRepo = path.resolve(backupRoot).toLowerCase().startsWith(path.resolve(cwd).toLowerCase());
+  // 7. นโยบาย Application Snapshot นอก Git Repo และ Isolation Guard
+  const snapshotRoot =
+    process.env.SAM_ATT_DEPLOY_SNAPSHOT_DIR ||
+    process.env.SAM_ATT_BACKUP_DIR ||
+    'C:\\SamAttDeploySnapshots';
+  const snapshotInsideRepo = path.resolve(snapshotRoot).toLowerCase().startsWith(path.resolve(cwd).toLowerCase());
   checks.push({
     id: 'BACKUP_AND_ISOLATION',
-    label: 'นโยบายสำรองข้อมูลนอก Git Repo และแยกอิสระจากระบบอื่น',
-    status: backupInsideRepo ? 'FAIL' : 'PASS',
-    blocking: backupInsideRepo,
-    detail: backupInsideRepo
-      ? `พาธสำรองข้อมูล (${backupRoot}) อยู่ภายใน Git Repository ซึ่งผิดนโยบายความปลอดภัย`
-      : `สำรองฐานข้อมูล ${cfg.samAttDb.database} ที่ ${backupRoot} ก่อน git pull และรีสตาร์ทเฉพาะ Sam_Att (ไม่แตะ Procurement / iisreset)`,
-    remediation: backupInsideRepo ? 'ตั้งค่า SAM_ATT_BACKUP_DIR ให้อยู่นอกโฟลเดอร์โปรเจกต์ เช่น C:\\SamAttBackups' : null,
+    label: 'นโยบายสำรอง Application Snapshot นอก Git Repo และแยกอิสระจากระบบอื่น',
+    status: snapshotInsideRepo ? 'FAIL' : 'PASS',
+    blocking: snapshotInsideRepo,
+    detail: snapshotInsideRepo
+      ? `พาธสำรอง Application Snapshot (${snapshotRoot}) อยู่ภายใน Git Repository ซึ่งผิดนโยบายความปลอดภัย`
+      : `สำรองไฟล์ dist/ และ Manifest ของ Application ที่ ${snapshotRoot} ก่อน git pull โดยไม่ยุ่งเกี่ยวกับฐานข้อมูล ${cfg.samAttDb.database} และไม่กระทบ Procurement / iisreset`,
+    remediation: snapshotInsideRepo
+      ? 'ตั้งค่า SAM_ATT_DEPLOY_SNAPSHOT_DIR ให้อยู่นอกโฟลเดอร์โปรเจกต์ เช่น C:\\SamAttDeploySnapshots'
+      : null,
   });
 
   const blockingFailures = checks.filter((c) => c.status === 'FAIL' && c.blocking).length;
   const warnings = checks.filter((c) => c.status === 'WARN').length;
   const passedCount = checks.filter((c) => c.status === 'PASS').length;
+  const isAlreadyUpToDate = Boolean(
+    gh &&
+      gh.githubReachable &&
+      gh.status === 'UP_TO_DATE' &&
+      !gh.hasUpdates &&
+      pendingCount === 0
+  );
 
   return {
-    canDeploy: blockingFailures === 0,
+    canDeploy: blockingFailures === 0 && !isAlreadyUpToDate,
     checkedAt: new Date().toISOString(),
     blockingFailures,
     warnings,
@@ -1862,6 +1874,8 @@ export function diagnoseDeploymentFailure(
       'PREFLIGHT_BACKUP_DIR_INSIDE_GIT',
       'PREFLIGHT_BACKUP_DIR_UNWRITABLE',
       'PREFLIGHT_MISSING_CORE_FILE',
+      'DEPLOYMENT_ALREADY_IN_PROGRESS',
+      'NO_UPDATE_AVAILABLE',
       'GITHUB_REPO_MISMATCH',
       'GIT_LOCAL_HEAD_UNAVAILABLE',
       'GIT_FETCH_FAILED',
@@ -1876,7 +1890,10 @@ export function diagnoseDeploymentFailure(
       'MIGRATION_CHECKSUM_MISMATCH',
       'BACKUP_FAILED_NO_MYSQLDUMP',
       'BACKUP_FAILED',
+      'SNAPSHOT_FAILED',
+      'NPM_CI_LOCK_ERROR',
       'NPM_INSTALL_FAILED',
+      'PROCESS_STOP_TIMEOUT',
       'SECURITY_ENV_MUTATED_VIOLATION',
       'TYPECHECK_FAILED',
       'UNIT_TESTS_FAILED',
@@ -1893,6 +1910,8 @@ export function diagnoseDeploymentFailure(
       'BACKEND_PM2_RESTART_FAILED',
       'BACKEND_PROCESS_EXITED_IMMEDIATELY',
       'BACKEND_SERVICE_NOT_RUNNING',
+      'ROLLBACK_FAILED',
+      'ROLLBACK_SNAPSHOT_NOT_FOUND',
     ];
     for (const code of knownCodes) {
       if (combined.includes(code)) {
@@ -2090,14 +2109,56 @@ export function diagnoseDeploymentFailure(
     },
     BACKUP_FAILED: {
       step: 3,
-      stepName: 'Backup',
-      cause: 'การสำรองฐานข้อมูล MySQL หรือไฟล์ก่อนอัปเดตล้มเหลว ระบบจึงยกเลิกทันทีก่อน git pull',
-      fix: 'ตรวจสอบการเชื่อมต่อ MySQL, รหัสผ่านใน .env และพื้นที่ว่างใน C:\\SamAttBackups',
+      stepName: 'Prepare Snapshot',
+      cause: 'การเตรียมสำรองสถานะ Application นอก Git Repository ก่อน git pull ล้มเหลว ระบบจึงยกเลิกทันที',
+      fix: 'ตรวจสอบสิทธิ์เขียนไฟล์และพื้นที่ว่างใน C:\\SamAttDeploySnapshots',
+    },
+    SNAPSHOT_FAILED: {
+      step: 3,
+      stepName: 'Prepare Snapshot',
+      cause: 'ไม่สามารถสร้างโฟลเดอร์ Snapshot สำหรับ Application Rollback นอก Git Repository ได้',
+      fix: 'ตรวจสอบพื้นที่ว่างและสิทธิ์ NTFS ของ C:\\SamAttDeploySnapshots',
+    },
+    NPM_CI_LOCK_ERROR: {
+      step: 4,
+      stepName: 'Update Source & Deps',
+      cause: 'การติดตั้ง Dependencies (npm ci) พบไฟล์ Binary ถูกล็อกบน Windows (EPERM / lightningcss.win32-x64-msvc.node) แม้หยุดโปรเซส Sam_Att และลองใหม่แล้ว',
+      fix: 'ตรวจสอบว่าไม่มี Process อื่นเปิดไฟล์ใน node_modules (เช่น Antivirus หรือ Editor) จากนั้นกดอัปเดตอีกครั้ง (ระบบย้อนกลับรุ่นเดิมให้แล้ว)',
+    },
+    PROCESS_STOP_TIMEOUT: {
+      step: 4,
+      stepName: 'Update Source & Deps',
+      cause: 'ไม่สามารถหยุดโปรเซส Sam_Att ที่ยืนยันตัวตนแล้วภายในเวลาที่กำหนดก่อนอัปเดต Dependencies',
+      fix: 'ตรวจสอบสถานะโปรเซส Sam_Att บน Windows Service/Task Manager แล้วลองอัปเดตใหม่อีกครั้ง',
+    },
+    NO_UPDATE_AVAILABLE: {
+      step: 2,
+      stepName: 'Version Check',
+      cause: 'ระบบเป็นเวอร์ชันล่าสุดแล้ว (Commit บนเครื่องตรงกับ GitHub) จึงไม่ต้องอัปเดตซ้ำ',
+      fix: 'ไม่ต้องดำเนินการอัปเดตเพิ่ม จนกว่าจะมี Commit ใหม่บน GitHub',
+    },
+    DEPLOYMENT_ALREADY_IN_PROGRESS: {
+      step: 1,
+      stepName: 'Preflight Check',
+      cause: 'มีงานอัปเดตหรือย้อนกลับกำลังทำงานอยู่แล้ว ระบบป้องกันการกดทำงานซ้อน',
+      fix: 'รอให้งานปัจจุบันเสร็จสิ้นและตรวจสอบความคืบหน้าในหน้าศูนย์อัปเดต',
+    },
+    ROLLBACK_SNAPSHOT_NOT_FOUND: {
+      step: 1,
+      stepName: 'Validate Snapshot',
+      cause: 'ไม่พบ Application Snapshot ที่ถูกต้องใน C:\\SamAttDeploySnapshots สำหรับการย้อนกลับ',
+      fix: 'ตรวจสอบโฟลเดอร์ C:\\SamAttDeploySnapshots บนเซิร์ฟเวอร์ก่อนดำเนินการย้อนกลับ',
+    },
+    ROLLBACK_FAILED: {
+      step: 5,
+      stepName: 'Health Check & Report',
+      cause: 'การย้อนกลับ Application ไปยัง Snapshot ก่อนหน้าไม่สำเร็จหรือ Health Check ไม่ผ่าน',
+      fix: 'เข้าตรวจสอบสถานะ Git, dist/ และ runtime log ในโฟลเดอร์ logs/ บนเซิร์ฟเวอร์โดยด่วน',
     },
     NPM_INSTALL_FAILED: {
       step: 4,
-      stepName: 'Install Dependencies',
-      cause: 'การติดตั้งแพ็กเกจ npm ล้มเหลว (อาจเกิดจากเครือข่ายหรือไฟล์ล็อกบน Windows)',
+      stepName: 'Update Source & Deps',
+      cause: 'การติดตั้งแพ็กเกจ npm ci ล้มเหลว (อาจเกิดจากเครือข่ายหรือไฟล์ล็อกบน Windows)',
       fix: 'ตรวจสอบการเชื่อมต่ออินเทอร์เน็ตของเซิร์ฟเวอร์ และดูข้อความผิดพลาดจาก npm ใน Log ด้านล่าง',
     },
     SECURITY_ENV_MUTATED_VIOLATION: {

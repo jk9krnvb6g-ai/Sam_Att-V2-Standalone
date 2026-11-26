@@ -11,7 +11,7 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import mysql from 'mysql2/promise';
 import { Router } from 'express';
 import {
@@ -29,7 +29,6 @@ import {
 } from '../../database/adapter.ts';
 import { verifyPassword } from '../../utils/crypto.ts';
 import { requireAuth, requireRoles } from '../../middleware/auth.ts';
-import { verifyActorReauthentication } from '../auth/reauth.ts';
 import { writeAuditLog } from '../audit/service.ts';
 import {
   ensureBaselineDeploymentWorkspaceInitialized,
@@ -49,6 +48,23 @@ import {
   failCentralJob,
   type CentralJobType,
 } from '../jobs/tracker.ts';
+import {
+  acquireDeployLock,
+  createInitialSteps,
+  createPersistentDeployJob,
+  generateDeployJobId,
+  getDeployJobsDir,
+  getDeployLockFilePath,
+  getDeployLockStatus,
+  getJobFilePath,
+  listAvailableAppSnapshots,
+  readLatestPersistentDeployJob,
+  readPersistentDeployJob,
+  releaseDeployLock,
+  savePersistentDeployJob,
+  syncFinishedDiskJobToHistory,
+  type PersistentDeployJob,
+} from '../deployment/jobStore.ts';
 import {
   checkGitHubUpdates,
   clearGitHubUpdateCache,
@@ -84,6 +100,7 @@ export interface DeploymentGitInspection {
 type DeployBatRunner = (scriptPath: string, args?: string[]) => Promise<DeployBatResult>;
 type DeploymentGitInspector = () => Promise<DeploymentGitInspection>;
 let customDeployBatRunner: DeployBatRunner | null = null;
+let customDeployRollbackRunner: DeployBatRunner | null = null;
 let customGitInspector: DeploymentGitInspector | null = null;
 let batDeploymentRunning = false;
 
@@ -91,11 +108,15 @@ export function setDeployBatRunnerForTests(runner: DeployBatRunner | null): void
   customDeployBatRunner = runner;
 }
 
+export function setDeployRollbackRunnerForTests(runner: DeployBatRunner | null): void {
+  customDeployRollbackRunner = runner;
+}
+
 export function setDeploymentGitInspectorForTests(inspector: DeploymentGitInspector | null): void {
   customGitInspector = inspector;
 }
 
-function sanitizeDeploymentOutput(text: string): string {
+export function sanitizeDeploymentOutput(text: string): string {
   return sanitizeDeploymentLog(text);
 }
 
@@ -532,17 +553,30 @@ settingsRouter.get(
   '/deployment/status',
   requireAuth,
   requireRoles('ADMIN'),
-  async (_req, res, next) => {
+  async (req, res, next) => {
     try {
       const cfg = loadConfig();
+      const syncedDiskJob = await syncFinishedDiskJobToHistory(req.user?.username || 'admin');
+      const lockInfo = getDeployLockStatus();
       const [history, installed] = await Promise.all([
         dbQuery('SELECT * FROM deployment_history ORDER BY id DESC LIMIT 20'),
         readInstalledVersionInfo(),
       ]);
+      const availableSnapshots = listAvailableAppSnapshots();
+      const activeDiskJob =
+        syncedDiskJob && (syncedDiskJob.status === 'PENDING' || syncedDiskJob.status === 'RUNNING')
+          ? syncedDiskJob
+          : null;
+      const snapshotRoot =
+        process.env.SAM_ATT_DEPLOY_SNAPSHOT_DIR ||
+        process.env.SAM_ATT_BACKUP_DIR ||
+        'C:\\SamAttDeploySnapshots';
+
       res.json({
         serviceName: 'SamAttV2Standalone',
         serviceWrapper: 'WinSW (Windows Service Wrapper)',
         architecture: 'STANDALONE_SINGLE_PORT_HTTPS',
+        appOnlyPolicy: true,
         httpsPort: cfg.port,
         currentVersion: installed.packageVersion,
         installedVersion: installed.packageVersion,
@@ -564,13 +598,21 @@ settingsRouter.get(
         targetNodeVersion: '>=22.0.0',
         runtimeNodeVersion: process.version,
         isolatedFromProcurementAndGateway: true,
-        inProgress: isDeploymentInProgress() || batDeploymentRunning,
-        activeJob: getActiveJobByType('DEPLOYMENT_RUN'),
-        latestJob: getLatestJobByType('DEPLOYMENT_RUN'),
+        inProgress:
+          isDeploymentInProgress() ||
+          batDeploymentRunning ||
+          lockInfo.locked ||
+          Boolean(activeDiskJob),
+        lock: lockInfo,
+        activeJob: activeDiskJob || getActiveJobByType('DEPLOYMENT_RUN'),
+        latestJob: syncedDiskJob || getLatestJobByType('DEPLOYMENT_RUN'),
         uiLiveProductionDeployEnabled: process.platform === 'win32' || Boolean(customDeployBatRunner),
-        backupRootPolicy: process.env.SAM_ATT_BACKUP_DIR || 'C:\\SamAttBackups (นอก Git Repository)',
+        snapshotRootPolicy: snapshotRoot,
+        backupRootPolicy: `${snapshotRoot} (Application Snapshot นอก Git Repository)`,
+        availableSnapshots,
+        rollbackAvailable: availableSnapshots.length > 0,
         uiDeployNotice:
-          'ทำงานผ่านกลไก Sam_Att Safe Deployment: ตรวจสอบเวอร์ชัน GitHub -> ตรวจความพร้อม -> ตรวจ Migration -> สำรอง MySQL samchuk_attendance_v2 นอก Git Repo ก่อน git pull -> Typecheck/Test/Build -> รัน Migration ที่ ADMIN อนุมัติ -> ตรวจ Schema -> Restart เฉพาะ Sam_Att บนพอร์ต 4101 โดยไม่แตะต้อง Procurement',
+          'Application-Only One-Click Deployment (8 ขั้นตอน): ตรวจความพร้อม -> ตรวจ GitHub & DB Block -> สำรอง Snapshot dist/ นอก Git Repo -> git pull & ตรวจ lockfile ก่อน npm ci -> Typecheck & Build (ไม่รัน npm test บน Production) -> รีสตาร์ทเฉพาะ Sam_Att บนพอร์ต 4101 -> Health Check -> สรุปผล (ไม่แตะต้องฐานข้อมูลและ Procurement)',
         history,
       });
     } catch (err) {
@@ -862,9 +904,10 @@ settingsRouter.post(
         schemaVerification: dbInspection.schemaVerification,
         migrationApprovalRequired: combinedPending.length > 0,
         backupPolicy: {
+          appOnly: true,
           backupBeforeGitPull: true,
           storedOutsideGitRepo: true,
-          defaultBackupRoot: process.env.SAM_ATT_BACKUP_DIR || 'C:\\SamAttBackups',
+          defaultBackupRoot: process.env.SAM_ATT_DEPLOY_SNAPSHOT_DIR || 'C:\\SamAttDeploySnapshots',
           databaseTarget: cfg.samAttDb.database,
         },
         availableRelease: {
@@ -874,7 +917,7 @@ settingsRouter.post(
             githubCheck && !githubCheck.githubReachable
               ? 'GITHUB_UNREACHABLE'
               : combinedPending.length > 0
-                ? 'MIGRATION_APPROVAL_REQUIRED'
+                ? 'DB_SCHEMA_CHANGE_BLOCKED'
                 : githubCheck?.status || (resolvedHasUpdates ? 'UPDATE_AVAILABLE' : 'UP_TO_DATE'),
           releaseNotes:
             githubCheck?.changelog?.noticeThai ||
@@ -1168,11 +1211,26 @@ settingsRouter.get(
   '/deployment/progress',
   requireAuth,
   requireRoles('ADMIN'),
-  async (_req, res, next) => {
+  async (req, res, next) => {
     try {
+      const requestedJobId = typeof req.query.jobId === 'string' ? req.query.jobId.trim() : '';
+      const syncedLatest = await syncFinishedDiskJobToHistory(req.user?.username || 'admin');
+      const diskJob = requestedJobId ? readPersistentDeployJob(requestedJobId) || syncedLatest : syncedLatest;
+      const lockInfo = getDeployLockStatus();
       const latest = await dbQuery('SELECT * FROM deployment_history ORDER BY id DESC LIMIT 1');
+      const diskActive =
+        diskJob && (diskJob.status === 'PENDING' || diskJob.status === 'RUNNING') ? diskJob : null;
+
       res.json({
-        inProgress: isDeploymentInProgress(),
+        inProgress:
+          isDeploymentInProgress() ||
+          batDeploymentRunning ||
+          lockInfo.locked ||
+          Boolean(diskActive),
+        lock: lockInfo,
+        job: diskJob,
+        activeJob: diskActive || getActiveJobByType('DEPLOYMENT_RUN'),
+        latestJob: diskJob || getLatestJobByType('DEPLOYMENT_RUN'),
         latestOperation: latest[0] || null,
       });
     } catch (err) {
@@ -1346,7 +1404,7 @@ settingsRouter.post(
   }
 );
 
-// B15. Safe One-Button Deployment with Migration Approval Gate (ADMIN Only — Fixed Path Deploy_Sam_Att.bat)
+// B15. Application-Only One-Button Deployment (8 Steps, Detached Survival & No DB Management — ADMIN Only)
 settingsRouter.post(
   '/deployment/run-bat',
   requireAuth,
@@ -1363,18 +1421,24 @@ settingsRouter.post(
         return;
       }
 
-      if (isDeploymentInProgress() || batDeploymentRunning) {
+      const activeLock = getDeployLockStatus();
+      const currentDiskJob = readLatestPersistentDeployJob();
+      const diskRunning =
+        currentDiskJob && (currentDiskJob.status === 'PENDING' || currentDiskJob.status === 'RUNNING');
+
+      if (isDeploymentInProgress() || batDeploymentRunning || activeLock.locked || diskRunning) {
         res.status(409).json({
           status: 'FAILED',
           error: 'DEPLOYMENT_ALREADY_IN_PROGRESS',
           message: 'กำลังมีการอัปเดตระบบทำงานอยู่ กรุณารอให้เสร็จสิ้นก่อนสั่งอัปเดตซ้ำ',
-          activeJob: getActiveJobByType('DEPLOYMENT_RUN'),
+          activeJob: currentDiskJob || getActiveJobByType('DEPLOYMENT_RUN'),
+          lock: activeLock,
           requestId: req.requestId,
         });
         return;
       }
 
-      // 1. ตรวจสอบ Migration ที่ค้างอยู่และดึงสถานะ Git ล่าสุดจาก origin (แก้ปัญหา stale commit mismatch)
+      // 1. ตรวจสอบ Migration ที่ค้างอยู่และสถานะ Git (ป้องกันการอัปเดตซ้ำและป้องกัน DB Schema Change)
       const [dbInspection, gitState] = await Promise.all([
         inspectMigrationsDetailedReadOnly(),
         inspectGitDeploymentState(true),
@@ -1386,7 +1450,7 @@ settingsRouter.post(
           error: 'MIGRATION_CHECKSUM_MISMATCH',
           checksumMismatches: dbInspection.checksumMismatches,
           message:
-            'ตรวจพบไฟล์ Migration ที่เคยรันไปแล้วถูกแก้ไขค่า Checksum ระบบระงับการอัปเดตเพื่อความปลอดภัย กรุณาตรวจสอบก่อนดำเนินการ',
+            'ตรวจพบไฟล์ Migration ที่เคยรันไปแล้วถูกแก้ไขค่า Checksum ระบบระงับการอัปเดตเพื่อความปลอดภัย กรุณาติดต่อผู้ดูแลระบบ/DBA ก่อนดำเนินการ',
           requestId: req.requestId,
         });
         return;
@@ -1394,124 +1458,74 @@ settingsRouter.post(
 
       const combinedPending = mergePendingMigrations(dbInspection, gitState);
       const expectedTargetCommit = gitState.targetCommit || gitState.currentCommit;
-      const cliArgs: string[] = ['-NonInteractive'];
-      let migrationApprovalRecorded = false;
 
+      // 2. Database Non-Interference Block: ห้ามอัปเดตผ่านหน้าเว็บเมื่อมี Database Migration ค้างหรือเปลี่ยนแปลง (แม้ส่ง approveMigrations มา)
       if (combinedPending.length > 0) {
-        if (req.body?.approveMigrations !== true) {
-          await writeAuditLog({
-            requestId: req.requestId,
-            actorUsername: req.user!.username,
-            actorRole: req.user!.role,
-            ipAddress: req.ip || '127.0.0.1',
-            action: 'DEPLOYMENT_BLOCKED_MIGRATION_APPROVAL_REQUIRED',
-            targetType: 'DEPLOYMENT',
-            targetId: expectedTargetCommit,
-            result: 'BLOCKED',
-            errorCode: 'MIGRATION_APPROVAL_REQUIRED',
-            detail: {
-              targetCommit: expectedTargetCommit,
-              pendingMigrations: combinedPending,
-            },
-          });
-
-          res.status(409).json({
-            status: 'FAILED',
-            error: 'MIGRATION_APPROVAL_REQUIRED',
-            message: `ตรวจพบ Database Migration ที่รอการอนุมัติ (${combinedPending.join(', ')}) ห้ามรันอัตโนมัติ กรุณาตรวจสอบผลกระทบและยืนยันด้วยรหัสผ่านผู้ดูแลระบบก่อนดำเนินการ`,
+        await writeAuditLog({
+          requestId: req.requestId,
+          actorUsername: req.user!.username,
+          actorRole: req.user!.role,
+          ipAddress: req.ip || '127.0.0.1',
+          action: 'DEPLOYMENT_BLOCKED_DB_SCHEMA_CHANGE',
+          targetType: 'DEPLOYMENT',
+          targetId: expectedTargetCommit,
+          result: 'BLOCKED',
+          errorCode: 'DB_SCHEMA_CHANGE_BLOCKED',
+          detail: {
             targetCommit: expectedTargetCommit,
             currentCommit: gitState.currentCommit,
             pendingMigrations: combinedPending,
-            pendingMigrationDetails: dbInspection.pendingDetails,
-            appliedMigrations: dbInspection.appliedMigrations,
-            backupPolicy: {
-              backupBeforeGitPull: true,
-              storedOutsideGitRepo: true,
-              defaultBackupRoot: process.env.SAM_ATT_BACKUP_DIR || 'C:\\SamAttBackups',
-              databaseTarget: loadConfig().samAttDb.database,
-            },
-            requestId: req.requestId,
-          });
-          return;
-        }
-
-        // 2. ผูกการอนุมัติเข้ากับ Target Commit และรายการไฟล์ Migration ที่ตรวจพบจริง (ห้ามอนุมัติไฟล์ A แล้วไปรันไฟล์ B)
-        const approvedTargetCommit = String(req.body?.approvedTargetCommit || '').trim();
-        const approvedFilesRaw: unknown[] = Array.isArray(req.body?.approvedMigrationFiles)
-          ? req.body.approvedMigrationFiles
-          : [];
-        const approvedFilesNormalized = Array.from(
-          new Set(approvedFilesRaw.map((f) => path.basename(String(f || '').trim())).filter(Boolean))
-        ).sort();
-
-        if (
-          !approvedTargetCommit ||
-          approvedTargetCommit !== expectedTargetCommit ||
-          approvedFilesNormalized.join(',') !== combinedPending.join(',')
-        ) {
-          await writeAuditLog({
-            requestId: req.requestId,
-            actorUsername: req.user!.username,
-            actorRole: req.user!.role,
-            ipAddress: req.ip || '127.0.0.1',
-            action: 'DEPLOYMENT_MIGRATION_APPROVAL_MISMATCH',
-            targetType: 'DEPLOYMENT',
-            targetId: expectedTargetCommit,
-            result: 'DENIED',
-            errorCode: 'MIGRATION_APPROVAL_MISMATCH',
-            detail: {
-              expectedTargetCommit,
-              approvedTargetCommit,
-              expectedMigrations: combinedPending,
-              approvedMigrations: approvedFilesNormalized,
-            },
-          });
-
-          res.status(409).json({
-            status: 'FAILED',
-            error: 'MIGRATION_APPROVAL_MISMATCH',
-            message:
-              'ข้อมูลการอนุมัติ Migration ไม่ตรงกับ Commit เป้าหมายหรือรายการไฟล์ Migration ล่าสุด กรุณาตรวจสอบและอนุมัติใหม่อีกครั้ง',
-            expectedTargetCommit,
-            expectedMigrations: combinedPending,
-            requestId: req.requestId,
-          });
-          return;
-        }
-
-        // 3. ยืนยันตัวตนด้วยรหัสผ่านของบัญชี ADMIN ที่กำลังล็อกอินจริง (พร้อม Brute-force Rate Limit & ห้ามบันทึกรหัสผ่าน)
-        const reauth = await verifyActorReauthentication({
-          userId: req.user!.id,
-          username: req.user!.username,
-          role: req.user!.role,
-          ipAddress: req.ip || '127.0.0.1',
-          requestId: req.requestId,
-          operationName: 'DEPLOYMENT_MIGRATION_APPROVAL',
-          targetType: 'DEPLOYMENT',
-          targetId: expectedTargetCommit,
-          confirmPassword: req.body?.confirmPassword,
-          impactAcknowledged: req.body?.impactAcknowledged,
+          },
         });
 
-        if (!reauth.ok) {
-          res.status(reauth.statusCode || 401).json({
-            status: 'FAILED',
-            error: reauth.errorCode || 'REAUTH_FAILED',
-            message: reauth.message || 'การยืนยันตัวตนด้วยรหัสผ่านผู้ดูแลระบบไม่ผ่าน',
-            lockedUntil: reauth.lockedUntil || null,
-            requestId: req.requestId,
-          });
-          return;
-        }
+        res.status(409).json({
+          status: 'FAILED',
+          error: 'DB_SCHEMA_CHANGE_BLOCKED',
+          message: 'เวอร์ชันนี้ต้องมีการปรับปรุงโครงสร้างฐานข้อมูล กรุณาติดต่อผู้ดูแลระบบก่อนอัปเดต',
+          targetCommit: expectedTargetCommit,
+          currentCommit: gitState.currentCommit,
+          pendingMigrations: combinedPending,
+          requestId: req.requestId,
+        });
+        return;
+      }
 
-        migrationApprovalRecorded = true;
-        cliArgs.push(
-          '-ApproveMigrations',
-          '-ApprovedCommit',
-          approvedTargetCommit,
-          '-ApprovedMigrations',
-          approvedFilesNormalized.join(',')
-        );
+      // 3. No-Update Protection: ห้ามอัปเดตซ้ำเมื่อ Installed Commit == Target Commit
+      const isSameCommitUpToDate =
+        gitState.available &&
+        gitState.currentCommit &&
+        expectedTargetCommit &&
+        gitState.currentCommit !== 'unknown' &&
+        expectedTargetCommit !== 'unknown' &&
+        gitState.currentCommit === expectedTargetCommit &&
+        !gitState.hasUpdates;
+
+      if (isSameCommitUpToDate) {
+        await writeAuditLog({
+          requestId: req.requestId,
+          actorUsername: req.user!.username,
+          actorRole: req.user!.role,
+          ipAddress: req.ip || '127.0.0.1',
+          action: 'DEPLOYMENT_BLOCKED_NO_UPDATE_AVAILABLE',
+          targetType: 'DEPLOYMENT',
+          targetId: expectedTargetCommit,
+          result: 'BLOCKED',
+          errorCode: 'NO_UPDATE_AVAILABLE',
+          detail: {
+            currentCommit: gitState.currentCommit,
+            targetCommit: expectedTargetCommit,
+          },
+        });
+
+        res.status(409).json({
+          status: 'NO_CHANGES',
+          error: 'NO_UPDATE_AVAILABLE',
+          message: 'เป็นเวอร์ชันล่าสุดแล้ว (Commit บนเครื่องตรงกับ GitHub) จึงไม่ต้องดำเนินการอัปเดตซ้ำ',
+          currentCommit: gitState.currentCommit,
+          targetCommit: expectedTargetCommit,
+          requestId: req.requestId,
+        });
+        return;
       }
 
       const windowsScriptPath = 'C:\\inetpub\\wwwroot\\Sam_Att\\deployment\\Deploy_Sam_Att.bat';
@@ -1532,6 +1546,162 @@ settingsRouter.post(
         return;
       }
 
+      const jobId = generateDeployJobId('appdeploy');
+      const jobStatusFile = getJobFilePath(jobId);
+      const lockFile = getDeployLockFilePath();
+      const diskLogPath = path.join(getDeployJobsDir(), `${jobId}.log`);
+      const cliArgs: string[] = [
+        '-NonInteractive',
+        '-JobId',
+        jobId,
+        '-JobStatusFile',
+        jobStatusFile,
+        '-LockFile',
+        lockFile,
+      ];
+
+      // On real Windows Server (without test runner), spawn detached so backend restart never kills caller!
+      if (!customDeployBatRunner && process.platform === 'win32') {
+        const useDirectPs1 = fs.existsSync(resolvedPs1Path);
+        const exeName = useDirectPs1 ? 'powershell.exe' : 'cmd.exe';
+        const exeArgs = useDirectPs1
+          ? [
+              '-NoProfile',
+              '-ExecutionPolicy',
+              'Bypass',
+              '-File',
+              resolvedPs1Path,
+              '-AppDir',
+              resolvedAppDir,
+              '-LogFilePath',
+              diskLogPath,
+              ...cliArgs,
+            ]
+          : ['/c', resolvedScriptPath, ...cliArgs];
+
+        const initialJob = createPersistentDeployJob({
+          jobId,
+          jobType: 'APP_UPDATE',
+          actorUsername: req.user!.username,
+          commitBefore: gitState.currentCommit,
+          targetCommit: expectedTargetCommit,
+          logFilePath: diskLogPath,
+        });
+        initialJob.status = 'RUNNING';
+        initialJob.steps[0].status = 'RUNNING';
+        initialJob.steps[0].startedAt = new Date().toISOString();
+        savePersistentDeployJob(initialJob);
+        acquireDeployLock({ jobId, pid: process.pid, actorUsername: req.user!.username });
+
+        try {
+          const child = spawn(exeName, exeArgs, {
+            cwd: resolvedAppDir,
+            env: {
+              ...process.env,
+              SAM_ATT_NO_PAUSE: '1',
+            },
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true,
+          });
+          if (child.pid) {
+            acquireDeployLock({ jobId, pid: child.pid, actorUsername: req.user!.username });
+            savePersistentDeployJob({
+              ...initialJob,
+              pid: child.pid,
+            });
+          }
+          child.unref();
+        } catch (spawnErr: unknown) {
+          releaseDeployLock(jobId);
+          const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
+          const failedJob = savePersistentDeployJob({
+            ...initialJob,
+            status: 'FAILED',
+            completedAt: new Date().toISOString(),
+            errorCode: 'BACKEND_START_FAILED',
+            errorMessage: sanitizeDeploymentOutput(msg),
+          });
+          res.status(500).json({
+            status: 'FAILED',
+            error: 'BACKEND_START_FAILED',
+            jobId,
+            job: failedJob,
+            message: `ไม่สามารถเริ่มสคริปต์อัปเดตบน Windows ได้: ${sanitizeDeploymentOutput(msg)}`,
+            requestId: req.requestId,
+          });
+          return;
+        }
+
+        await writeAuditLog({
+          requestId: req.requestId,
+          actorUsername: req.user!.username,
+          actorRole: req.user!.role,
+          ipAddress: req.ip || '127.0.0.1',
+          action: 'DEPLOYMENT_BAT_STARTED_DETACHED',
+          targetType: 'DEPLOYMENT',
+          targetId: expectedTargetCommit,
+          result: 'SUCCESS',
+          detail: {
+            jobId,
+            commitBefore: gitState.currentCommit,
+            targetCommit: expectedTargetCommit,
+            detached: true,
+          },
+        });
+
+        res.status(202).json({
+          status: 'RUNNING',
+          detached: true,
+          jobId,
+          scriptPath: useDirectPs1 ? resolvedPs1Path : resolvedScriptPath,
+          commitBefore: gitState.currentCommit,
+          targetCommit: expectedTargetCommit,
+          job: readPersistentDeployJob(jobId) || initialJob,
+          message:
+            'เริ่มกระบวนการอัปเดต Application 8 ขั้นตอนแล้ว (รองรับการรีสตาร์ท Sam_Att อัตโนมัติระหว่างอัปเดต)',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (!customDeployBatRunner) {
+        const centralJob = startCentralJob({
+          jobType: 'DEPLOYMENT_RUN',
+          actorUsername: req.user!.username,
+          initialStep: 'ไม่รองรับการรันสคริปต์ Windows ในสภาพแวดล้อมปัจจุบัน',
+          stage: 'PREFLIGHT',
+          totalCount: 8,
+        });
+        failCentralJob(centralJob.jobId, {
+          errorCode: 'UNSUPPORTED_OS_ENVIRONMENT',
+          errorMessage:
+            'การรันสคริปต์อัปเดต Deploy_Sam_Att.ps1 รองรับเฉพาะบนเครื่อง Windows Server เท่านั้น (สภาพแวดล้อมปัจจุบันไม่สามารถเรียก PowerShell Windows Service ได้)',
+          currentStep: 'ไม่รองรับการรันสคริปต์ Windows ในสภาพแวดล้อมปัจจุบัน',
+        });
+        res.status(501).json({
+          status: 'FAILED',
+          error: 'UNSUPPORTED_OS_ENVIRONMENT',
+          jobId: centralJob.jobId,
+          scriptPath: resolvedScriptPath,
+          diagnostic: {
+            exitCode: 1,
+            failedStepNumber: 1,
+            failedStepName: 'Preflight Check',
+            errorCode: 'UNSUPPORTED_OS_ENVIRONMENT',
+            detectedCause: `สภาพแวดล้อมเซิร์ฟเวอร์ปัจจุบันคือ ${process.platform} ไม่ใช่ Windows Server`,
+            remediation: 'ดำเนินการอัปเดตจริงบนเครื่อง Windows Server ของโรงพยาบาลสามชุก (C:\\inetpub\\wwwroot\\Sam_Att)',
+            rollbackStatus: 'NO_CHANGES_APPLIED',
+            rollbackStatusThai: 'หยุดก่อนเปลี่ยนแปลงระบบ — โค้ดและฐานข้อมูลเดิมไม่ถูกกระทบ',
+          },
+          message:
+            'การรันสคริปต์อัปเดต Deploy_Sam_Att.ps1 รองรับเฉพาะบนเครื่อง Windows Server เท่านั้น (สภาพแวดล้อมปัจจุบันไม่สามารถเรียก PowerShell Windows Service ได้)',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      // Test Runner path (synchronous test double execution with full persistent jobStore + lock coverage)
       batDeploymentRunning = true;
       const startTime = Date.now();
       const job = startCentralJob({
@@ -1542,97 +1712,26 @@ settingsRouter.post(
         totalCount: 8,
       });
 
+      const diskJob = createPersistentDeployJob({
+        jobId,
+        jobType: 'APP_UPDATE',
+        actorUsername: req.user!.username,
+        commitBefore: gitState.currentCommit,
+        targetCommit: expectedTargetCommit,
+        logFilePath: diskLogPath,
+        pid: process.pid,
+      });
+      acquireDeployLock({ jobId, pid: process.pid, actorUsername: req.user!.username });
+
       try {
         updateCentralJobStep(job.jobId, {
           stage: 'BACKING_UP',
-          currentStep: migrationApprovalRecorded
-            ? `กำลังรันสคริปต์อัปเดต 8 ขั้นตอน (${combinedPending.join(', ')})...`
-            : 'กำลังรันสคริปต์อัปเดต Application 8 ขั้นตอน Deploy_Sam_Att.ps1...',
+          currentStep: 'กำลังรันสคริปต์อัปเดต Application 8 ขั้นตอน Deploy_Sam_Att.ps1...',
           processedCount: 2,
           totalCount: 8,
         });
 
-        let batResult: DeployBatResult;
-
-        if (customDeployBatRunner) {
-          batResult = await customDeployBatRunner(resolvedScriptPath, cliArgs);
-        } else if (process.platform === 'win32') {
-          // เรียก powershell.exe โดยตรง (ไม่ผ่าน cmd.exe) เพื่อป้องกัน cmd.exe ตัดพารามิเตอร์ที่มีเครื่องหมายจุลภาค (เช่น -ApprovedMigrations a.sql,b.sql) และป้องกัน shell metacharacter
-          const useDirectPs1 = fs.existsSync(resolvedPs1Path);
-          const exeName = useDirectPs1 ? 'powershell.exe' : 'cmd.exe';
-          const exeArgs = useDirectPs1
-            ? [
-                '-NoProfile',
-                '-ExecutionPolicy',
-                'Bypass',
-                '-File',
-                resolvedPs1Path,
-                '-AppDir',
-                resolvedAppDir,
-                ...cliArgs,
-              ]
-            : ['/c', resolvedScriptPath, ...cliArgs];
-
-          batResult = await new Promise<DeployBatResult>((resolve) => {
-            execFile(
-              exeName,
-              exeArgs,
-              {
-                cwd: resolvedAppDir,
-                env: {
-                  ...process.env,
-                  SAM_ATT_NO_PAUSE: '1',
-                },
-                timeout: 600000,
-                maxBuffer: 16 * 1024 * 1024,
-                windowsHide: true,
-              },
-              (err, stdout, stderr) => {
-                const exitCode =
-                  err && typeof (err as { code?: number }).code === 'number'
-                    ? Number((err as { code?: number }).code)
-                    : err
-                      ? 1
-                      : 0;
-                resolve({
-                  exitCode,
-                  stdout: String(stdout || ''),
-                  stderr: String(stderr || (err ? err.message : '')),
-                  scriptPath: useDirectPs1 ? resolvedPs1Path : resolvedScriptPath,
-                  durationMs: Date.now() - startTime,
-                });
-              }
-            );
-          });
-        } else {
-          failCentralJob(job.jobId, {
-            errorCode: 'UNSUPPORTED_OS_ENVIRONMENT',
-            errorMessage:
-              'การรันสคริปต์อัปเดต Deploy_Sam_Att.ps1 รองรับเฉพาะบนเครื่อง Windows Server เท่านั้น (สภาพแวดล้อมปัจจุบันไม่สามารถเรียก PowerShell Windows Service ได้)',
-            currentStep: 'ไม่รองรับการรันสคริปต์ Windows ในสภาพแวดล้อมปัจจุบัน',
-          });
-          res.status(501).json({
-            status: 'FAILED',
-            error: 'UNSUPPORTED_OS_ENVIRONMENT',
-            jobId: job.jobId,
-            scriptPath: resolvedScriptPath,
-            diagnostic: {
-              exitCode: 1,
-              failedStepNumber: 1,
-              failedStepName: 'Preflight Check',
-              errorCode: 'UNSUPPORTED_OS_ENVIRONMENT',
-              detectedCause: `สภาพแวดล้อมเซิร์ฟเวอร์ปัจจุบันคือ ${process.platform} ไม่ใช่ Windows Server`,
-              remediation: 'ดำเนินการอัปเดตจริงบนเครื่อง Windows Server ของโรงพยาบาลสามชุก (C:\\inetpub\\wwwroot\\Sam_Att)',
-              rollbackStatus: 'NO_CHANGES_APPLIED',
-              rollbackStatusThai: 'หยุดก่อนเปลี่ยนแปลงระบบ — โค้ดและฐานข้อมูลเดิมไม่ถูกกระทบ',
-            },
-            message:
-              'การรันสคริปต์อัปเดต Deploy_Sam_Att.ps1 รองรับเฉพาะบนเครื่อง Windows Server เท่านั้น (สภาพแวดล้อมปัจจุบันไม่สามารถเรียก PowerShell Windows Service ได้)',
-            requestId: req.requestId,
-          });
-          return;
-        }
-
+        const batResult = await customDeployBatRunner(resolvedScriptPath, cliArgs);
         const safeStdout = sanitizeDeploymentOutput(batResult.stdout);
         const safeStderr = sanitizeDeploymentOutput(batResult.stderr);
         const parsedMeta = parseDeployOutputMetadata(`${safeStdout}\n${safeStderr}`);
@@ -1644,6 +1743,56 @@ settingsRouter.post(
         const diagnostic = success
           ? null
           : diagnoseDeploymentFailure(batResult.exitCode, safeStdout, safeStderr);
+
+        const isRolledBack = Boolean(
+          !success &&
+            (diagnostic?.rollbackStatus === 'ROLLED_BACK_CODE' ||
+              /ROLLED BACK SAFELY TO PREVIOUS VERSION/i.test(safeStdout))
+        );
+
+        const updatedSteps = createInitialSteps('APP_UPDATE').map((step) => {
+          if (success) {
+            return {
+              ...step,
+              status: 'PASS' as const,
+              startedAt: diskJob.startedAt,
+              completedAt: new Date().toISOString(),
+            };
+          }
+          const failNum = diagnostic?.failedStepNumber ?? 8;
+          if (step.stepNumber < failNum) {
+            return { ...step, status: 'PASS' as const };
+          }
+          if (step.stepNumber === failNum) {
+            return {
+              ...step,
+              status: 'FAIL' as const,
+              detail: diagnostic?.detectedCause || safeStderr || 'Deployment step failed',
+            };
+          }
+          return { ...step, status: 'SKIP' as const };
+        });
+
+        const persistedFinal = savePersistentDeployJob({
+          ...diskJob,
+          status: success ? 'SUCCESS' : isRolledBack ? 'ROLLED_BACK' : 'FAILED',
+          completedAt: new Date().toISOString(),
+          currentStepNumber: success ? 8 : diagnostic?.failedStepNumber || 8,
+          currentStepName: success ? 'Final Report' : diagnostic?.failedStepName || 'Deployment',
+          currentStepLabelThai: success
+            ? 'อัปเดต Application 8 ขั้นตอนสำเร็จ'
+            : diagnostic?.failedStepName || 'Deployment Failed',
+          progressPercent: 100,
+          commitBefore: commitBeforeVal,
+          commitAfter: recordedCommit,
+          snapshotDir: parsedMeta.backupDir,
+          rolledBack: isRolledBack,
+          errorCode: success ? null : diagnostic?.errorCode || `EXIT_CODE_${batResult.exitCode}`,
+          errorMessage: success ? null : diagnostic?.detectedCause || safeStderr || null,
+          historyRecorded: true,
+          logTail: `${safeStdout}\n${safeStderr}`.split(/\r?\n/).filter(Boolean).slice(-120),
+          steps: updatedSteps,
+        });
 
         const structuredNotes = success
           ? `[COMMIT ${commitBeforeVal.slice(0, 8)} -> ${recordedCommit.slice(0, 8)}]\n${safeStdout.slice(-900)}`
@@ -1665,8 +1814,8 @@ settingsRouter.post(
           [
             releaseVersion,
             recordedCommit.slice(0, 64),
-            (parsedMeta.backupSqlSha256 || 'bat-execution-verified').slice(0, 64),
-            migrationApprovalRecorded ? 'DEPLOY_BAT_WITH_MIGRATION' : 'DEPLOY_BAT',
+            'app-only-verified',
+            'DEPLOY_BAT',
             statusText,
             parsedMeta.backupDir ? parsedMeta.backupDir.slice(0, 255) : null,
             success ? 1 : 0,
@@ -1684,22 +1833,15 @@ settingsRouter.post(
           targetType: 'DEPLOYMENT',
           targetId: String(insertRes.insertId),
           result: success ? 'SUCCESS' : 'FAILURE',
-          errorCode: success
-            ? null
-            : parsedMeta.migrationApprovalRequired
-              ? 'MIGRATION_APPROVAL_REQUIRED'
-              : diagnostic?.errorCode || `EXIT_CODE_${batResult.exitCode}`,
+          errorCode: success ? null : diagnostic?.errorCode || `EXIT_CODE_${batResult.exitCode}`,
           detail: {
-            jobId: job.jobId,
+            jobId,
             scriptPath: batResult.scriptPath,
             exitCode: batResult.exitCode,
             durationMs: batResult.durationMs,
             commitBefore: commitBeforeVal,
             commitAfter: recordedCommit,
-            backupDir: parsedMeta.backupDir,
-            migrationsApproved: migrationApprovalRecorded ? combinedPending : [],
-            migrationsApplied: parsedMeta.migrationsApplied,
-            requiresAdminDatabaseRestore: parsedMeta.requiresAdminDatabaseRestore,
+            snapshotDir: parsedMeta.backupDir,
             failedStepNumber: diagnostic?.failedStepNumber ?? null,
             failedStepName: diagnostic?.failedStepName ?? null,
             detectedErrorCode: diagnostic?.errorCode ?? null,
@@ -1707,47 +1849,36 @@ settingsRouter.post(
         });
 
         if (!success) {
-          const errCode = parsedMeta.migrationApprovalRequired
-            ? 'MIGRATION_APPROVAL_REQUIRED'
-            : parsedMeta.requiresAdminDatabaseRestore
-              ? 'MANUAL_DB_RESTORE_REQUIRED'
-              : diagnostic?.errorCode || 'DEPLOYMENT_EXECUTION_FAILED';
-          const errMsg = parsedMeta.migrationApprovalRequired
-            ? 'ตรวจพบ Database Migration ที่ต้องได้รับอนุมัติจากผู้ดูแลระบบก่อนดำเนินการ (MIGRATION_APPROVAL_REQUIRED)'
-            : parsedMeta.requiresAdminDatabaseRestore
-              ? `การอัปเดตไม่สำเร็จหลังเริ่มรัน Migration (Exit Code: ${batResult.exitCode}) ระบบได้ย้อนซอร์สโค้ดแล้ว แต่ผู้ดูแลระบบต้องตรวจสอบและกู้คืนฐานข้อมูลด้วยตนเองหากจำเป็น`
-              : `การอัปเดตระบบไม่สำเร็จที่ขั้นตอน "${diagnostic?.failedStepName}" (${errCode}, Exit Code: ${batResult.exitCode}) — ${diagnostic?.detectedCause}`;
+          const errCode = diagnostic?.errorCode || 'DEPLOYMENT_EXECUTION_FAILED';
+          const errMsg = `การอัปเดตระบบไม่สำเร็จที่ขั้นตอน "${diagnostic?.failedStepName}" (${errCode}, Exit Code: ${batResult.exitCode}) — ${diagnostic?.detectedCause}`;
 
           failCentralJob(job.jobId, {
             errorCode: errCode,
             errorMessage: errMsg,
-            currentStep: parsedMeta.requiresAdminDatabaseRestore
-              ? 'ต้องดำเนินการเพิ่มเติม (ตรวจสอบ/กู้คืนฐานข้อมูล)'
-              : `ล้มเหลวที่ขั้นตอน ${diagnostic?.failedStepName || 'Deployment'}`,
+            currentStep: `ล้มเหลวที่ขั้นตอน ${diagnostic?.failedStepName || 'Deployment'}`,
             resultSummary: {
               deploymentId: insertRes.insertId,
               exitCode: batResult.exitCode,
               failedStepNumber: diagnostic?.failedStepNumber ?? null,
               failedStepName: diagnostic?.failedStepName ?? null,
               errorCode: errCode,
-              backupDir: parsedMeta.backupDir,
-              backupSqlPath: parsedMeta.backupSqlPath,
-              requiresAdminDatabaseRestore: parsedMeta.requiresAdminDatabaseRestore,
+              snapshotDir: parsedMeta.backupDir,
             },
           });
 
-          res.status(parsedMeta.migrationApprovalRequired ? 409 : 422).json({
+          res.status(422).json({
             status: 'FAILED',
             error: errCode,
-            jobId: job.jobId,
+            jobId,
+            job: persistedFinal,
             deploymentId: insertRes.insertId,
             exitCode: batResult.exitCode,
             scriptPath: batResult.scriptPath,
             commitBefore: commitBeforeVal,
             targetCommit: expectedTargetCommit,
+            snapshotDir: parsedMeta.backupDir,
             backupDir: parsedMeta.backupDir,
-            backupSqlPath: parsedMeta.backupSqlPath,
-            requiresAdminDatabaseRestore: parsedMeta.requiresAdminDatabaseRestore,
+            rolledBack: isRolledBack,
             diagnostic,
             output: safeStdout,
             errorOutput: safeStderr,
@@ -1766,14 +1897,14 @@ settingsRouter.post(
             deploymentId: insertRes.insertId,
             commitBefore: commitBeforeVal,
             commitAfter: recordedCommit,
-            backupDir: parsedMeta.backupDir,
-            migrationsApplied: parsedMeta.migrationsApplied,
+            snapshotDir: parsedMeta.backupDir,
           },
         });
 
         res.json({
           status: 'SUCCESS',
-          jobId: job.jobId,
+          jobId,
+          job: persistedFinal,
           deploymentId: insertRes.insertId,
           releaseVersion,
           exitCode: 0,
@@ -1781,15 +1912,15 @@ settingsRouter.post(
           durationMs: batResult.durationMs,
           commitBefore: commitBeforeVal,
           commitAfter: recordedCommit,
+          snapshotDir: parsedMeta.backupDir,
           backupDir: parsedMeta.backupDir,
-          backupSqlPath: parsedMeta.backupSqlPath,
-          migrationsApplied: parsedMeta.migrationsApplied,
           executedAt: new Date().toISOString(),
           executedBy: req.user!.username,
           output: safeStdout,
           message: 'อัปเดตระบบ Sam_Att V2 Standalone สำเร็จเรียบร้อยแล้ว',
         });
       } finally {
+        releaseDeployLock(jobId);
         batDeploymentRunning = false;
       }
     } catch (err) {
@@ -1808,6 +1939,296 @@ settingsRouter.all('/deployment/run-bat', (req, res) => {
     allowedMethods: ['POST'],
     receivedMethod: req.method,
     message: `Endpoint /api/Sam_Att/deployment/run-bat รองรับเฉพาะคำสั่ง POST เท่านั้น (ได้รับ ${req.method}) — หากเกิดจาก Reverse Proxy/IIS Redirect 301/302 ให้ตรวจสอบให้ส่งตรงผ่าน HTTPS POST หรือใช้ 307/308`,
+    requestId: req.requestId,
+  });
+});
+
+// B16. Application-Only Safe Rollback (ADMIN Only — Restores Code & dist/ without touching Database or .env)
+settingsRouter.post(
+  '/deployment/rollback-app',
+  requireAuth,
+  requireRoles('ADMIN'),
+  async (req, res, next) => {
+    try {
+      if (req.body?.confirmRollback !== true) {
+        res.status(400).json({
+          status: 'FAILED',
+          error: 'CONFIRMATION_REQUIRED',
+          message: 'กรุณายืนยันการย้อนกลับเวอร์ชัน Application ก่อนดำเนินการ (confirmRollback: true)',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const activeLock = getDeployLockStatus();
+      const currentDiskJob = readLatestPersistentDeployJob();
+      const diskRunning =
+        currentDiskJob && (currentDiskJob.status === 'PENDING' || currentDiskJob.status === 'RUNNING');
+
+      if (isDeploymentInProgress() || batDeploymentRunning || activeLock.locked || diskRunning) {
+        res.status(409).json({
+          status: 'FAILED',
+          error: 'DEPLOYMENT_ALREADY_IN_PROGRESS',
+          message: 'กำลังมีการอัปเดตหรือย้อนกลับระบบทำงานอยู่ กรุณารอให้เสร็จสิ้นก่อน',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const snapshots = listAvailableAppSnapshots();
+      const requestedSnapshotDir = typeof req.body?.snapshotDir === 'string' ? req.body.snapshotDir.trim() : '';
+      let chosenSnapshot = snapshots[0] || null;
+      if (requestedSnapshotDir) {
+        const resolvedReq = path.resolve(requestedSnapshotDir);
+        const matched = snapshots.find((s) => path.resolve(s.snapshotDir) === resolvedReq);
+        if (!matched) {
+          res.status(400).json({
+            status: 'FAILED',
+            error: 'INVALID_SNAPSHOT_DIR',
+            message: 'โฟลเดอร์ Snapshot ที่เลือกไม่อยู่ในรายการที่ตรวจสอบได้หรืออยู่นอก C:\\SamAttDeploySnapshots',
+            requestId: req.requestId,
+          });
+          return;
+        }
+        chosenSnapshot = matched;
+      }
+
+      if (!chosenSnapshot && !customDeployRollbackRunner) {
+        res.status(404).json({
+          status: 'FAILED',
+          error: 'ROLLBACK_SNAPSHOT_NOT_FOUND',
+          message: 'ไม่พบ Application Snapshot สำหรับย้อนกลับใน C:\\SamAttDeploySnapshots',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const windowsPs1Path = 'C:\\inetpub\\wwwroot\\Sam_Att\\deployment\\Deploy_Sam_Att.ps1';
+      const localPs1Path = path.resolve(process.cwd(), 'deployment', 'Deploy_Sam_Att.ps1');
+      const resolvedPs1Path = fs.existsSync(windowsPs1Path) ? windowsPs1Path : localPs1Path;
+      const resolvedAppDir = path.dirname(path.dirname(resolvedPs1Path));
+
+      const jobId = generateDeployJobId('rollback');
+      const jobStatusFile = getJobFilePath(jobId);
+      const lockFile = getDeployLockFilePath();
+      const diskLogPath = path.join(getDeployJobsDir(), `${jobId}.log`);
+      const targetSnapshotPath = chosenSnapshot?.snapshotDir || requestedSnapshotDir || '';
+      const rollbackArgs = [
+        '-NonInteractive',
+        '-RollbackOnly',
+        '-JobId',
+        jobId,
+        '-JobStatusFile',
+        jobStatusFile,
+        '-LockFile',
+        lockFile,
+        ...(targetSnapshotPath ? ['-SnapshotDirToRestore', targetSnapshotPath] : []),
+      ];
+
+      if (!customDeployRollbackRunner && process.platform === 'win32') {
+        const initialJob = createPersistentDeployJob({
+          jobId,
+          jobType: 'APP_ROLLBACK',
+          actorUsername: req.user!.username,
+          commitBefore: chosenSnapshot?.commitBefore || null,
+          targetCommit: chosenSnapshot?.commitBefore || null,
+          logFilePath: diskLogPath,
+        });
+        initialJob.status = 'RUNNING';
+        initialJob.rollbackSnapshotDir = targetSnapshotPath;
+        initialJob.steps[0].status = 'RUNNING';
+        initialJob.steps[0].startedAt = new Date().toISOString();
+        savePersistentDeployJob(initialJob);
+        acquireDeployLock({ jobId, pid: process.pid, actorUsername: req.user!.username });
+
+        const child = spawn(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            resolvedPs1Path,
+            '-AppDir',
+            resolvedAppDir,
+            '-LogFilePath',
+            diskLogPath,
+            ...rollbackArgs,
+          ],
+          {
+            cwd: resolvedAppDir,
+            env: { ...process.env, SAM_ATT_NO_PAUSE: '1' },
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true,
+          }
+        );
+        if (child.pid) {
+          acquireDeployLock({ jobId, pid: child.pid, actorUsername: req.user!.username });
+          savePersistentDeployJob({ ...initialJob, pid: child.pid });
+        }
+        child.unref();
+
+        await writeAuditLog({
+          requestId: req.requestId,
+          actorUsername: req.user!.username,
+          actorRole: req.user!.role,
+          ipAddress: req.ip || '127.0.0.1',
+          action: 'DEPLOYMENT_APP_ROLLBACK_STARTED',
+          targetType: 'DEPLOYMENT',
+          targetId: chosenSnapshot?.snapshotName || 'latest',
+          result: 'SUCCESS',
+          detail: {
+            jobId,
+            snapshotDir: targetSnapshotPath,
+            commitBefore: chosenSnapshot?.commitBefore || null,
+            databaseTouched: false,
+          },
+        });
+
+        res.status(202).json({
+          status: 'RUNNING',
+          detached: true,
+          jobId,
+          snapshotDir: targetSnapshotPath,
+          job: readPersistentDeployJob(jobId) || initialJob,
+          message: 'เริ่มกระบวนการย้อนกลับ Application ไปยังเวอร์ชันก่อนหน้าแล้ว (ไม่แตะต้องฐานข้อมูลและ .env)',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      if (!customDeployRollbackRunner) {
+        res.status(501).json({
+          status: 'FAILED',
+          error: 'UNSUPPORTED_OS_ENVIRONMENT',
+          message: 'การสั่งย้อนกลับ Application อัตโนมัติรองรับเฉพาะบนเครื่อง Windows Server เท่านั้น',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      batDeploymentRunning = true;
+      const diskJob = createPersistentDeployJob({
+        jobId,
+        jobType: 'APP_ROLLBACK',
+        actorUsername: req.user!.username,
+        commitBefore: chosenSnapshot?.commitBefore || null,
+        targetCommit: chosenSnapshot?.commitBefore || null,
+        logFilePath: diskLogPath,
+        pid: process.pid,
+      });
+      acquireDeployLock({ jobId, pid: process.pid, actorUsername: req.user!.username });
+
+      try {
+        const rbResult = await customDeployRollbackRunner(resolvedPs1Path, rollbackArgs);
+        const safeStdout = sanitizeDeploymentOutput(rbResult.stdout);
+        const safeStderr = sanitizeDeploymentOutput(rbResult.stderr);
+        const parsedMeta = parseDeployOutputMetadata(`${safeStdout}\n${safeStderr}`);
+        const success = rbResult.exitCode === 0;
+        const releaseVersion = readPackageVersion();
+        const restoredCommit = parsedMeta.commitAfter || chosenSnapshot?.commitBefore || 'unknown';
+
+        const persistedFinal = savePersistentDeployJob({
+          ...diskJob,
+          status: success ? 'SUCCESS' : 'FAILED',
+          completedAt: new Date().toISOString(),
+          currentStepNumber: 5,
+          currentStepName: 'Health Check & Report',
+          currentStepLabelThai: success ? 'ย้อนกลับ Application และ Health Check สำเร็จ' : 'การย้อนกลับ Application ล้มเหลว',
+          progressPercent: 100,
+          commitAfter: restoredCommit,
+          rolledBack: success,
+          rollbackSnapshotDir: parsedMeta.backupDir || targetSnapshotPath || null,
+          errorCode: success ? null : 'ROLLBACK_FAILED',
+          errorMessage: success ? null : safeStderr || 'Application rollback failed',
+          historyRecorded: true,
+          logTail: `${safeStdout}\n${safeStderr}`.split(/\r?\n/).filter(Boolean).slice(-120),
+          steps: createInitialSteps('APP_ROLLBACK').map((s) => ({
+            ...s,
+            status: success ? ('PASS' as const) : ('FAIL' as const),
+          })),
+        });
+
+        const insertRes = await dbExecute(
+          `INSERT INTO deployment_history
+             (release_version, commit_sha, artifact_sha256, action_type, status, backup_archive_path, preflight_passed, notes, executed_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            releaseVersion,
+            restoredCommit.slice(0, 64),
+            'app-only-rollback',
+            'APP_ROLLBACK',
+            success ? 'SUCCESS' : 'FAILED',
+            (parsedMeta.backupDir || targetSnapshotPath || null)?.slice(0, 255) || null,
+            success ? 1 : 0,
+            sanitizeDeploymentOutput(safeStdout || safeStderr).slice(0, 1500),
+            req.user!.username,
+          ]
+        );
+
+        await writeAuditLog({
+          requestId: req.requestId,
+          actorUsername: req.user!.username,
+          actorRole: req.user!.role,
+          ipAddress: req.ip || '127.0.0.1',
+          action: 'DEPLOYMENT_APP_ROLLBACK_COMPLETED',
+          targetType: 'DEPLOYMENT',
+          targetId: String(insertRes.insertId),
+          result: success ? 'SUCCESS' : 'FAILURE',
+          errorCode: success ? null : 'ROLLBACK_FAILED',
+          detail: {
+            jobId,
+            snapshotDir: targetSnapshotPath || parsedMeta.backupDir,
+            restoredCommit,
+            databaseTouched: false,
+          },
+        });
+
+        if (!success) {
+          res.status(422).json({
+            status: 'FAILED',
+            error: 'ROLLBACK_FAILED',
+            jobId,
+            job: persistedFinal,
+            output: safeStdout,
+            errorOutput: safeStderr,
+            message: 'การย้อนกลับ Application ไม่สำเร็จ กรุณาตรวจสอบ Log บนเซิร์ฟเวอร์',
+            requestId: req.requestId,
+          });
+          return;
+        }
+
+        res.json({
+          status: 'SUCCESS',
+          jobId,
+          job: persistedFinal,
+          deploymentId: insertRes.insertId,
+          restoredCommit,
+          snapshotDir: targetSnapshotPath || parsedMeta.backupDir,
+          databaseTouched: false,
+          output: safeStdout,
+          message: 'ย้อนกลับ Application ไปยังเวอร์ชันก่อนหน้าและตรวจสอบ Health Check สำเร็จแล้ว (ไม่แตะต้องฐานข้อมูล)',
+        });
+      } finally {
+        releaseDeployLock(jobId);
+        batDeploymentRunning = false;
+      }
+    } catch (err) {
+      batDeploymentRunning = false;
+      next(err);
+    }
+  }
+);
+
+settingsRouter.all('/deployment/rollback-app', (req, res) => {
+  res.setHeader('Allow', 'POST');
+  res.status(405).json({
+    status: 'FAILED',
+    error: 'METHOD_NOT_ALLOWED',
+    allowedMethods: ['POST'],
+    receivedMethod: req.method,
+    message: `Endpoint /api/Sam_Att/deployment/rollback-app รองรับเฉพาะคำสั่ง POST เท่านั้น`,
     requestId: req.requestId,
   });
 });

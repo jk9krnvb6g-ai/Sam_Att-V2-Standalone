@@ -1560,7 +1560,10 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       .split(/\r?\n/)
       .filter((line) => !line.trim().startsWith('#'))
       .join('\n');
-    assert.ok(ps1Content.includes('$TotalSteps = 8'), 'Deploy_Sam_Att.ps1 must define 8 steps');
+    assert.ok(
+      ps1Content.includes('$TotalSteps = 8') || ps1Content.includes('$TotalSteps = if ($RollbackOnly) { 5 } else { 8 }'),
+      'Deploy_Sam_Att.ps1 must define 8 steps'
+    );
     assert.ok(ps1Content.includes('DB_SCHEMA_CHANGE_BLOCKED'), 'Deploy_Sam_Att.ps1 must block DB schema/migration changes');
     assert.ok(!ps1CodeOnly.includes('mysqldump'), 'Deploy_Sam_Att.ps1 must be strictly Application-Only without mysqldump');
     // Must forbid destructive git reset --hard / git clean -fd and iisreset execution
@@ -1619,18 +1622,19 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       assert.equal(s2.finalBanner, 'DEPLOYMENT ABORTED');
       assert.ok(s2.consoleOutput.includes('PREFLIGHT_DIRTY_WORKING_TREE'));
 
-      // Scenario 3: npm install ล้มเหลว (Fails at Step 4 -> Automatic Safe Rollback)
+      // Scenario 3: npm ci lock/install failure when lockfile changes (Step 4 stops Sam_Att first -> Safe App Rollback)
       const s3 = await runOneClickDeployment({
         appDir: mockAppDir,
-        hooks: { simulateNpmInstallFailure: true },
+        hooks: { lockfileChanged: true, simulateNpmInstallFailure: true },
       });
       assert.equal(s3.exitCode, 1);
       assert.equal(s3.finalBanner, 'DEPLOYMENT ROLLED_BACK');
       assert.equal(s3.rolledBack, true);
       assert.equal(s3.rollbackSucceeded, true);
+      assert.equal(s3.stoppedSamAttBeforeNpmCi, true);
       assert.equal(s3.commitAfter, s3.commitBefore, 'Must revert commit back to commitBefore');
 
-      // Scenario 4: Typecheck ไม่ผ่าน (Fails at Step 5 -> Automatic Safe Rollback)
+      // Scenario 4: Typecheck ไม่ผ่าน (Fails at Step 5 -> Automatic Safe App Rollback)
       const s4 = await runOneClickDeployment({
         appDir: mockAppDir,
         hooks: { simulateTypecheckFailure: true },
@@ -1639,16 +1643,16 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       assert.equal(s4.finalBanner, 'DEPLOYMENT ROLLED_BACK');
       assert.ok(s4.consoleOutput.includes('TYPECHECK_FAILED'));
 
-      // Scenario 5: Unit Tests ไม่ผ่าน (Fails at Step 5 -> Automatic Safe Rollback)
+      // Scenario 5: npm ci EPERM lock error (Fails at Step 4 after retries -> Automatic Safe App Rollback)
       const s5 = await runOneClickDeployment({
         appDir: mockAppDir,
-        hooks: { simulateUnitTestFailure: true },
+        hooks: { lockfileChanged: true, simulateNpmLockError: true },
       });
       assert.equal(s5.exitCode, 1);
       assert.equal(s5.finalBanner, 'DEPLOYMENT ROLLED_BACK');
-      assert.ok(s5.consoleOutput.includes('UNIT_TESTS_FAILED'));
+      assert.ok(s5.consoleOutput.includes('NPM_CI_LOCK_ERROR'));
 
-      // Scenario 6: Build ไม่สำเร็จ (Fails at Step 5 -> Automatic Safe Rollback)
+      // Scenario 6: Build ไม่สำเร็จ (Fails at Step 5 -> Automatic Safe App Rollback)
       const s6 = await runOneClickDeployment({
         appDir: mockAppDir,
         hooks: { simulateBuildFailure: true },
@@ -1667,7 +1671,7 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       assert.equal(s7.foreignProcessKilled, false);
       assert.ok(s7.consoleOutput.includes('PREFLIGHT_PORT_4101_FOREIGN_PROCESS'));
 
-      // Scenario 8: Backend เริ่มไม่สำเร็จ (Fails at Step 6 -> Automatic Safe Rollback)
+      // Scenario 8: Backend เริ่มไม่สำเร็จ (Fails at Step 6 -> Automatic Safe App Rollback)
       const s8 = await runOneClickDeployment({
         appDir: mockAppDir,
         hooks: { simulateBackendStartFailure: true },
@@ -1676,7 +1680,7 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       assert.equal(s8.finalBanner, 'DEPLOYMENT ROLLED_BACK');
       assert.ok(s8.consoleOutput.includes('BACKEND_START_FAILED'));
 
-      // Scenario 9: Health API ไม่ตอบ (Fails at Step 7 -> Automatic Safe Rollback)
+      // Scenario 9: Health API ไม่ตอบ (Fails at Step 7 -> Automatic Safe App Rollback)
       const s9 = await runOneClickDeployment({
         appDir: mockAppDir,
         hooks: { simulateHealthApiUnreachable: true },
@@ -1686,7 +1690,7 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       assert.ok(s9.consoleOutput.includes('HEALTH_API_UNREACHABLE'));
       assert.ok(!s9.consoleOutput.includes('DEPLOYMENT SUCCESS'));
 
-      // Scenario 10: MySQL เชื่อมต่อไม่ได้ (Fails at Step 7 -> Automatic Safe Rollback, no SQLite fallback)
+      // Scenario 10: MySQL เชื่อมต่อไม่ได้ (Fails at Step 7 -> Automatic Safe App Rollback, no SQLite fallback)
       const s10 = await runOneClickDeployment({
         appDir: mockAppDir,
         hooks: { simulateMysqlDisconnected: true },
@@ -1695,14 +1699,14 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       assert.equal(s10.finalBanner, 'DEPLOYMENT ROLLED_BACK');
       assert.ok(s10.consoleOutput.includes('MYSQL_DISCONNECTED'));
 
-      // Scenario 11: Backup ไม่สำเร็จ (Fails at Step 3 -> Aborts before modifying dependencies/build/service)
+      // Scenario 11: Snapshot ไม่สำเร็จ (Fails at Step 3 -> Aborts before git pull / dependencies / build / service)
       const s11 = await runOneClickDeployment({
         appDir: mockAppDir,
-        hooks: { simulateBackupFailure: true },
+        hooks: { simulateSnapshotFailure: true },
       });
       assert.equal(s11.exitCode, 1);
-      assert.ok(s11.consoleOutput.includes('BACKUP_FAILED'));
-      assert.equal(s11.steps.some((st) => st.stepNumber === 4), false, 'Must not proceed to Step 4 when Backup fails');
+      assert.ok(s11.consoleOutput.includes('SNAPSHOT_FAILED'));
+      assert.equal(s11.steps.some((st) => st.stepNumber === 4), false, 'Must not proceed to Step 4 when Snapshot fails');
 
       // Scenario 12: Rollback ไม่สำเร็จ (Reports CRITICAL status with Exit Code 2, never SUCCESS)
       const s12 = await runOneClickDeployment({
@@ -1738,20 +1742,31 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       assert.equal(s14.finalBanner, 'DEPLOYMENT ABORTED');
       assert.ok(s14.consoleOutput.includes('PREFLIGHT_IIS_PERMISSION_DENIED'));
 
-      // Scenario 15: ต้องไม่กระทบ Procurement + ห้ามรัน Migration อัตโนมัติ + ปิดบังรหัสผ่านใน Log + Full Happy Path
+      // Scenario 15: No-Update Protection + DB Schema Block + CheckOnly + App-Only Happy Path (no DB dump, no npm test in Prod, smart lockfile skip)
+      const sNoUpdate = await runOneClickDeployment({
+        appDir: mockAppDir,
+        hooks: {
+          commitBefore: 'aaaa111100000000000000000000000000000001',
+          remoteCommit: 'aaaa111100000000000000000000000000000001',
+        },
+      });
+      assert.equal(sNoUpdate.exitCode, 0);
+      assert.equal(sNoUpdate.noChanges, true);
+      assert.equal(sNoUpdate.finalBanner, 'DEPLOYMENT NO_CHANGES');
+
       const sMig = await runOneClickDeployment({
         appDir: mockAppDir,
-        hooks: { pendingMigrations: ['database/migrations/002_new_table.sql'] },
+        hooks: { pendingMigrations: ['database/migrations/004_new_table.sql'] },
       });
       assert.equal(sMig.exitCode, 1);
-      assert.ok(sMig.consoleOutput.includes('MIGRATION_APPROVAL_REQUIRED'));
+      assert.ok(sMig.consoleOutput.includes('DB_SCHEMA_CHANGE_BLOCKED'));
 
       const sCheckOnly = await runOneClickDeployment({
         appDir: mockAppDir,
         checkOnly: true,
       });
       assert.equal(sCheckOnly.exitCode, 0);
-      assert.equal(sCheckOnly.steps.length, 2, 'CheckOnly mode stops cleanly after Step 2 inspection');
+      assert.equal(sCheckOnly.steps.length, 3, 'CheckOnly mode stops cleanly after Step 3 impact inspection');
 
       const sHappy = await runOneClickDeployment({
         appDir: mockAppDir,
@@ -1764,17 +1779,31 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       assert.equal(sHappy.procurementTouched, false, 'Procurement must never be touched');
       assert.equal(sHappy.iisResetExecuted, false, 'iisreset must never be executed');
       assert.equal(sHappy.scannerExeModified, false, 'ScannerReader EXE must never be modified');
-      assert.equal(sHappy.steps.length, 7);
-      assert.ok(sHappy.steps.every((st) => st.status === 'PASS'));
+      assert.equal(sHappy.backupSqlPath, null, 'App-Only deploy must NEVER create DB SQL dump');
+      assert.equal(sHappy.ranNpmTestInProd, false, 'Production deploy must NEVER run npm test');
+      assert.equal(sHappy.npmCiSkipped, true, 'Unchanged lockfile must skip npm ci');
+      assert.equal(sHappy.steps.length, 8);
+      assert.ok(sHappy.steps.every((st) => st.status === 'PASS' || st.status === 'SKIP'));
       assert.ok(sHappy.consoleOutput.includes('Frontend HTTPS : 200 OK'));
       assert.ok(sHappy.consoleOutput.includes('Backend API    : 200 OK'));
-      assert.ok(sHappy.consoleOutput.includes('MySQL          : CONNECTED'));
+      assert.ok(sHappy.consoleOutput.includes('MySQL          : CONNECTED (READ-ONLY CHECK)'));
       assert.ok(sHappy.consoleOutput.includes('Database       : samchuk_attendance_v2'));
       assert.ok(sHappy.consoleOutput.includes('Port           : 4101'));
       assert.ok(sHappy.consoleOutput.includes('DEPLOYMENT SUCCESS'));
       // Verify secret password is redacted from logs and console output
       assert.ok(!sHappy.logContent.includes('SuperSecretMysqlPass#2026!'), 'MySQL password must never appear in logs');
       assert.ok(!sHappy.consoleOutput.includes('SuperSecretMysqlPass#2026!'), 'MySQL password must never appear in console');
+
+      // Manual Application-Only Rollback from Snapshot works cleanly
+      assert.ok(sHappy.snapshotDir);
+      const sRollback = await runOneClickDeployment({
+        appDir: mockAppDir,
+        rollbackOnly: true,
+        snapshotDirToRestore: sHappy.snapshotDir!,
+      });
+      assert.equal(sRollback.exitCode, 0);
+      assert.equal(sRollback.finalBanner, 'DEPLOYMENT ROLLED_BACK_MANUAL');
+      assert.equal(sRollback.requiresAdminDatabaseRestore, false);
     } finally {
       fs.rmSync(mockAppDir, { recursive: true, force: true });
     }
@@ -2126,10 +2155,35 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
     });
     assert.equal(nonAdminDeploy.status, 403);
 
-    // 2. ADMIN with test runner double executes cleanly and records deployment_history + audit_logs
+    // 2. ADMIN with No-Update returns 409 NO_UPDATE_AVAILABLE; when updates exist runner executes cleanly and records deployment_history + audit_logs
+    const { setDeploymentGitInspectorForTests } = await import('../src/modules/settings/routes.ts');
+    setDeploymentGitInspectorForTests(async () => ({
+      available: true,
+      branch: 'main',
+      currentCommit: 'fb866e5000000000000000000000000000000001',
+      targetCommit: 'fb866e5000000000000000000000000000000001',
+      hasUpdates: false,
+      gitMigrationFiles: [],
+    }));
+    const noUpdateDeploy = await apiCall('/api/Sam_Att/deployment/run-bat', {
+      method: 'POST',
+      token,
+      body: { confirmRun: true },
+    });
+    assert.equal(noUpdateDeploy.status, 409);
+    assert.equal(noUpdateDeploy.data.error, 'NO_UPDATE_AVAILABLE');
+
+    setDeploymentGitInspectorForTests(async () => ({
+      available: true,
+      branch: 'main',
+      currentCommit: 'fb866e5000000000000000000000000000000001',
+      targetCommit: 'abcdef0200000000000000000000000000000002',
+      hasUpdates: true,
+      gitMigrationFiles: [],
+    }));
     setDeployBatRunnerForTests(async (scriptPath) => ({
       exitCode: 0,
-      stdout: `Executed ${path.basename(scriptPath)}\nCommit : fb866e50 -> fb866e50\nDEPLOYMENT SUCCESS\n`,
+      stdout: `Executed ${path.basename(scriptPath)}\nCommit : fb866e50 -> abcdef02\nDEPLOYMENT SUCCESS\n`,
       stderr: '',
       scriptPath,
       durationMs: 125,
@@ -2146,6 +2200,7 @@ describe('Sam_Att V2 Standalone — Full Verification Matrix (Phase 0 to Phase 6
       assert.ok(adminDeploy.data.output.includes('DEPLOYMENT SUCCESS'));
     } finally {
       setDeployBatRunnerForTests(null);
+      setDeploymentGitInspectorForTests(null);
     }
   });
 

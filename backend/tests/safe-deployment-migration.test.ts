@@ -55,9 +55,16 @@ import {
 } from '../src/database/adapter.ts';
 import { createExpressApp } from '../src/app.ts';
 import {
+  sanitizeDeploymentOutput,
   setDeployBatRunnerForTests,
+  setDeployRollbackRunnerForTests,
   setDeploymentGitInspectorForTests,
 } from '../src/modules/settings/routes.ts';
+import {
+  acquireDeployLock,
+  listAvailableAppSnapshots,
+  releaseDeployLock,
+} from '../src/modules/deployment/jobStore.ts';
 import { runOneClickDeployment } from '../../deployment/deploy-runner.ts';
 
 let serverUrl = '';
@@ -193,15 +200,15 @@ test('Safe Deployment & Database Migration Governance Suite (18 Scenarios)', asy
     assert.equal(userLogin.status, 200);
     generalToken = userLogin.data.token;
     // -------------------------------------------------------------------------
-    // Scenario 1, 7, 8: Runner — No migrations happy path, Backup before git pull,
-    // Backup strictly outside Git repo, Backup failure aborts before pull
+    // Scenario 1, 7, 8: Runner — App-Only Snapshot strictly outside Git repo BEFORE git pull,
+    // zero DB dump, zero npm test in Prod, Snapshot failure aborts cleanly before pull
     // -------------------------------------------------------------------------
-    await t.test('1 & 8. Update without new migrations stores verified backup outside repo strictly BEFORE git pull', async () => {
+    await t.test('1 & 8. App-Only update stores snapshot outside repo strictly BEFORE git pull with zero DB dump and zero npm test', async () => {
       const ws = createIsolatedWorkspace();
       try {
         const res = await runOneClickDeployment({
           appDir: ws.appDir,
-          backupRootDir: ws.backupRootDir,
+          snapshotRootDir: ws.backupRootDir,
           hooks: {
             commitBefore: '9f1cdc1000000000000000000000000000000001',
             remoteCommit: 'aaaa222200000000000000000000000000000002',
@@ -212,54 +219,56 @@ test('Safe Deployment & Database Migration Governance Suite (18 Scenarios)', asy
         assert.equal(res.finalBanner, 'DEPLOYMENT SUCCESS');
         assert.equal(res.backupStoredOutsideRepo, true);
         assert.equal(res.backupCompletedBeforeGitPull, true);
-        assert.ok(res.backupDir && res.backupDir.startsWith(ws.backupRootDir));
-        assert.ok(res.backupSqlPath && fs.existsSync(res.backupSqlPath));
-        assert.ok(res.backupSqlSha256 && res.backupSqlSha256.length === 64);
+        assert.ok(res.snapshotDir && res.snapshotDir.startsWith(ws.backupRootDir));
+        assert.equal(res.backupSqlPath, null, 'App-Only deploy must NOT create SQL dump');
+        assert.equal(res.ranNpmTestInProd, false, 'Prod deploy must NOT run npm test');
+        assert.equal(res.npmCiSkipped, true, 'Unchanged lockfile must skip npm ci');
         assert.equal(res.procurementTouched, false);
         assert.equal(res.iisResetExecuted, false);
 
-        // Reject backup dir inside Git repo
+        // Reject snapshot dir inside Git repo
         const insideRepoRes = await runOneClickDeployment({
           appDir: ws.appDir,
-          backupRootDir: path.join(ws.appDir, 'backups'),
+          snapshotRootDir: path.join(ws.appDir, 'snapshots'),
         });
         assert.equal(insideRepoRes.exitCode, 1);
         assert.equal(insideRepoRes.finalBanner, 'DEPLOYMENT ABORTED');
-        assert.ok(insideRepoRes.consoleOutput.includes('PREFLIGHT_BACKUP_DIR_INSIDE_GIT'));
+        assert.ok(insideRepoRes.consoleOutput.includes('PREFLIGHT_SNAPSHOT_DIR_INSIDE_GIT'));
       } finally {
         ws.cleanup();
       }
     });
 
-    await t.test('7. Database backup failure aborts strictly BEFORE git pull and never restarts backend', async () => {
+    await t.test('7. Snapshot failure aborts strictly BEFORE git pull and never restarts backend', async () => {
       const ws = createIsolatedWorkspace();
       try {
         const commitBefore = '9f1cdc1000000000000000000000000000000001';
         const res = await runOneClickDeployment({
           appDir: ws.appDir,
-          backupRootDir: ws.backupRootDir,
+          snapshotRootDir: ws.backupRootDir,
           hooks: {
             commitBefore,
             remoteCommit: 'bbbb333300000000000000000000000000000003',
-            simulateDbBackupFailure: true,
+            simulateSnapshotFailure: true,
           },
         });
         assert.equal(res.exitCode, 1);
         assert.equal(res.finalBanner, 'DEPLOYMENT ABORTED');
-        assert.equal(res.commitAfter, commitBefore, 'git pull must NOT have advanced commit when backup failed');
+        assert.equal(res.commitAfter, commitBefore, 'git pull must NOT have advanced commit when snapshot failed');
         assert.equal(res.backendRestarted, false);
         assert.equal(res.steps.some((s) => s.stepNumber >= 4), false);
-        assert.ok(res.consoleOutput.includes('BACKUP_FAILED'));
+        assert.ok(res.consoleOutput.includes('SNAPSHOT_FAILED'));
       } finally {
         ws.cleanup();
       }
     });
 
     // -------------------------------------------------------------------------
-    // Scenario 2, 3, 4, 5, 6, 16, 18: API Migration Approval Gate, RBAC,
-    // Reauth Password Verification, Approval Binding, Method Guard (405), Secret Masking
+    // Scenario 2, 3, 4, 5, 6, 16, 18: API DB Schema Hard Block (Zero Web Migrations), RBAC,
+    // NO_UPDATE_AVAILABLE Guard, Lock Conflict (409), App Rollback (/deployment/rollback-app),
+    // Method Guard (405), Secret Masking
     // -------------------------------------------------------------------------
-    await t.test('16. GET /api/Sam_Att/deployment/run-bat returns 405 METHOD_NOT_ALLOWED (never misleading 404)', async () => {
+    await t.test('16. GET /api/Sam_Att/deployment/run-bat & rollback-app return 405 METHOD_NOT_ALLOWED', async () => {
       const res = await apiCall('/api/Sam_Att/deployment/run-bat', {
         method: 'GET',
         token: adminToken,
@@ -267,35 +276,57 @@ test('Safe Deployment & Database Migration Governance Suite (18 Scenarios)', asy
       assert.equal(res.status, 405);
       assert.equal(res.data.error, 'METHOD_NOT_ALLOWED');
       assert.deepEqual(res.data.allowedMethods, ['POST']);
+
+      const rbRes = await apiCall('/api/Sam_Att/deployment/rollback-app', {
+        method: 'GET',
+        token: adminToken,
+      });
+      assert.equal(rbRes.status, 405);
+      assert.equal(rbRes.data.error, 'METHOD_NOT_ALLOWED');
     });
 
-    await t.test('2, 3, 4, 5, 6, 18. API Migration Approval Gate + RBAC + Reauth + Commit/File Binding + Secret Redaction', async () => {
+    await t.test('2, 3, 4, 5, 6, 18. API DB Schema Hard Block + RBAC + NO_UPDATE_AVAILABLE + Lock Guard + App Rollback + Secret Redaction', async () => {
+      const oldCommit = '9f1cdc1000000000000000000000000000000001';
       const targetCommit = 'cccc444400000000000000000000000000000004';
       let runnerInvokedCount = 0;
-      let capturedArgs: string[] = [];
+
+      const tmpSnapRoot = path.join(os.tmpdir(), `sam_att_snap_root_${TEST_RUN_ID}`);
+      const tmpJobsDir = path.join(os.tmpdir(), `sam_att_jobs_dir_${TEST_RUN_ID}`);
+      const tmpLockFile = path.join(tmpJobsDir, 'deploy_active.lock');
+      const prevSnapEnv = process.env.SAM_ATT_DEPLOY_SNAPSHOT_DIR;
+      const prevJobsEnv = process.env.SAM_ATT_DEPLOY_JOBS_DIR;
+      const prevLockEnv = process.env.SAM_ATT_DEPLOY_LOCK_FILE;
+      process.env.SAM_ATT_DEPLOY_SNAPSHOT_DIR = tmpSnapRoot;
+      process.env.SAM_ATT_DEPLOY_JOBS_DIR = tmpJobsDir;
+      process.env.SAM_ATT_DEPLOY_LOCK_FILE = tmpLockFile;
+
+      const sampleSnapDir = path.join(tmpSnapRoot, 'app_snapshot_20261126_010101');
+      fs.mkdirSync(path.join(sampleSnapDir, 'dist'), { recursive: true });
+      fs.writeFileSync(
+        path.join(sampleSnapDir, 'snapshot-manifest.json'),
+        JSON.stringify({ commitBefore: oldCommit, targetCommit, createdAt: '2026-11-26T01:01:01.000Z' }),
+        'utf8'
+      );
 
       setDeploymentGitInspectorForTests(async () => ({
         available: true,
         branch: 'main',
-        currentCommit: '9f1cdc1000000000000000000000000000000001',
+        currentCommit: oldCommit,
         targetCommit,
         hasUpdates: true,
         gitMigrationFiles: ['003_historical_import_and_mapping.sql'],
       }));
 
-      setDeployBatRunnerForTests(async (scriptPath, args = []) => {
+      setDeployBatRunnerForTests(async (scriptPath) => {
         runnerInvokedCount++;
-        capturedArgs = args;
         return {
           exitCode: 0,
           stdout: [
             `Executed ${path.basename(scriptPath)}`,
             `SAM_ATT_DB_PASSWORD=TopSecretDbPassword#991!`,
-            `BackupDir      : C:\\SamAttBackups\\deploy_backup_20261122_120000`,
-            `BackupSql      : C:\\SamAttBackups\\deploy_backup_20261122_120000\\samchuk_attendance_v2.sql`,
-            `BackupSqlSha   : 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef`,
-            `Migrations     : 003_historical_import_and_mapping.sql`,
-            `Commit         : 9f1cdc10 -> cccc4444`,
+            `Authorization: Bearer ghp_TopSecretGitHubToken1234567890abcdef`,
+            `SnapshotDir    : ${sampleSnapDir}`,
+            `Commit         : ${oldCommit.slice(0, 8)} -> ${targetCommit.slice(0, 8)}`,
             `DEPLOYMENT SUCCESS`,
           ].join('\n'),
           stderr: '',
@@ -304,189 +335,186 @@ test('Safe Deployment & Database Migration Governance Suite (18 Scenarios)', asy
         };
       });
 
+      setDeployRollbackRunnerForTests(async (scriptPath) => ({
+        exitCode: 0,
+        stdout: [
+          `Rollback ${path.basename(scriptPath)}`,
+          `SnapshotDir    : ${sampleSnapDir}`,
+          `Commit         : ${targetCommit.slice(0, 8)} -> ${oldCommit.slice(0, 8)}`,
+          `DEPLOYMENT ROLLED_BACK_MANUAL`,
+        ].join('\n'),
+        stderr: '',
+        scriptPath,
+        durationMs: 140,
+      }));
+
       try {
-        // Check-updates & migrations inspection APIs work for ADMIN and report pending migration
+        // Check-updates blocks deployment readiness when pending migration exists
         const checkRes = await apiCall('/api/Sam_Att/deployment/check-updates', {
           method: 'POST',
           token: adminToken,
         });
         assert.equal(checkRes.status, 200);
-        assert.equal(checkRes.data.migrationApprovalRequired, true);
+        assert.equal(checkRes.data.readiness.canDeploy, false);
         assert.ok(checkRes.data.pendingMigrations.includes('003_historical_import_and_mapping.sql'));
 
-        const migApiRes = await apiCall('/api/Sam_Att/deployment/migrations', {
-          token: adminToken,
-        });
-        assert.equal(migApiRes.status, 200);
-        assert.equal(migApiRes.data.migrationApprovalRequired, true);
-
-        // Scenario 3: Non-ADMIN blocked (403 FORBIDDEN)
+        // Non-ADMIN blocked (403 FORBIDDEN) for both run-bat and rollback-app
         const staffRes = await apiCall('/api/Sam_Att/deployment/run-bat', {
           method: 'POST',
           token: staffToken,
-          body: { confirmRun: true, approveMigrations: true },
+          body: { confirmRun: true },
         });
         assert.equal(staffRes.status, 403);
 
-        const userRes = await apiCall('/api/Sam_Att/deployment/run-bat', {
+        const userRes = await apiCall('/api/Sam_Att/deployment/rollback-app', {
           method: 'POST',
           token: generalToken,
-          body: { confirmRun: true, approveMigrations: true },
+          body: { confirmRollback: true },
         });
         assert.equal(userRes.status, 403);
         assert.equal(runnerInvokedCount, 0);
 
-        // Scenario 2: ADMIN without approveMigrations -> 409 MIGRATION_APPROVAL_REQUIRED
-        const unapprovedRes = await apiCall('/api/Sam_Att/deployment/run-bat', {
+        // Scenario 2 & 5: Pending DB migration is HARD BLOCKED (409 DB_SCHEMA_CHANGE_BLOCKED), even if approveMigrations is passed
+        const blockedSchemaRes = await apiCall('/api/Sam_Att/deployment/run-bat', {
+          method: 'POST',
+          token: adminToken,
+          body: { confirmRun: true, approveMigrations: true, confirmPassword: ADMIN_PASS },
+        });
+        assert.equal(blockedSchemaRes.status, 409);
+        assert.equal(blockedSchemaRes.data.error, 'DB_SCHEMA_CHANGE_BLOCKED');
+        assert.ok(blockedSchemaRes.data.message.includes('กรุณาติดต่อผู้ดูแลระบบก่อนอัปเดต'));
+        assert.equal(runnerInvokedCount, 0);
+
+        // Scenario 4: No-Update Protection -> 409 NO_UPDATE_AVAILABLE when currentCommit == targetCommit
+        setDeploymentGitInspectorForTests(async () => ({
+          available: true,
+          branch: 'main',
+          currentCommit: targetCommit,
+          targetCommit,
+          hasUpdates: false,
+          gitMigrationFiles: [],
+        }));
+        const noUpdateRes = await apiCall('/api/Sam_Att/deployment/run-bat', {
           method: 'POST',
           token: adminToken,
           body: { confirmRun: true },
         });
-        assert.equal(unapprovedRes.status, 409);
-        assert.equal(unapprovedRes.data.error, 'MIGRATION_APPROVAL_REQUIRED');
+        assert.equal(noUpdateRes.status, 409);
+        assert.equal(noUpdateRes.data.error, 'NO_UPDATE_AVAILABLE');
         assert.equal(runnerInvokedCount, 0);
 
-        // Scenario 6: Approval Binding Mismatch (wrong commit or wrong file list) -> 409 MIGRATION_APPROVAL_MISMATCH
-        const wrongCommitRes = await apiCall('/api/Sam_Att/deployment/run-bat', {
-          method: 'POST',
-          token: adminToken,
-          body: {
-            confirmRun: true,
-            approveMigrations: true,
-            approvedTargetCommit: 'deadbeef00000000000000000000000000000000',
-            approvedMigrationFiles: ['003_historical_import_and_mapping.sql'],
-            impactAcknowledged: true,
-            confirmPassword: ADMIN_PASS,
-          },
-        });
-        assert.equal(wrongCommitRes.status, 409);
-        assert.equal(wrongCommitRes.data.error, 'MIGRATION_APPROVAL_MISMATCH');
-
-        const wrongFileRes = await apiCall('/api/Sam_Att/deployment/run-bat', {
-          method: 'POST',
-          token: adminToken,
-          body: {
-            confirmRun: true,
-            approveMigrations: true,
-            approvedTargetCommit: targetCommit,
-            approvedMigrationFiles: ['002_attendance_matching_engine.sql'],
-            impactAcknowledged: true,
-            confirmPassword: ADMIN_PASS,
-          },
-        });
-        assert.equal(wrongFileRes.status, 409);
-        assert.equal(wrongFileRes.data.error, 'MIGRATION_APPROVAL_MISMATCH');
-        assert.equal(runnerInvokedCount, 0);
-
-        // Scenario 4: Wrong ADMIN password -> 401 INVALID_CONFIRM_PASSWORD, never runs script, never logs password
-        const wrongPass = 'WrongSecretPass#999!';
-        const badPassRes = await apiCall('/api/Sam_Att/deployment/run-bat', {
-          method: 'POST',
-          token: adminToken,
-          body: {
-            confirmRun: true,
-            approveMigrations: true,
-            approvedTargetCommit: targetCommit,
-            approvedMigrationFiles: ['003_historical_import_and_mapping.sql'],
-            impactAcknowledged: true,
-            confirmPassword: wrongPass,
-          },
-        });
-        assert.equal(badPassRes.status, 401);
-        assert.equal(badPassRes.data.error, 'INVALID_CONFIRM_PASSWORD');
-        assert.equal(runnerInvokedCount, 0);
-        assert.ok(!JSON.stringify(badPassRes.data).includes(wrongPass));
-
-        const auditAfterBadPass = await dbQuery<{ detail_json: string }>(
-          "SELECT detail_json FROM audit_logs WHERE action LIKE 'DEPLOYMENT_MIGRATION_APPROVAL%'"
-        );
-        for (const row of auditAfterBadPass) {
-          assert.ok(!String(row.detail_json || '').includes(wrongPass));
+        // Scenario 6: Active Disk Lock -> 409 DEPLOYMENT_ALREADY_IN_PROGRESS
+        setDeploymentGitInspectorForTests(async () => ({
+          available: true,
+          branch: 'main',
+          currentCommit: oldCommit,
+          targetCommit,
+          hasUpdates: true,
+          gitMigrationFiles: [],
+        }));
+        acquireDeployLock({ jobId: 'test_active_lock', pid: process.pid, actorUsername: 'admin' });
+        try {
+          const lockedRes = await apiCall('/api/Sam_Att/deployment/run-bat', {
+            method: 'POST',
+            token: adminToken,
+            body: { confirmRun: true },
+          });
+          assert.equal(lockedRes.status, 409);
+          assert.equal(lockedRes.data.error, 'DEPLOYMENT_ALREADY_IN_PROGRESS');
+        } finally {
+          releaseDeployLock('test_active_lock');
         }
 
-        // Scenario 5 & 18: Correct ADMIN password + impactAcknowledged + exact binding -> 200 SUCCESS, secrets masked!
-        const approvedRes = await apiCall('/api/Sam_Att/deployment/run-bat', {
+        // Clean App-Only update executes cleanly & redacts DB password + Bearer token!
+        const deployRes = await apiCall('/api/Sam_Att/deployment/run-bat', {
           method: 'POST',
           token: adminToken,
-          body: {
-            confirmRun: true,
-            approveMigrations: true,
-            approvedTargetCommit: targetCommit,
-            approvedMigrationFiles: ['003_historical_import_and_mapping.sql'],
-            impactAcknowledged: true,
-            confirmPassword: ADMIN_PASS,
-          },
+          body: { confirmRun: true },
         });
-        assert.equal(approvedRes.status, 200);
-        assert.equal(approvedRes.data.status, 'SUCCESS');
-        assert.equal(approvedRes.data.exitCode, 0);
+        assert.equal(deployRes.status, 200);
+        assert.equal(deployRes.data.status, 'SUCCESS');
         assert.equal(runnerInvokedCount, 1);
-        assert.ok(capturedArgs.includes('-ApproveMigrations'));
-        assert.ok(capturedArgs.includes(targetCommit));
-        assert.ok(capturedArgs.includes('003_historical_import_and_mapping.sql'));
-        assert.equal(approvedRes.data.backupDir, 'C:\\SamAttBackups\\deploy_backup_20261122_120000');
-        assert.deepEqual(approvedRes.data.migrationsApplied, ['003_historical_import_and_mapping.sql']);
-        // Secret masking verification
-        assert.ok(!String(approvedRes.data.output).includes('TopSecretDbPassword#991!'));
-        assert.ok(String(approvedRes.data.output).includes('***REDACTED***'));
-        assert.ok(!JSON.stringify(approvedRes.data).includes(ADMIN_PASS));
+        assert.ok(!String(deployRes.data.output).includes('TopSecretDbPassword#991!'));
+        assert.ok(!String(deployRes.data.output).includes('ghp_TopSecretGitHubToken1234567890abcdef'));
+        assert.ok(String(deployRes.data.output).includes('***REDACTED***'));
+        assert.ok(sanitizeDeploymentOutput('Authorization: Bearer secret_token_123').includes('***REDACTED***'));
+
+        // List snapshots & trigger App-Only Rollback (rejects invalid path, accepts valid snapshotDir)
+        assert.equal(listAvailableAppSnapshots().length, 1);
+        const badSnapRollback = await apiCall('/api/Sam_Att/deployment/rollback-app', {
+          method: 'POST',
+          token: adminToken,
+          body: { confirmRollback: true, snapshotDir: 'C:\\Windows\\System32' },
+        });
+        assert.equal(badSnapRollback.status, 400);
+        assert.equal(badSnapRollback.data.error, 'INVALID_SNAPSHOT_DIR');
+
+        const okRollback = await apiCall('/api/Sam_Att/deployment/rollback-app', {
+          method: 'POST',
+          token: adminToken,
+          body: { confirmRollback: true, snapshotDir: sampleSnapDir },
+        });
+        assert.equal(okRollback.status, 200);
+        assert.equal(okRollback.data.status, 'SUCCESS');
+        assert.equal(okRollback.data.databaseTouched, false);
       } finally {
         setDeployBatRunnerForTests(null);
+        setDeployRollbackRunnerForTests(null);
         setDeploymentGitInspectorForTests(null);
+        if (prevSnapEnv !== undefined) process.env.SAM_ATT_DEPLOY_SNAPSHOT_DIR = prevSnapEnv;
+        else delete process.env.SAM_ATT_DEPLOY_SNAPSHOT_DIR;
+        if (prevJobsEnv !== undefined) process.env.SAM_ATT_DEPLOY_JOBS_DIR = prevJobsEnv;
+        else delete process.env.SAM_ATT_DEPLOY_JOBS_DIR;
+        if (prevLockEnv !== undefined) process.env.SAM_ATT_DEPLOY_LOCK_FILE = prevLockEnv;
+        else delete process.env.SAM_ATT_DEPLOY_LOCK_FILE;
+        fs.rmSync(tmpSnapRoot, { recursive: true, force: true });
+        fs.rmSync(tmpJobsDir, { recursive: true, force: true });
       }
     });
 
     // -------------------------------------------------------------------------
-    // Scenario 12 & 13: Mid-migration failure & Post-migration failure (Migration-Aware Rollback)
+    // Scenario 12 & 13: Failure during Install/Build/Health safely rolls back App-Only (DB & .env untouched)
     // -------------------------------------------------------------------------
-    await t.test('12. Mid-migration failure stops immediately, never restarts backend, flags requiresAdminDatabaseRestore', async () => {
+    await t.test('12. Step 4 npm ci lock error stops Sam_Att first and rolls back Application Snapshot cleanly', async () => {
       const ws = createIsolatedWorkspace();
       try {
         const res = await runOneClickDeployment({
           appDir: ws.appDir,
-          backupRootDir: ws.backupRootDir,
-          approveMigrations: true,
-          approvedTargetCommit: 'dddd555500000000000000000000000000000005',
-          approvedMigrations: ['003_historical_import_and_mapping.sql'],
+          snapshotRootDir: ws.backupRootDir,
           hooks: {
             commitBefore: '9f1cdc1000000000000000000000000000000001',
             remoteCommit: 'dddd555500000000000000000000000000000005',
-            pendingMigrations: ['003_historical_import_and_mapping.sql'],
-            simulateMigrationFailure: true,
+            lockfileChanged: true,
+            simulateNpmLockError: true,
           },
         });
-        assert.equal(res.exitCode, 2);
-        assert.equal(res.backendRestarted, false, 'Backend must NOT restart with new code when migration fails');
-        assert.equal(res.requiresAdminDatabaseRestore, true);
+        assert.equal(res.exitCode, 1);
+        assert.equal(res.finalBanner, 'DEPLOYMENT ROLLED_BACK');
+        assert.equal(res.stoppedSamAttBeforeNpmCi, true);
+        assert.equal(res.requiresAdminDatabaseRestore, false);
         assert.equal(res.commitAfter, res.commitBefore, 'Git commit must revert back safely');
-        assert.ok(res.backupSqlPath && fs.existsSync(res.backupSqlPath));
-        assert.ok(!res.consoleOutput.includes('DEPLOYMENT SUCCESS'));
+        assert.ok(res.consoleOutput.includes('NPM_CI_LOCK_ERROR'));
       } finally {
         ws.cleanup();
       }
     });
 
-    await t.test('13. Post-migration health failure reverts code without auto-DROP and flags requiresAdminDatabaseRestore', async () => {
+    await t.test('13. Post-deploy health failure reverts Application cleanly without touching DB or .env', async () => {
       const ws = createIsolatedWorkspace();
       try {
         const res = await runOneClickDeployment({
           appDir: ws.appDir,
-          backupRootDir: ws.backupRootDir,
-          approveMigrations: true,
-          approvedTargetCommit: 'eeee666600000000000000000000000000000006',
-          approvedMigrations: ['003_historical_import_and_mapping.sql'],
+          snapshotRootDir: ws.backupRootDir,
           hooks: {
             commitBefore: '9f1cdc1000000000000000000000000000000001',
             remoteCommit: 'eeee666600000000000000000000000000000006',
-            pendingMigrations: ['003_historical_import_and_mapping.sql'],
             simulateHealthApiUnreachable: true,
           },
         });
-        assert.equal(res.exitCode, 2);
-        assert.equal(res.requiresAdminDatabaseRestore, true);
-        assert.deepEqual(res.migrationsApplied, ['003_historical_import_and_mapping.sql']);
+        assert.equal(res.exitCode, 1);
+        assert.equal(res.finalBanner, 'DEPLOYMENT ROLLED_BACK');
+        assert.equal(res.requiresAdminDatabaseRestore, false);
         assert.equal(res.commitAfter, res.commitBefore);
-        assert.ok(res.consoleOutput.includes('ADMIN DATABASE RESTORE REQUIRED'));
         assert.ok(!res.consoleOutput.includes('DEPLOYMENT SUCCESS'));
       } finally {
         ws.cleanup();
@@ -637,7 +665,10 @@ test('Safe Deployment & Database Migration Governance Suite (18 Scenarios)', asy
       assert.match(restorePs1, /^[\x00-\x7F]*$/, 'scripts/restore-test.ps1 must be 100% 7-bit ASCII');
 
       // 8-Step Application-Only Deployment assertions
-      assert.ok(deployPs1.includes('$TotalSteps = 8'), 'Deploy_Sam_Att.ps1 must define 8 deployment steps');
+      assert.ok(
+        deployPs1.includes('$TotalSteps = 8') || deployPs1.includes('$TotalSteps = if ($RollbackOnly) { 5 } else { 8 }'),
+        'Deploy_Sam_Att.ps1 must define 8 deployment steps'
+      );
       assert.ok(deployPs1.includes('C:\\SamAttDeploySnapshots'), 'App-only rollback snapshot root must live outside Git repo');
       assert.ok(deployPs1.includes('PREFLIGHT_SNAPSHOT_DIR_INSIDE_GIT'));
       assert.ok(deployPs1.includes('PREFLIGHT_FORBIDDEN_HOSOFFICE_DB'));
@@ -673,9 +704,9 @@ test('Safe Deployment & Database Migration Governance Suite (18 Scenarios)', asy
         'STEP 1 - Preflight Check',
         'STEP 2 - GitHub Version Verification',
         'STEP 3 - Change Impact Analysis',
-        'STEP 4 - Install Dependencies',
-        'STEP 5 - Test & Build',
-        'STEP 6 - Deploy Application',
+        'STEP 4 - Update Source & Smart Dependency Management',
+        'STEP 5 - Check & Build',
+        'STEP 6 - Restart Application',
         'STEP 7 - Health Check',
         'STEP 8 - Deployment Report',
       ];
@@ -686,27 +717,35 @@ test('Safe Deployment & Database Migration Governance Suite (18 Scenarios)', asy
         prevIdx = idx;
       }
 
-      // 2. Zero database backup / dump / migration execution in Deploy_Sam_Att.ps1
+      // 2. Zero database backup / dump / migration execution AND zero npm test in Production Deploy_Sam_Att.ps1
       assert.ok(!deployCodeOnly.includes('mysqldump'), 'Deploy_Sam_Att.ps1 must NOT run mysqldump');
       assert.ok(!deployCodeOnly.includes('mariadb-dump'), 'Deploy_Sam_Att.ps1 must NOT run mariadb-dump');
       assert.ok(!deployCodeOnly.includes('cli-migrate.ts'), 'Deploy_Sam_Att.ps1 must NOT run cli-migrate.ts');
-      assert.ok(!deployCodeOnly.includes('db:migrate'), 'Deploy_Sam_Att.ps1 must NOT invoke npm run db:migrate');
+      const deployWithoutGuidanceMsg = deployCodeOnly.replace(
+        /"Database schema or migration changes were detected\. Deployment is strictly Application-Only\. Ask DBA to run 'npm run db:migrate' on server before retrying update\."/g,
+        ''
+      );
+      assert.ok(!deployWithoutGuidanceMsg.includes('db:migrate'), 'Deploy_Sam_Att.ps1 must NOT invoke npm run db:migrate');
       assert.ok(!deployCodeOnly.includes('New-VerifiedMySqlBackup'), 'Deploy_Sam_Att.ps1 must NOT contain DB backup routine');
       assert.ok(!deployCodeOnly.includes('Set-RestrictedBackupAcl'), 'Deploy_Sam_Att.ps1 must NOT contain DB backup ACL routine');
+      assert.ok(!/npm\.cmd.*test\b/i.test(deployCodeOnly), 'Deploy_Sam_Att.ps1 must NOT run npm test on Production');
 
-      // 3. Step 1-3 Read-only MySQL config verification, GitHub check & DB schema change block
+      // 3. Step 1-3 Read-only MySQL config verification, GitHub check, No-Update stop & DB schema change block
       assert.ok(deployPs1.includes('jk9krnvb6g-ai/Sam_Att-V2-Standalone'));
       assert.ok(deployPs1.includes('PREFLIGHT_ENV_INCOMPLETE'));
       assert.ok(deployPs1.includes('GITHUB_REPO_MISMATCH'));
       assert.ok(deployPs1.includes('GIT_HISTORY_DIVERGED'));
+      assert.ok(deployPs1.includes('NO_CHANGES'));
       assert.ok(deployPs1.includes('DB_SCHEMA_CHANGE_BLOCKED'));
       assert.ok(deployPs1.includes('CONFIG_ENV_TRACKED_VIOLATION'));
 
-      // 4. Step 4-5 Isolated test sandbox, .env immutability & ScannerReader preservation
+      // 4. Step 4-5 Smart lockfile strategy, EPERM stop-before-npm-ci, .env immutability & ScannerReader preservation
+      assert.ok(deployPs1.includes('SKIPPED_LOCKFILE_UNCHANGED'));
+      assert.ok(deployPs1.includes('NPM_CI_LOCK_ERROR'));
       assert.ok(deployPs1.includes('SECURITY_ENV_MUTATED_VIOLATION'));
-      assert.ok(deployPs1.includes('SAM_ATT_TEST_ISOLATION = "true"'));
-      assert.ok(deployPs1.includes('SAM_ATT_DB_ENGINE = "sqlite_sandbox"'));
       assert.ok(deployPs1.includes('SCANNER_EXE_MODIFIED_VIOLATION'));
+      assert.ok(deployPs1.includes('$JobStatusFile'));
+      assert.ok(deployPs1.includes('$RollbackOnly'));
 
       // 5. Step 6-7 Service isolation, Port 4101 ownership & Read-only health verification
       assert.ok(deployPs1.includes('SECURITY_ISOLATION_VIOLATION'));
@@ -715,11 +754,14 @@ test('Safe Deployment & Database Migration Governance Suite (18 Scenarios)', asy
       assert.ok(deployPs1.includes('CONNECTED (READ-ONLY CHECK)'));
       assert.ok(deployPs1.includes('POST_DEPLOY_LOG_ERRORS'));
 
-      // 6. Secret masking & Application-only rollback
+      // 6. Secret masking, startupReadOnlyOnMysql server guard & Application-only rollback
       assert.ok(deployPs1.includes('Register-SensitiveSecret'));
       assert.ok(deployPs1.includes('Protect-SensitiveText'));
       assert.ok(deployPs1.includes('git" -Arguments @("reset", "--keep"'));
       assert.ok(deployPs1.includes('Restart-SamAttBackendOnly'));
+
+      const serverTs = fs.readFileSync(path.resolve(process.cwd(), 'backend/src/server.ts'), 'utf8');
+      assert.ok(serverTs.includes('startupReadOnlyOnMysql: true'), 'server.ts must enforce read-only MySQL startup');
     });
   } finally {
     await closeServer();

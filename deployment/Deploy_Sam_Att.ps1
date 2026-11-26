@@ -2,19 +2,17 @@
 .SYNOPSIS
   Sam_Att V2 Standalone - Application-Only Production Deployment & Rollback Script (8 Steps)
 .DESCRIPTION
-  Application-only production deployment script for Sam_Att V2 Standalone from GitHub (origin/main)
-  on Windows Server + IIS (Samchuk Hospital).
-  - Pure 7-bit ASCII source file to guarantee 100% compatibility with Windows PowerShell 5.1.
-  - Database-agnostic / Application-only: NEVER performs database backups, mysqldump/mariadb-dump,
-    schema changes, table creation/alteration, data edits, or automatic migrations.
-  - Step 1: Preflight Check (Git repo, branch, clean working tree, Node>=22/npm, disk space, .env MySQL check, IIS & Port 4101, service isolation)
-  - Step 2: GitHub Version Verification (verify repository, branch, current & target commit; abort if unreachable/diverged)
-  - Step 3: Change Impact Analysis (list changed files, classify Frontend/Backend/Config/.env/DB Schema; STOP if DB schema/migration changes detected)
-  - Step 4: Install Dependencies (save app-only rollback snapshot, git pull --ff-only, npm ci/install without altering .env or production data)
-  - Step 5: Test & Build (TypeScript typecheck, existing automated tests in isolated sandbox, Frontend & Backend build verification)
-  - Step 6: Deploy Application (update Sam_Att Frontend/Backend on HTTPS Port 4101 only; never run iisreset or touch Procurement)
-  - Step 7: Health Check (Frontend /Sam_Att/, API /api/Sam_Att/health, read-only MySQL connection check, Port 4101 owner, runtime logs)
-  - Step 8: Deployment Report (start/end time, commit before/after, changed files, test/build/health results, 8-step PASS/FAIL summary & remediation)
+  Application-only production deployment and rollback script for Sam_Att V2 Standalone
+  from GitHub (origin/main) on Windows Server (Samchuk Hospital).
+  - Pure 7-bit ASCII source file for 100% compatibility with Windows PowerShell 5.1+.
+  - Database-agnostic / Application-only: NEVER runs mysqldump/mariadb-dump, NEVER alters
+    database schemas, NEVER creates/alters tables, NEVER runs automatic migrations, and NEVER
+    executes npm test against Production.
+  - Persistent disk job tracking (-JobId, -JobStatusFile, -LockFile) survives Sam_Att process restarts.
+  - Smart Dependency Strategy: skips npm ci when package-lock.json + package.json SHA-256 are
+    unchanged and node_modules is intact; stops verified Sam_Att process BEFORE npm ci when changed,
+    with bounded retry (max 3) on Windows EPERM/EBUSY locks and strict fail-closed rollback (no npm install fallback).
+  - Multi-factor Sam_Att-only process identification (PID + node.exe + AppDir/server.ts + Port 4101).
 #>
 [CmdletBinding()]
 param(
@@ -30,18 +28,24 @@ param(
   [string]$MockEnvFile = "",
   [switch]$ApproveMigrations,
   [string]$ApprovedCommit = "",
-  [string]$ApprovedMigrations = ""
+  [string]$ApprovedMigrations = "",
+  [string]$JobId = "",
+  [string]$JobStatusFile = "",
+  [string]$LockFile = "",
+  [string]$LogFilePath = "",
+  [switch]$RollbackOnly,
+  [string]$SnapshotDirToRestore = ""
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$TotalSteps = 8
+$TotalSteps = if ($RollbackOnly) { 5 } else { 8 }
 $DeployStartTime = Get-Date
 $DeployEndTime = $null
 
 # ==============================================================================
-# 0. Resolve Application Directory & Isolated Rollback Snapshot Path
+# 0. Resolve Application Directory, Snapshot Root, Job Status & Lock Paths
 # ==============================================================================
 if ([string]::IsNullOrWhiteSpace($AppDir)) {
   $ScriptDir = $PSScriptRoot
@@ -57,8 +61,8 @@ if ([string]::IsNullOrWhiteSpace($AppDir)) {
   }
 }
 $AppDir = [System.IO.Path]::GetFullPath($AppDir)
-
 $LogsDir = Join-Path $AppDir "logs"
+
 if (-not [string]::IsNullOrWhiteSpace($RollbackRootDir)) {
   $SnapshotRootDir = [System.IO.Path]::GetFullPath($RollbackRootDir)
 } elseif (-not [string]::IsNullOrWhiteSpace($BackupRootDir)) {
@@ -70,7 +74,21 @@ if (-not [string]::IsNullOrWhiteSpace($RollbackRootDir)) {
 }
 
 $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$LogFilePath = Join-Path $LogsDir "deploy_sam_att_$Timestamp.log"
+if ([string]::IsNullOrWhiteSpace($JobId)) {
+  $Prefix = if ($RollbackOnly) { "rollback" } else { "appdeploy" }
+  $JobId = "${Prefix}_${Timestamp}_$PID"
+}
+if ([string]::IsNullOrWhiteSpace($LogFilePath)) {
+  $LogFilePath = Join-Path $LogsDir "deploy_sam_att_${Timestamp}.log"
+}
+$JobsRootDir = Join-Path $LogsDir "deploy_jobs"
+if ([string]::IsNullOrWhiteSpace($JobStatusFile)) {
+  $JobStatusFile = Join-Path $JobsRootDir "job_${JobId}.json"
+}
+if ([string]::IsNullOrWhiteSpace($LockFile)) {
+  $LockFile = Join-Path $JobsRootDir "deploy_active.lock"
+}
+$LatestJobFile = Join-Path (Split-Path -Parent $JobStatusFile) "latest_job.json"
 
 $ForbiddenServiceNames = @("Procurement", "ProcurementService", "ProcurementPool", "CentralApiGateway", "SamAttGateway", "W3SVC")
 $SensitiveSecretsToMask = New-Object System.Collections.Generic.List[string]
@@ -108,6 +126,7 @@ function Protect-SensitiveText {
   }
   $Sanitized = [regex]::Replace($Sanitized, '(?i)(PASSWORD|PWD|SECRET|TOKEN|API_KEY|MYSQL_PWD)\s*=\s*("[^"\r\n]*"|''[^''\r\n]*''|[^\s;&"]+)', '$1=***REDACTED***')
   $Sanitized = [regex]::Replace($Sanitized, '(?i)((?:mysql|https?|ftp)://[^:\s/]+:)([^@\s]+)(@)', '$1***REDACTED***$3')
+  $Sanitized = [regex]::Replace($Sanitized, '(?i)Bearer\s+[A-Za-z0-9._-]+', 'Bearer ***REDACTED***')
   return $Sanitized
 }
 
@@ -119,13 +138,236 @@ function Write-DeployLog {
   $SafeMessage = Protect-SensitiveText -InputText $Message
   $Line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')][$Level] $SafeMessage"
   try {
-    if (-not (Test-Path $LogsDir)) {
-      New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
+    $LogDir = Split-Path -Parent $LogFilePath
+    if (-not (Test-Path $LogDir)) {
+      New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
     }
     Add-Content -Path $LogFilePath -Value $Line -Encoding UTF8 -ErrorAction SilentlyContinue
   } catch {
     # Ignore early log write error
   }
+}
+
+function Initialize-CanonicalSteps {
+  $List = New-Object System.Collections.Generic.List[object]
+  if ($RollbackOnly) {
+    $Defs = @(
+      @{ StepNo = 1; Key = "ROLLBACK_VALIDATE"; Name = "Validate Snapshot"; Thai = "Validate snapshot and rollback safety" },
+      @{ StepNo = 2; Key = "ROLLBACK_STOP"; Name = "Stop Sam_Att Process"; Thai = "Stop Sam_Att process safely" },
+      @{ StepNo = 3; Key = "ROLLBACK_RESTORE"; Name = "Restore Source & Dist"; Thai = "Restore previous code and dist files" },
+      @{ StepNo = 4; Key = "ROLLBACK_RESTART"; Name = "Restart Sam_Att Process"; Thai = "Start Sam_Att process on port 4101" },
+      @{ StepNo = 5; Key = "ROLLBACK_HEALTH"; Name = "Health Check & Report"; Thai = "Verify post-rollback health check" }
+    )
+  } else {
+    $Defs = @(
+      @{ StepNo = 1; Key = "PREFLIGHT"; Name = "Preflight Check"; Thai = "Preflight system check" },
+      @{ StepNo = 2; Key = "VERSION_CHECK"; Name = "Version Check"; Thai = "GitHub version check" },
+      @{ StepNo = 3; Key = "PREPARE_SNAPSHOT"; Name = "Prepare Snapshot"; Thai = "Impact analysis and app snapshot" },
+      @{ StepNo = 4; Key = "UPDATE_SOURCE_DEPS"; Name = "Update Source & Deps"; Thai = "Git pull and dependency check" },
+      @{ StepNo = 5; Key = "CHECK_BUILD"; Name = "Check & Build"; Thai = "TypeScript check and Vite build" },
+      @{ StepNo = 6; Key = "RESTART_APP"; Name = "Restart Application"; Thai = "Restart Sam_Att on port 4101" },
+      @{ StepNo = 7; Key = "HEALTH_CHECK"; Name = "Health Check"; Thai = "Verify Frontend, API and MySQL health" },
+      @{ StepNo = 8; Key = "FINAL_REPORT"; Name = "Final Report"; Thai = "Write final deployment report" }
+    )
+  }
+  foreach ($D in $Defs) {
+    $List.Add([ordered]@{
+      stepNumber  = $D.StepNo
+      key         = $D.Key
+      name        = $D.Name
+      labelThai   = $D.Thai
+      status      = "PENDING"
+      detail      = $null
+      startedAt   = $null
+      completedAt = $null
+    }) | Out-Null
+  }
+  return $List
+}
+
+$State = [ordered]@{
+  CurrentStep             = 0
+  StepName                = "Initialization"
+  JobStatus               = "RUNNING"
+  ErrorCode               = $null
+  ErrorMessage            = $null
+  RepositoryUrl           = ""
+  VersionBefore           = ""
+  VersionTarget           = ""
+  CommitBefore            = ""
+  CommitAfter             = ""
+  RemoteCommit            = ""
+  GitPulled               = $false
+  ChangedFiles            = @()
+  FrontendImpactCount     = 0
+  BackendImpactCount      = 0
+  ConfigImpactCount       = 0
+  DbSchemaImpactFiles     = @()
+  SnapshotCreated         = $false
+  SnapshotDir             = ""
+  LockHashBefore          = ""
+  PkgHashBefore           = ""
+  NpmCiExecuted           = $null
+  NpmCiReason             = ""
+  EnvHashBefore           = ""
+  ScannerExePath          = ""
+  ScannerExeSha256        = ""
+  TypecheckStatus         = "NOT_RUN"
+  TestStatus              = "SKIPPED (Production App-Only Policy)"
+  BuildStatus             = "NOT_RUN"
+  IisRoutingMode          = "STANDALONE_DIRECT_4101"
+  IisStaticTargetDir      = ""
+  BackendProcessMode      = "STANDALONE_NODE_TSX"
+  BackendServiceName      = ""
+  BackendPm2Name          = ""
+  VerifiedSamAttPid       = 0
+  ProcessStoppedForDeps   = $false
+  BackendRestarted        = $false
+  RolledBack              = $false
+  RollbackSnapshotDir     = ""
+  RuntimeStderrLog        = ""
+  LogErrorSummary         = "NONE"
+  HealthOutcome           = $null
+  ExpectedDbEngine        = "mysql"
+  ExpectedDbName          = "samchuk_attendance_v2"
+  ExpectedDbHost          = "10.1.0.201"
+  ExpectedDbPort          = 3306
+  CompletedAt             = $null
+  Steps                   = (Initialize-CanonicalSteps)
+}
+
+function Write-AtomicJsonFile {
+  param(
+    [string]$TargetPath,
+    [object]$Payload
+  )
+  try {
+    $Dir = Split-Path -Parent $TargetPath
+    if (-not (Test-Path $Dir)) {
+      New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+    }
+    $TmpPath = "${TargetPath}.tmp_${PID}_$(Get-Random)"
+    $JsonStr = $Payload | ConvertTo-Json -Depth 8
+    [System.IO.File]::WriteAllText($TmpPath, $JsonStr, [System.Text.UTF8Encoding]::new($false))
+    Move-Item -Path $TmpPath -Destination $TargetPath -Force
+  } catch {
+    # Ignore transient status write errors so deploy never aborts on telemetry
+  }
+}
+
+function Update-JobStatusJson {
+  $DoneCount = 0
+  foreach ($S in $State.Steps) {
+    if ($S.status -in @("PASS", "FAIL", "SKIP")) {
+      $DoneCount++
+    }
+  }
+  $Pct = [math]::Min(100, [math]::Max(5, [math]::Round(($DoneCount / [math]::Max(1, $TotalSteps)) * 100)))
+  if ($State.JobStatus -in @("SUCCESS", "FAILED", "ROLLED_BACK", "NO_CHANGES")) {
+    $Pct = 100
+  }
+
+  $TailLines = @()
+  if (Test-Path $LogFilePath) {
+    try {
+      $RawTail = @(Get-Content -Path $LogFilePath -Tail 80 -ErrorAction SilentlyContinue)
+      foreach ($L in $RawTail) {
+        $SafeL = Protect-SensitiveText -InputText ([string]$L)
+        if (-not [string]::IsNullOrWhiteSpace($SafeL)) {
+          $TailLines += $SafeL
+        }
+      }
+    } catch {
+      $TailLines = @()
+    }
+  }
+
+  $Payload = [ordered]@{
+    jobId                = $JobId
+    jobType              = $(if ($RollbackOnly) { "APP_ROLLBACK" } else { "APP_UPDATE" })
+    status               = $State.JobStatus
+    actorUsername        = "admin"
+    startedAt            = $DeployStartTime.ToUniversalTime().ToString("o")
+    updatedAt            = (Get-Date).ToUniversalTime().ToString("o")
+    completedAt          = $State.CompletedAt
+    pid                  = $PID
+    currentStepNumber    = $State.CurrentStep
+    currentStepName      = $State.StepName
+    currentStepLabelThai = $State.StepName
+    progressPercent      = $Pct
+    commitBefore         = $(if ([string]::IsNullOrWhiteSpace($State.CommitBefore)) { $null } else { $State.CommitBefore })
+    targetCommit         = $(if ([string]::IsNullOrWhiteSpace($State.RemoteCommit)) { $null } else { $State.RemoteCommit })
+    commitAfter          = $(if ([string]::IsNullOrWhiteSpace($State.CommitAfter)) { $null } else { $State.CommitAfter })
+    snapshotDir          = $(if ([string]::IsNullOrWhiteSpace($State.SnapshotDir)) { $null } else { $State.SnapshotDir })
+    npmCiExecuted        = $State.NpmCiExecuted
+    npmCiReason          = $(if ([string]::IsNullOrWhiteSpace($State.NpmCiReason)) { $null } else { $State.NpmCiReason })
+    rolledBack           = $State.RolledBack
+    rollbackSnapshotDir  = $(if ([string]::IsNullOrWhiteSpace($State.RollbackSnapshotDir)) { $null } else { $State.RollbackSnapshotDir })
+    errorCode            = $State.ErrorCode
+    errorMessage         = $(if ([string]::IsNullOrWhiteSpace($State.ErrorMessage)) { $null } else { Protect-SensitiveText -InputText $State.ErrorMessage })
+    historyRecorded      = $false
+    logFilePath          = $LogFilePath
+    logTail              = $TailLines
+    steps                = $State.Steps
+  }
+  Write-AtomicJsonFile -TargetPath $JobStatusFile -Payload $Payload
+  if ($LatestJobFile -ne $JobStatusFile) {
+    Write-AtomicJsonFile -TargetPath $LatestJobFile -Payload $Payload
+  }
+}
+
+function Acquire-DeployLockFile {
+  $Payload = [ordered]@{
+    jobId         = $JobId
+    pid           = $PID
+    actorUsername = "admin"
+    startedAt     = (Get-Date).ToUniversalTime().ToString("o")
+  }
+  Write-AtomicJsonFile -TargetPath $LockFile -Payload $Payload
+}
+
+function Release-DeployLockFile {
+  try {
+    if (Test-Path $LockFile) {
+      $ShouldRemove = $true
+      try {
+        $Existing = Get-Content -Path $LockFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -ne $Existing -and $null -ne $Existing.PSObject.Properties["jobId"] -and -not [string]::IsNullOrWhiteSpace([string]$Existing.jobId)) {
+          if ([string]$Existing.jobId -ne $JobId) {
+            $ShouldRemove = $false
+          }
+        }
+      } catch {
+        $ShouldRemove = $true
+      }
+      if ($ShouldRemove) {
+        Remove-Item -Path $LockFile -Force -ErrorAction SilentlyContinue
+      }
+    }
+  } catch {
+    # Ignore lock cleanup error
+  }
+}
+
+function Mark-StepRunning {
+  param(
+    [int]$StepNo,
+    [string]$StepLabel,
+    [string]$Detail = ""
+  )
+  $State.CurrentStep = $StepNo
+  $State.StepName = $StepLabel
+  $NowIso = (Get-Date).ToUniversalTime().ToString("o")
+  foreach ($S in $State.Steps) {
+    if ($S.stepNumber -eq $StepNo) {
+      $S.status = "RUNNING"
+      $S.startedAt = $NowIso
+      if (-not [string]::IsNullOrWhiteSpace($Detail)) {
+        $S.detail = Protect-SensitiveText -InputText $Detail
+      }
+    }
+  }
+  Update-JobStatusJson
 }
 
 function Record-StepOutcome {
@@ -154,6 +396,21 @@ function Record-StepOutcome {
   } else {
     $StepRecords.Add($Entry) | Out-Null
   }
+
+  $NowIso = (Get-Date).ToUniversalTime().ToString("o")
+  foreach ($S in $State.Steps) {
+    if ($S.stepNumber -eq $StepNo) {
+      if ($null -eq $S.startedAt) {
+        $S.startedAt = $NowIso
+      }
+      $S.status = $Status
+      $S.completedAt = $NowIso
+      if (-not [string]::IsNullOrWhiteSpace($SafeDetail)) {
+        $S.detail = $SafeDetail
+      }
+    }
+  }
+  Update-JobStatusJson
 
   $PaddedLabel = $Label.PadRight(28, ' ')
   $Line = "[$StepNo/$TotalSteps] $PaddedLabel $Status"
@@ -304,10 +561,153 @@ req.on('error', (err) => { console.error(err.message); process.exit(2); });
   }
 }
 
-function Test-SamAttPortOwnership {
+function Test-CommandLineOwnedBySamAtt {
   param(
-    [int]$TargetPort = 4101
+    [string]$CommandLine,
+    [string]$ExecutablePath,
+    [string]$AppDirectory
   )
+  if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+    return $false
+  }
+  foreach ($Forbidden in $ForbiddenServiceNames) {
+    if ($CommandLine -imatch [regex]::Escape($Forbidden)) {
+      return $false
+    }
+  }
+  $IsNodeExe = ($ExecutablePath -imatch "\\node\.exe$") -or ($CommandLine -imatch "\bnode(\.exe)?\b")
+  if (-not $IsNodeExe) {
+    return $false
+  }
+  $NormAppDir = $AppDirectory.Replace("/", "\")
+  $MatchesAppDir = $CommandLine.IndexOf($NormAppDir, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+  $MatchesSamAtt = ($CommandLine -imatch "Sam_Att") -and ($CommandLine -imatch "server\.ts")
+  return ($MatchesAppDir -or $MatchesSamAtt)
+}
+
+function Get-VerifiedSamAttProcesses {
+  param([int]$TargetPort = 4101)
+  $Results = New-Object System.Collections.Generic.List[object]
+  if (-not ($env:OS -like "*Windows*")) {
+    return $Results
+  }
+
+  $PortPids = New-Object System.Collections.Generic.HashSet[int]
+  $NetConns = @(Get-NetTCPConnection -LocalPort $TargetPort -State Listen -ErrorAction SilentlyContinue)
+  foreach ($Conn in $NetConns) {
+    if ($Conn.OwningProcess -gt 0) {
+      [void]$PortPids.Add([int]$Conn.OwningProcess)
+    }
+  }
+
+  $NodeProcs = @(Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue)
+  foreach ($Proc in $NodeProcs) {
+    $ProcPid = [int]$Proc.ProcessId
+    if ($ProcPid -eq $PID) { continue }
+    $Cmd = [string]$Proc.CommandLine
+    $Exe = [string]$Proc.ExecutablePath
+    if (Test-CommandLineOwnedBySamAtt -CommandLine $Cmd -ExecutablePath $Exe -AppDirectory $AppDir) {
+      $Results.Add([PSCustomObject]@{
+        Pid            = $ProcPid
+        ExecutablePath = $Exe
+        CommandLine    = $Cmd
+        OwnsTargetPort = $PortPids.Contains($ProcPid)
+      }) | Out-Null
+    }
+  }
+  return $Results
+}
+
+function Stop-VerifiedSamAttProcesses {
+  param([int]$TargetPort = 4101)
+
+  foreach ($Forbidden in $ForbiddenServiceNames) {
+    if ($State.BackendServiceName -ieq $Forbidden -or $State.BackendPm2Name -ieq $Forbidden) {
+      throw "SECURITY_ISOLATION_VIOLATION: Refusing to stop forbidden service '$Forbidden'"
+    }
+  }
+
+  if ($null -ne $MockConfig) {
+    if ($null -ne $MockConfig.PSObject.Properties["simulateProcessStopTimeout"] -and $MockConfig.simulateProcessStopTimeout -eq $true) {
+      throw "PROCESS_STOP_TIMEOUT: Simulated timeout waiting for Sam_Att process to release locks"
+    }
+    $State.ProcessStoppedForDeps = $true
+    Write-DeployLog -Message "[MockMode] Stopped verified Sam_Att process safely before dependency update."
+    return
+  }
+
+  if ($State.BackendProcessMode -eq "WINDOWS_SERVICE") {
+    $SvcName = $State.BackendServiceName
+    $SvcObj = Get-Service -Name $SvcName -ErrorAction SilentlyContinue
+    if ($null -ne $SvcObj -and $SvcObj.Status -ne "Stopped") {
+      Write-DeployLog -Message "Stopping isolated Windows Service '$SvcName' (Procurement & IIS W3SVC untouched)..."
+      Stop-Service -Name $SvcName -Force -ErrorAction Stop
+      for ($W = 1; $W -le 15; $W++) {
+        Start-Sleep -Seconds 1
+        $CheckSvc = Get-Service -Name $SvcName -ErrorAction SilentlyContinue
+        if ($null -eq $CheckSvc -or $CheckSvc.Status -eq "Stopped") {
+          break
+        }
+      }
+      $CheckSvc = Get-Service -Name $SvcName -ErrorAction SilentlyContinue
+      if ($null -ne $CheckSvc -and $CheckSvc.Status -ne "Stopped") {
+        throw "PROCESS_STOP_TIMEOUT: Windows Service '$SvcName' did not stop within timeout"
+      }
+    }
+  } elseif ($State.BackendProcessMode -eq "PM2_PROCESS") {
+    Write-DeployLog -Message "Stopping isolated PM2 process '$($State.BackendPm2Name)'..."
+    Invoke-NativeCli -Executable "pm2" -Arguments @("stop", $State.BackendPm2Name) | Out-Null
+  }
+
+  $VerifiedProcs = @(Get-VerifiedSamAttProcesses -TargetPort $TargetPort)
+  foreach ($Vp in $VerifiedProcs) {
+    Write-DeployLog -Message "Stopping verified Sam_Att Node.js process (PID=$($Vp.Pid), PortOwner=$($Vp.OwnsTargetPort))..."
+    Stop-Process -Id $Vp.Pid -Force -ErrorAction SilentlyContinue
+  }
+
+  if ($env:OS -like "*Windows*") {
+    $Released = $false
+    for ($WaitIdx = 1; $WaitIdx -le 15; $WaitIdx++) {
+      $StillVerified = @(Get-VerifiedSamAttProcesses -TargetPort $TargetPort)
+      $PortHeld = Get-NetTCPConnection -LocalPort $TargetPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+      $ForeignHoldingPort = $false
+      if ($null -ne $PortHeld -and $PortHeld.OwningProcess -gt 0) {
+        $HoldWmi = Get-CimInstance Win32_Process -Filter "ProcessId = $($PortHeld.OwningProcess)" -ErrorAction SilentlyContinue
+        $HoldCmd = if ($null -ne $HoldWmi) { [string]$HoldWmi.CommandLine } else { "" }
+        $HoldExe = if ($null -ne $HoldWmi) { [string]$HoldWmi.ExecutablePath } else { "" }
+        if (-not (Test-CommandLineOwnedBySamAtt -CommandLine $HoldCmd -ExecutablePath $HoldExe -AppDirectory $AppDir)) {
+          $ForeignHoldingPort = $true
+        }
+      }
+      if ($StillVerified.Count -eq 0 -and ($null -eq $PortHeld -or $ForeignHoldingPort)) {
+        $Released = $true
+        break
+      }
+      Start-Sleep -Seconds 1
+    }
+    if (-not $Released) {
+      throw "PROCESS_STOP_TIMEOUT: Timed out waiting for verified Sam_Att process to release port $TargetPort and native module locks"
+    }
+  }
+  $State.ProcessStoppedForDeps = $true
+}
+
+function Test-NodeModulesHealthy {
+  param([string]$AppDirectory)
+  $NmRoot = Join-Path $AppDirectory "node_modules"
+  if (-not (Test-Path $NmRoot)) {
+    return $false
+  }
+  foreach ($PkgDir in @("tsx", "express", "vite", "typescript")) {
+    if (-not (Test-Path (Join-Path $NmRoot $PkgDir))) {
+      return $false
+    }
+  }
+  return $true
+}
+
+function Test-SamAttPortOwnership {
+  param([int]$TargetPort = 4101)
   if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["port4101Owner"]) {
     $MockOwner = [string]$MockConfig.port4101Owner
     if ($MockOwner -eq "FOREIGN_PROCESS") {
@@ -337,11 +737,10 @@ function Test-SamAttPortOwnership {
   $ProcWmi = Get-CimInstance Win32_Process -Filter "ProcessId = $ListenPid" -ErrorAction SilentlyContinue
   $ProcName = if ($null -ne $ProcWmi) { [string]$ProcWmi.Name } else { "unknown" }
   $CmdLine = if ($null -ne $ProcWmi) { [string]$ProcWmi.CommandLine } else { "" }
+  $ExePath = if ($null -ne $ProcWmi) { [string]$ProcWmi.ExecutablePath } else { "" }
 
-  $IsConfirmedSamAtt = $false
-  if ($CmdLine -match "Sam_Att" -or $CmdLine -match "server\.ts") {
-    $IsConfirmedSamAtt = $true
-  } else {
+  $IsConfirmedSamAtt = Test-CommandLineOwnedBySamAtt -CommandLine $CmdLine -ExecutablePath $ExePath -AppDirectory $AppDir
+  if (-not $IsConfirmedSamAtt) {
     try {
       $Probe = Invoke-HttpsProbe -Url "https://127.0.0.1:$TargetPort/api/Sam_Att/health" -ParseJson -TimeoutSec 5
       if ($Probe.StatusCode -eq 200 -and $Probe.Json.service -eq "Sam_Att V2 Standalone") {
@@ -441,83 +840,6 @@ function Test-SamAttHealthEndpoint {
   }
 }
 
-function Get-RemediationHint {
-  param(
-    [int]$StepNo,
-    [string]$ErrorMessage
-  )
-  if ($ErrorMessage -match "PREFLIGHT_DIRTY_WORKING_TREE") {
-    return "Run 'git status' and 'git diff' in $AppDir to inspect local modifications cleanly before deploying (do not force reset uncommitted admin edits)."
-  }
-  if ($ErrorMessage -match "PREFLIGHT_WRONG_BRANCH") {
-    return "Switch repository back to branch '$Branch' ('git checkout $Branch') before retrying deployment."
-  }
-  if ($ErrorMessage -match "PREFLIGHT_ENV_") {
-    return "Verify $AppDir\.env exists and defines valid MySQL connection values (SAM_ATT_DB_*), JWT_SECRET, and SCANNER_INGEST_SHARED_TOKEN without modifying production credentials."
-  }
-  if ($ErrorMessage -match "PREFLIGHT_PORT_4101_FOREIGN_PROCESS|PORT_4101_FOREIGN_PROCESS") {
-    return "Check which process owns TCP port $Port using Get-NetTCPConnection -LocalPort $Port and resolve port conflict manually."
-  }
-  if ($ErrorMessage -match "GIT_FETCH_FAILED|GITHUB_REPO_MISMATCH|GIT_HISTORY_DIVERGED") {
-    return "Check server internet/firewall access to github.com and confirm git remote origin points to jk9krnvb6g-ai/Sam_Att-V2-Standalone without local branch divergence."
-  }
-  if ($ErrorMessage -match "DB_SCHEMA_CHANGE_BLOCKED") {
-    return "Database schema or migration changes were detected in Git diff. Deployment is strictly Application-Only. Apply and verify database schema changes separately as DBA before deploying updated code."
-  }
-  if ($ErrorMessage -match "NPM_INSTALL_FAILED") {
-    return "Verify npm registry connectivity and check file locks on native modules under node_modules."
-  }
-  if ($ErrorMessage -match "TYPECHECK_FAILED|UNIT_TESTS_FAILED|BUILD_FAILED") {
-    return "Inspect TypeScript, automated test, or Vite build errors in $LogFilePath and fix on GitHub branch '$Branch' before re-deploying."
-  }
-  if ($ErrorMessage -match "MYSQL_DISCONNECTED|WRONG_DB_") {
-    return "Verify MySQL server availability, host/port/credentials in .env, and ensure Sam_Att connects to samchuk_attendance_v2 in REAL/mysql mode."
-  }
-  if ($ErrorMessage -match "HEALTH_CHECK_FAILED|FRONTEND_|API_") {
-    return "Check Sam_Att runtime logs in $LogsDir and Windows Service / Node process status on HTTPS port $Port."
-  }
-  return "Review deployment log '$LogFilePath' around Step $StepNo for full diagnostic output."
-}
-
-$State = [ordered]@{
-  CurrentStep             = 0
-  StepName                = "Initialization"
-  RepositoryUrl           = ""
-  VersionBefore           = ""
-  VersionTarget           = ""
-  CommitBefore            = ""
-  CommitAfter             = ""
-  RemoteCommit            = ""
-  GitPulled               = $false
-  ChangedFiles            = @()
-  FrontendImpactCount     = 0
-  BackendImpactCount      = 0
-  ConfigImpactCount       = 0
-  DbSchemaImpactFiles     = @()
-  SnapshotCreated         = $false
-  SnapshotDir             = ""
-  EnvHashBefore           = ""
-  ScannerExePath          = ""
-  ScannerExeSha256        = ""
-  TypecheckStatus         = "NOT_RUN"
-  TestStatus              = "NOT_RUN"
-  BuildStatus             = "NOT_RUN"
-  IisRoutingMode          = "STANDALONE_DIRECT_4101"
-  IisStaticTargetDir      = ""
-  BackendProcessMode      = "STANDALONE_NODE_TSX"
-  BackendServiceName      = ""
-  BackendPm2Name          = ""
-  VerifiedSamAttPid       = 0
-  BackendRestarted        = $false
-  RuntimeStderrLog        = ""
-  LogErrorSummary         = "NONE"
-  HealthOutcome           = $null
-  ExpectedDbEngine        = "mysql"
-  ExpectedDbName          = "samchuk_attendance_v2"
-  ExpectedDbHost          = "10.1.0.201"
-  ExpectedDbPort          = 3306
-}
-
 function Restart-SamAttBackendOnly {
   param([bool]$IsRollback = $false)
 
@@ -541,8 +863,13 @@ function Restart-SamAttBackendOnly {
   switch ($State.BackendProcessMode) {
     "WINDOWS_SERVICE" {
       $SvcName = $State.BackendServiceName
-      Write-DeployLog -Message "Restarting isolated Windows Service '$SvcName' (IIS central & Procurement untouched)..."
-      Restart-Service -Name $SvcName -Force -ErrorAction Stop
+      Write-DeployLog -Message "Starting/restarting isolated Windows Service '$SvcName' (IIS W3SVC & Procurement untouched)..."
+      $SvcBefore = Get-Service -Name $SvcName -ErrorAction Stop
+      if ($SvcBefore.Status -eq "Stopped") {
+        Start-Service -Name $SvcName -ErrorAction Stop
+      } else {
+        Restart-Service -Name $SvcName -Force -ErrorAction Stop
+      }
       Start-Sleep -Seconds 3
       $SvcObj = Get-Service -Name $SvcName -ErrorAction Stop
       if ($SvcObj.Status -ne "Running") {
@@ -551,7 +878,7 @@ function Restart-SamAttBackendOnly {
     }
     "PM2_PROCESS" {
       $Pm2App = $State.BackendPm2Name
-      Write-DeployLog -Message "Reloading isolated PM2 process '$Pm2App'..."
+      Write-DeployLog -Message "Starting/reloading isolated PM2 process '$Pm2App'..."
       $Pm2RestartRes = Invoke-NativeCli -Executable "pm2" -Arguments @("restart", $Pm2App, "--update-env")
       if ($Pm2RestartRes.ExitCode -ne 0) {
         throw "BACKEND_PM2_RESTART_FAILED: pm2 restart '$Pm2App' failed (ExitCode=$($Pm2RestartRes.ExitCode))"
@@ -559,26 +886,7 @@ function Restart-SamAttBackendOnly {
       Start-Sleep -Seconds 2
     }
     "STANDALONE_NODE_TSX" {
-      if ($State.VerifiedSamAttPid -gt 0) {
-        $ExistingProc = Get-Process -Id $State.VerifiedSamAttPid -ErrorAction SilentlyContinue
-        if ($null -ne $ExistingProc) {
-          Write-DeployLog -Message "Stopping verified Sam_Att Node.js process (PID=$($State.VerifiedSamAttPid))..."
-          Stop-Process -Id $State.VerifiedSamAttPid -Force -ErrorAction SilentlyContinue
-        }
-      }
-
-      for ($WaitIdx = 1; $WaitIdx -le 8; $WaitIdx++) {
-        $StillListening = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($null -eq $StillListening) {
-          break
-        }
-        $HoldPid = [int]$StillListening.OwningProcess
-        $HoldWmi = Get-CimInstance Win32_Process -Filter "ProcessId = $HoldPid" -ErrorAction SilentlyContinue
-        if ($null -ne $HoldWmi -and ($HoldWmi.CommandLine -match "Sam_Att" -or $HoldWmi.CommandLine -match "server\.ts")) {
-          Stop-Process -Id $HoldPid -Force -ErrorAction SilentlyContinue
-        }
-        Start-Sleep -Seconds 1
-      }
+      Stop-VerifiedSamAttProcesses -TargetPort $Port
 
       $StdOutLog = Join-Path $LogsDir "sam_att_runtime_stdout_$Timestamp.log"
       $StdErrLog = Join-Path $LogsDir "sam_att_runtime_stderr_$Timestamp.log"
@@ -612,6 +920,11 @@ function Invoke-SafeAppRollback {
   Write-Host " INITIATING SAFE APP-ONLY ROLLBACK" -ForegroundColor Yellow
   Write-Host "----------------------------------------" -ForegroundColor Yellow
   Write-DeployLog -Message "Initiating Safe Application-Only Rollback due to failure: $FailureReason" -Level "WARN"
+
+  $State.RolledBack = $true
+  if (-not [string]::IsNullOrWhiteSpace($State.SnapshotDir)) {
+    $State.RollbackSnapshotDir = $State.SnapshotDir
+  }
 
   if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["simulateRollbackFailure"] -and $MockConfig.simulateRollbackFailure -eq $true) {
     Write-DeployLog -Message "CRITICAL: Simulated rollback failure triggered." -Level "ERROR"
@@ -670,10 +983,10 @@ function Invoke-SafeAppRollback {
       Pop-Location
     }
 
-    # 3. Restart Sam_Att backend only if it had been restarted or failed health probe (never touch Procurement or IIS)
+    # 3. Restart Sam_Att backend if it was stopped, restarted, or fails health probe (never touch Procurement or IIS)
     $VerifiedHealth = $null
     if ($null -ne $MockConfig) {
-      if ($State.BackendRestarted) {
+      if ($State.BackendRestarted -or $State.ProcessStoppedForDeps -or $RollbackOnly) {
         Restart-SamAttBackendOnly -IsRollback $true
       }
       if ($null -ne $MockConfig.PSObject.Properties["postRollbackHealthy"] -and $MockConfig.postRollbackHealthy -eq $false) {
@@ -686,18 +999,25 @@ function Invoke-SafeAppRollback {
         DatabaseName = $State.ExpectedDbName
       }
     } else {
-      $QuickHealth = Test-SamAttHealthEndpoint -TargetPort $Port -ExpectedDbEngine $State.ExpectedDbEngine -ExpectedDbName $State.ExpectedDbName -MaxRetries 2 -RetryDelaySec 1
-      if ($State.BackendRestarted -or (-not $QuickHealth.Healthy)) {
-        Write-DeployLog -Message "Restarting Sam_Att backend process after rollback (Mode=$($State.BackendProcessMode))..."
+      $NeedsRestart = $State.BackendRestarted -or $State.ProcessStoppedForDeps -or $RollbackOnly
+      if (-not $NeedsRestart) {
+        $QuickHealth = Test-SamAttHealthEndpoint -TargetPort $Port -ExpectedDbEngine $State.ExpectedDbEngine -ExpectedDbName $State.ExpectedDbName -MaxRetries 2 -RetryDelaySec 1
+        if (-not $QuickHealth.Healthy) {
+          $NeedsRestart = $true
+        } else {
+          $VerifiedHealth = $QuickHealth
+        }
+      }
+      if ($NeedsRestart) {
+        Write-DeployLog -Message "Starting/restarting Sam_Att backend process after rollback (Mode=$($State.BackendProcessMode))..."
         Restart-SamAttBackendOnly -IsRollback $true
-        $PostRollbackHealth = Test-SamAttHealthEndpoint -TargetPort $Port -ExpectedDbEngine $State.ExpectedDbEngine -ExpectedDbName $State.ExpectedDbName -MaxRetries 6 -RetryDelaySec 2
+        $PostRollbackHealth = Test-SamAttHealthEndpoint -TargetPort $Port -ExpectedDbEngine $State.ExpectedDbEngine -ExpectedDbName $State.ExpectedDbName -MaxRetries 8 -RetryDelaySec 2
         if (-not $PostRollbackHealth.Healthy) {
           throw "POST_ROLLBACK_HEALTH_FAILED: $($PostRollbackHealth.Error)"
         }
         $VerifiedHealth = $PostRollbackHealth
       } else {
         Write-DeployLog -Message "Existing Sam_Att backend process was untouched and verified healthy on port $Port."
-        $VerifiedHealth = $QuickHealth
       }
     }
 
@@ -724,6 +1044,44 @@ function Invoke-SafeAppRollback {
   return $RollbackSuccess
 }
 
+function Get-RemediationHint {
+  param(
+    [int]$StepNo,
+    [string]$ErrorMessage
+  )
+  if ($ErrorMessage -match "PREFLIGHT_DIRTY_WORKING_TREE") {
+    return "Run 'git status' and 'git diff' in $AppDir to inspect local modifications cleanly before deploying (do not force reset uncommitted admin edits)."
+  }
+  if ($ErrorMessage -match "PREFLIGHT_WRONG_BRANCH") {
+    return "Switch repository back to branch '$Branch' ('git checkout $Branch') before retrying deployment."
+  }
+  if ($ErrorMessage -match "PREFLIGHT_ENV_") {
+    return "Verify $AppDir\.env exists and defines valid MySQL connection values (SAM_ATT_DB_*), JWT_SECRET, and SCANNER_INGEST_SHARED_TOKEN without modifying production credentials."
+  }
+  if ($ErrorMessage -match "PREFLIGHT_PORT_4101_FOREIGN_PROCESS|PORT_4101_FOREIGN_PROCESS") {
+    return "Check which process owns TCP port $Port using Get-NetTCPConnection -LocalPort $Port and resolve port conflict manually."
+  }
+  if ($ErrorMessage -match "GIT_FETCH_FAILED|GITHUB_REPO_MISMATCH|GIT_HISTORY_DIVERGED") {
+    return "Check server internet/firewall access to github.com and confirm git remote origin points to jk9krnvb6g-ai/Sam_Att-V2-Standalone without local branch divergence."
+  }
+  if ($ErrorMessage -match "DB_SCHEMA_CHANGE_BLOCKED") {
+    return "Database schema or migration changes were detected. Deployment is strictly Application-Only. Ask DBA to run 'npm run db:migrate' on server before retrying update."
+  }
+  if ($ErrorMessage -match "NPM_CI_LOCK_ERROR|NPM_INSTALL_FAILED") {
+    return "Native binary or module lock (e.g. lightningcss.win32-x64-msvc.node EPERM) blocked npm ci even after stopping Sam_Att. Check antivirus/editor locks and retry."
+  }
+  if ($ErrorMessage -match "TYPECHECK_FAILED|BUILD_FAILED") {
+    return "Inspect TypeScript or Vite build errors in $LogFilePath and fix on GitHub branch '$Branch' before re-deploying."
+  }
+  if ($ErrorMessage -match "MYSQL_DISCONNECTED|WRONG_DB_") {
+    return "Verify MySQL server availability, host/port/credentials in .env, and ensure Sam_Att connects to samchuk_attendance_v2 in REAL/mysql mode."
+  }
+  if ($ErrorMessage -match "HEALTH_CHECK_FAILED|FRONTEND_|API_") {
+    return "Check Sam_Att runtime logs in $LogsDir and Windows Service / Node process status on HTTPS port $Port."
+  }
+  return "Review deployment log '$LogFilePath' around Step $StepNo for full diagnostic output."
+}
+
 function Write-DeploymentReport {
   param(
     [bool]$Succeeded,
@@ -731,6 +1089,7 @@ function Write-DeploymentReport {
     [string]$Remediation = ""
   )
   $DeployEndTime = Get-Date
+  $State.CompletedAt = $DeployEndTime.ToUniversalTime().ToString("o")
   $DurationSec = [math]::Round(($DeployEndTime - $DeployStartTime).TotalSeconds, 2)
   $ShortBefore = if (-not [string]::IsNullOrWhiteSpace($State.CommitBefore)) { $State.CommitBefore.Substring(0, [Math]::Min(8, $State.CommitBefore.Length)) } else { "unknown" }
   $ShortAfter = if (-not [string]::IsNullOrWhiteSpace($State.CommitAfter)) { $State.CommitAfter.Substring(0, [Math]::Min(8, $State.CommitAfter.Length)) } elseif (-not [string]::IsNullOrWhiteSpace($State.RemoteCommit)) { $State.RemoteCommit.Substring(0, [Math]::Min(8, $State.RemoteCommit.Length)) } else { "unknown" }
@@ -739,22 +1098,15 @@ function Write-DeploymentReport {
   Write-Host "========================================" -ForegroundColor Cyan
   Write-Host " STEP 8 - DEPLOYMENT REPORT" -ForegroundColor Cyan
   Write-Host "========================================" -ForegroundColor Cyan
+  Write-Host "JobId          : $JobId"
   Write-Host "Start Time     : $($DeployStartTime.ToString('yyyy-MM-dd HH:mm:ss'))"
   Write-Host "End Time       : $($DeployEndTime.ToString('yyyy-MM-dd HH:mm:ss')) (${DurationSec}s)"
   Write-Host "Version        : $($State.VersionBefore) -> $(if (-not [string]::IsNullOrWhiteSpace($State.VersionTarget)) { $State.VersionTarget } else { $State.VersionBefore })"
   Write-Host "Commit         : $ShortBefore -> $ShortAfter"
   Write-Host "CommitBefore   : $($State.CommitBefore)"
   Write-Host "CommitAfter    : $(if (-not [string]::IsNullOrWhiteSpace($State.CommitAfter)) { $State.CommitAfter } else { $State.CommitBefore })"
+  Write-Host "NpmCi          : Executed=$($State.NpmCiExecuted) ($($State.NpmCiReason))"
   Write-Host "Changed Files  : $($State.ChangedFiles.Count) (Frontend=$($State.FrontendImpactCount), Backend=$($State.BackendImpactCount), Config=$($State.ConfigImpactCount), DbSchema=$($State.DbSchemaImpactFiles.Count))"
-  if ($State.ChangedFiles.Count -gt 0) {
-    $PreviewFiles = @($State.ChangedFiles | Select-Object -First 20)
-    foreach ($Cf in $PreviewFiles) {
-      Write-Host "  - $Cf"
-    }
-    if ($State.ChangedFiles.Count -gt 20) {
-      Write-Host "  ... and $($State.ChangedFiles.Count - 20) more files"
-    }
-  }
   Write-Host "Typecheck      : $($State.TypecheckStatus)"
   Write-Host "Tests          : $($State.TestStatus)"
   Write-Host "Build          : $($State.BuildStatus)"
@@ -797,10 +1149,11 @@ function Write-DeploymentReport {
   }
   Write-Host "Log File       : $LogFilePath"
   Write-Host "----------------------------------------" -ForegroundColor Cyan
+  Update-JobStatusJson
 }
 
 # ==============================================================================
-# Print Deployment Banner
+# Print Banner & Acquire Lock
 # ==============================================================================
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host " SAM_ATT V2 STANDALONE DEPLOYMENT (8-STEP APP-ONLY)" -ForegroundColor Cyan
@@ -808,17 +1161,90 @@ Write-Host " Samchuk Hospital (HTTPS Port $Port)" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
-Write-DeployLog -Message "Starting Sam_Att V2 Standalone 8-Step Application-Only Deployment in $AppDir (CheckOnly=$CheckOnly)"
+Acquire-DeployLockFile
+Update-JobStatusJson
+Write-DeployLog -Message "Starting Sam_Att V2 Standalone Application-Only job $JobId in $AppDir (RollbackOnly=$RollbackOnly, CheckOnly=$CheckOnly)"
 if ($ApproveMigrations -or -not [string]::IsNullOrWhiteSpace($ApprovedCommit) -or -not [string]::IsNullOrWhiteSpace($ApprovedMigrations)) {
-  Write-DeployLog -Message "NOTICE: Legacy migration approval flags were passed, but Deploy_Sam_Att.ps1 is strictly Application-Only (8 Steps) and never executes database backups, schema edits, or migrations." -Level "WARN"
+  Write-DeployLog -Message "NOTICE: Migration flags ignored - Deploy_Sam_Att.ps1 is strictly Application-Only (never runs DB migrations)." -Level "WARN"
 }
 
 try {
   # ============================================================================
+  # ROLLBACK-ONLY MODE
+  # ============================================================================
+  if ($RollbackOnly) {
+    Mark-StepRunning -StepNo 1 -StepLabel "Validate Snapshot" -Detail "Locating verified snapshot under $SnapshotRootDir"
+    if ([string]::IsNullOrWhiteSpace($SnapshotDirToRestore)) {
+      if (Test-Path $SnapshotRootDir) {
+        $LatestSnap = Get-ChildItem -Path $SnapshotRootDir -Directory -Filter "app_snapshot_*" | Sort-Object Name -Descending | Select-Object -First 1
+        if ($null -ne $LatestSnap) {
+          $SnapshotDirToRestore = $LatestSnap.FullName
+        }
+      }
+    }
+    if ([string]::IsNullOrWhiteSpace($SnapshotDirToRestore) -or (-not (Test-Path $SnapshotDirToRestore))) {
+      throw "ROLLBACK_SNAPSHOT_NOT_FOUND: No valid application snapshot found under $SnapshotRootDir"
+    }
+    $ResolvedSnap = [System.IO.Path]::GetFullPath($SnapshotDirToRestore)
+    if (-not $ResolvedSnap.StartsWith($SnapshotRootDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+      throw "ROLLBACK_SNAPSHOT_NOT_FOUND: Snapshot path '$ResolvedSnap' must reside inside '$SnapshotRootDir'"
+    }
+    $State.SnapshotDir = $ResolvedSnap
+    $State.RollbackSnapshotDir = $ResolvedSnap
+    $State.SnapshotCreated = $true
+
+    $ManifestPath = Join-Path $ResolvedSnap "snapshot-manifest.json"
+    if (Test-Path $ManifestPath) {
+      $ManifestObj = Get-Content -Path $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($null -ne $ManifestObj.PSObject.Properties["commitBefore"]) {
+        $State.CommitBefore = [string]$ManifestObj.commitBefore
+      }
+    }
+    $DotEnvPath = Join-Path $AppDir ".env"
+    if (Test-Path $DotEnvPath) {
+      $EnvMap = Read-DotEnvFileSafe -EnvFilePath $DotEnvPath
+      if ($EnvMap.ContainsKey("SAM_ATT_DB_NAME")) { $State.ExpectedDbName = $EnvMap["SAM_ATT_DB_NAME"] }
+      if ($EnvMap.ContainsKey("SAM_ATT_DB_ENGINE")) { $State.ExpectedDbEngine = $EnvMap["SAM_ATT_DB_ENGINE"] }
+    }
+    Push-Location $AppDir
+    try {
+      $CurHead = Invoke-NativeCli -Executable "git" -Arguments @("rev-parse", "HEAD")
+      $State.CommitAfter = $CurHead.Output.Trim()
+      if ([string]::IsNullOrWhiteSpace($State.CommitBefore)) {
+        $State.CommitBefore = $State.CommitAfter
+      }
+      if ($State.CommitBefore -ne $State.CommitAfter) {
+        $State.GitPulled = $true
+      }
+    } finally {
+      Pop-Location
+    }
+    Record-StepOutcome -StepNo 1 -Label "Validate Snapshot" -Status "PASS" -Detail "Snapshot=$ResolvedSnap"
+
+    Mark-StepRunning -StepNo 2 -StepLabel "Stop Sam_Att Process" -Detail "Stopping verified Sam_Att process only"
+    Stop-VerifiedSamAttProcesses -TargetPort $Port
+    Record-StepOutcome -StepNo 2 -Label "Stop Sam_Att Process" -Status "PASS" -Detail "Stopped Sam_Att safely"
+
+    Mark-StepRunning -StepNo 3 -StepLabel "Restore Source & Dist" -Detail "Restoring git commit and snapshot dist/"
+    $RbOk = Invoke-SafeAppRollback -FailureReason "Manual Admin Application Rollback"
+    if (-not $RbOk) {
+      throw "ROLLBACK_FAILED: Application rollback failed verification"
+    }
+    Record-StepOutcome -StepNo 3 -Label "Restore Source & Dist" -Status "PASS" -Detail "Commit=$($State.CommitAfter)"
+    Record-StepOutcome -StepNo 4 -Label "Restart Sam_Att Process" -Status "PASS" -Detail "Port=$Port"
+    Record-StepOutcome -StepNo 5 -Label "Health Check & Report" -Status "PASS" -Detail "Health OK after rollback"
+
+    $State.JobStatus = "SUCCESS"
+    $State.CompletedAt = (Get-Date).ToUniversalTime().ToString("o")
+    Update-JobStatusJson
+    Write-Host "APPLICATION ROLLBACK SUCCESS" -ForegroundColor Green
+    exit 0
+  }
+
+  # ============================================================================
   # STEP 1 - Preflight Check
   # ============================================================================
-  $State.CurrentStep = 1
-  $State.StepName = "Preflight Check"
+  Mark-StepRunning -StepNo 1 -StepLabel "Preflight Check" -Detail "Checking Git, Node.js, disk, .env and port $Port"
 
   if (-not (Test-Path $AppDir)) {
     throw "PREFLIGHT_REPO_NOT_FOUND: Installation directory not found at $AppDir"
@@ -833,6 +1259,8 @@ try {
   if ($null -ne $PkgRaw -and $null -ne $PkgRaw.PSObject.Properties["version"]) {
     $State.VersionBefore = [string]$PkgRaw.version
   }
+  $State.LockHashBefore = Get-FileSha256Safe -FilePath (Join-Path $AppDir "package-lock.json")
+  $State.PkgHashBefore = Get-FileSha256Safe -FilePath (Join-Path $AppDir "package.json")
 
   Push-Location $AppDir
   try {
@@ -927,7 +1355,7 @@ try {
     $State.ExpectedDbPort = [int]$EnvMap["SAM_ATT_DB_PORT"]
     Write-DeployLog -Message "Verified .env MySQL config (Host=$($State.ExpectedDbHost):$($State.ExpectedDbPort), DB=$($State.ExpectedDbName), User=$($EnvMap["SAM_ATT_DB_USER"]), Password=***REDACTED***)."
 
-    # Record ScannerReader EXE checksum so we verify it stays untouched
+    # Record ScannerReader EXE checksum
     $ScannerRel = if ($EnvMap.ContainsKey("SCANNER_READER_EXE_PATH") -and -not [string]::IsNullOrWhiteSpace($EnvMap["SCANNER_READER_EXE_PATH"])) {
       $EnvMap["SCANNER_READER_EXE_PATH"]
     } else {
@@ -1001,10 +1429,9 @@ try {
           $ProcWmi = Get-CimInstance Win32_Process -Filter "ProcessId = $ListenPid" -ErrorAction SilentlyContinue
           $ProcName = if ($null -ne $ProcWmi) { [string]$ProcWmi.Name } else { "" }
           $CmdLine = if ($null -ne $ProcWmi) { [string]$ProcWmi.CommandLine } else { "" }
-          $IsConfirmedSamAtt = $false
-          if ($CmdLine -match "Sam_Att" -or $CmdLine -match "server\.ts") {
-            $IsConfirmedSamAtt = $true
-          } else {
+          $ExePath = if ($null -ne $ProcWmi) { [string]$ProcWmi.ExecutablePath } else { "" }
+          $IsConfirmedSamAtt = Test-CommandLineOwnedBySamAtt -CommandLine $CmdLine -ExecutablePath $ExePath -AppDirectory $AppDir
+          if (-not $IsConfirmedSamAtt) {
             try {
               $Probe = Invoke-HttpsProbe -Url "https://127.0.0.1:$Port/api/Sam_Att/health" -ParseJson -TimeoutSec 5
               if ($Probe.StatusCode -eq 200 -and $Probe.Json.service -eq "Sam_Att V2 Standalone") {
@@ -1037,10 +1464,9 @@ try {
   Record-StepOutcome -StepNo 1 -Label "Preflight Check" -Status "PASS" -Detail "Node $NodeVerRaw, Branch $Branch, Port $Port"
 
   # ============================================================================
-  # STEP 2 - GitHub Version Verification
+  # STEP 2 - GitHub Version Verification & No-Update Protection
   # ============================================================================
-  $State.CurrentStep = 2
-  $State.StepName = "GitHub Version Verification"
+  Mark-StepRunning -StepNo 2 -StepLabel "GitHub Version Verification" -Detail "Fetching $Remote/$Branch and checking latest commit"
 
   Push-Location $AppDir
   try {
@@ -1075,7 +1501,6 @@ try {
       }
       $State.RemoteCommit = $RemoteHeadRes.Output.Trim()
 
-      # Verify history is fast-forwardable (not diverged)
       if ($State.CommitBefore -ne $State.RemoteCommit) {
         $MergeBaseRes = Invoke-NativeCli -Executable "git" -Arguments @("merge-base", "--is-ancestor", $State.CommitBefore, $State.RemoteCommit)
         if ($MergeBaseRes.ExitCode -ne 0) {
@@ -1114,11 +1539,32 @@ try {
 
   Record-StepOutcome -StepNo 2 -Label "GitHub Version Verification" -Status "PASS" -Detail "$($State.CommitBefore.Substring(0, [Math]::Min(8, $State.CommitBefore.Length))) -> $($State.RemoteCommit.Substring(0, [Math]::Min(8, $State.RemoteCommit.Length)))"
 
+  # No-Update Protection: skip snapshot, npm ci, build, and restart when already on latest commit
+  if ($State.CommitBefore -eq $State.RemoteCommit) {
+    $State.CommitAfter = $State.CommitBefore
+    for ($SkipIdx = 3; $SkipIdx -le 7; $SkipIdx++) {
+      $SkipLabels = @{
+        3 = "Change Impact & Snapshot"
+        4 = "Update Source & Deps"
+        5 = "Check & Build"
+        6 = "Restart Application"
+        7 = "Health Check"
+      }
+      Record-StepOutcome -StepNo $SkipIdx -Label $SkipLabels[$SkipIdx] -Status "SKIP" -Detail "UP_TO_DATE (no new commits)"
+    }
+    Record-StepOutcome -StepNo 8 -Label "Deployment Report" -Status "PASS" -Detail "Already on latest version ($($State.CommitBefore))"
+    $State.JobStatus = "NO_CHANGES"
+    $State.ErrorCode = "NO_UPDATE_AVAILABLE"
+    Write-DeploymentReport -Succeeded $true
+    Write-Host ""
+    Write-Host "NO_UPDATE_AVAILABLE: Already running latest commit $($State.CommitBefore). Skipping build and restart." -ForegroundColor Green
+    exit 0
+  }
+
   # ============================================================================
-  # STEP 3 - Change Impact Analysis
+  # STEP 3 - Change Impact Analysis & Pre-Pull Application Snapshot
   # ============================================================================
-  $State.CurrentStep = 3
-  $State.StepName = "Change Impact Analysis"
+  Mark-StepRunning -StepNo 3 -StepLabel "Change Impact Analysis" -Detail "Checking diff for .env / DB migrations and saving rollback snapshot"
 
   $ChangedFileList = New-Object System.Collections.Generic.List[string]
   $DbImpactList = New-Object System.Collections.Generic.List[string]
@@ -1176,36 +1622,30 @@ try {
 
     if ($DbImpactList.Count -gt 0) {
       $ImpactJoined = ($DbImpactList -join ", ")
-      throw "DB_SCHEMA_CHANGE_BLOCKED: Database schema/migration file changes detected ($ImpactJoined). Deployment is strictly Application-Only and will NOT alter tables or run migrations. Administrator must inspect and apply database changes separately before deploying this release."
+      throw "DB_SCHEMA_CHANGE_BLOCKED: Database schema/migration file changes detected ($ImpactJoined). Deployment is strictly Application-Only and will NOT alter tables or run migrations. Administrator must apply database changes separately before deploying this release."
     }
   } finally {
     Pop-Location
   }
 
-  Record-StepOutcome -StepNo 3 -Label "Change Impact Analysis" -Status "PASS" -Detail "Files=$($State.ChangedFiles.Count) (FE=$FrontCount, BE=$BackCount, Cfg=$CfgCount, DB=0)"
-
   if ($CheckOnly) {
+    Record-StepOutcome -StepNo 3 -Label "Change Impact Analysis" -Status "PASS" -Detail "Files=$($State.ChangedFiles.Count) (CheckOnly mode)"
     for ($SkipIdx = 4; $SkipIdx -le 7; $SkipIdx++) {
       $SkipLabels = @{
-        4 = "Install Dependencies"
-        5 = "Test & Build"
-        6 = "Deploy Application"
+        4 = "Update Source & Deps"
+        5 = "Check & Build"
+        6 = "Restart Application"
         7 = "Health Check"
       }
       Record-StepOutcome -StepNo $SkipIdx -Label $SkipLabels[$SkipIdx] -Status "SKIP" -Detail "CheckOnly mode"
     }
     Record-StepOutcome -StepNo 8 -Label "Deployment Report" -Status "PASS" -Detail "CheckOnly mode completed cleanly (no files changed)"
+    $State.JobStatus = "SUCCESS"
     Write-DeploymentReport -Succeeded $true
     exit 0
   }
 
-  # ============================================================================
-  # STEP 4 - Install Dependencies (Application-Only Snapshot + Git Pull + npm)
-  # ============================================================================
-  $State.CurrentStep = 4
-  $State.StepName = "Install Dependencies"
-
-  # 4.1 Save Application-Only rollback snapshot (dist/, package manifests; ZERO database dump)
+  # Save Application-Only rollback snapshot outside Git Repo BEFORE git pull (ZERO DB dump)
   $SnapDir = Join-Path $SnapshotRootDir "app_snapshot_$Timestamp"
   New-Item -ItemType Directory -Path $SnapDir -Force -ErrorAction Stop | Out-Null
   $State.SnapshotDir = $SnapDir
@@ -1220,12 +1660,29 @@ try {
       Copy-Item -Path $SrcCfg -Destination (Join-Path $SnapDir $CfgFile) -Force -ErrorAction Stop
     }
   }
+  $ManifestPayload = [ordered]@{
+    serviceName  = "Sam_Att V2 Standalone"
+    createdAt    = (Get-Date).ToUniversalTime().ToString("o")
+    commitBefore = $State.CommitBefore
+    targetCommit = $State.RemoteCommit
+    lockfileHash = $State.LockHashBefore
+    pkgHash      = $State.PkgHashBefore
+    appOnly      = $true
+  }
+  Write-AtomicJsonFile -TargetPath (Join-Path $SnapDir "snapshot-manifest.json") -Payload $ManifestPayload
   $State.SnapshotCreated = $true
   Write-DeployLog -Message "Created application-only rollback snapshot at $SnapDir (no database backup created)."
 
+  Record-StepOutcome -StepNo 3 -Label "Change Impact Analysis" -Status "PASS" -Detail "Files=$($State.ChangedFiles.Count), Snapshot=$SnapDir"
+
+  # ============================================================================
+  # STEP 4 - Update Source & Smart Dependency Management (Avoid Windows EPERM Lock)
+  # ============================================================================
+  Mark-StepRunning -StepNo 4 -StepLabel "Update Source & Deps" -Detail "Running git pull --ff-only and checking lockfile"
+
   Push-Location $AppDir
   try {
-    # 4.2 Pull latest commits cleanly with --ff-only
+    # 4.1 Pull latest commits cleanly with --ff-only
     if ($null -eq $MockConfig) {
       $PullRes = Invoke-NativeCli -Executable "git" -Arguments @("pull", "--ff-only", $Remote, $Branch)
       if ($PullRes.ExitCode -ne 0) {
@@ -1242,24 +1699,6 @@ try {
     $State.GitPulled = $true
     Write-DeployLog -Message "Git pull --ff-only succeeded: $($State.CommitBefore) -> $($State.CommitAfter)"
 
-    # 4.3 Install dependencies cleanly without altering versions unnecessarily
-    if ($null -ne $MockConfig) {
-      if ($null -ne $MockConfig.PSObject.Properties["simulateNpmInstallFailure"] -and $MockConfig.simulateNpmInstallFailure -eq $true) {
-        throw "NPM_INSTALL_FAILED: Dependency installation from package-lock.json failed"
-      }
-    } else {
-      Write-DeployLog -Message "Installing npm dependencies via npm ci --no-audit --no-fund..."
-      $NpmCiRes = Invoke-NativeCli -Executable "npm" -Arguments @("ci", "--no-audit", "--no-fund")
-      if ($NpmCiRes.ExitCode -ne 0) {
-        Write-DeployLog -Message "npm ci returned exit $($NpmCiRes.ExitCode); retrying with npm install --no-package-lock --no-audit --no-fund..." -Level "WARN"
-        $NpmInstRes = Invoke-NativeCli -Executable "npm" -Arguments @("install", "--no-package-lock", "--no-audit", "--no-fund")
-        if ($NpmInstRes.ExitCode -ne 0) {
-          throw "NPM_INSTALL_FAILED: npm dependency installation failed: $($NpmInstRes.Output)"
-        }
-        Invoke-NativeCli -Executable "git" -Arguments @("checkout", "--", "package-lock.json") | Out-Null
-      }
-    }
-
     # Verify .env was never modified or overwritten
     $EnvHashNow = Get-FileSha256Safe -FilePath (Join-Path $AppDir ".env")
     if (-not [string]::IsNullOrWhiteSpace($State.EnvHashBefore) -and ($null -eq $MockConfig -or -not $MockConfig.PSObject.Properties["customEnvFile"])) {
@@ -1267,17 +1706,79 @@ try {
         throw "SECURITY_ENV_MUTATED_VIOLATION: Production .env checksum changed unexpectedly during Step 4"
       }
     }
+
+    # 4.2 Smart Dependency Check (skip npm ci if lockfile & package.json unchanged and node_modules intact)
+    if ($null -ne $MockConfig) {
+      $MockLockChanged = $false
+      if ($null -ne $MockConfig.PSObject.Properties["lockfileChanged"]) {
+        $MockLockChanged = [bool]$MockConfig.lockfileChanged
+      }
+      if ($null -ne $MockConfig.PSObject.Properties["simulateNpmInstallFailure"] -and $MockConfig.simulateNpmInstallFailure -eq $true) {
+        Stop-VerifiedSamAttProcesses -TargetPort $Port
+        $State.NpmCiExecuted = $true
+        $State.NpmCiReason = "LOCKFILE_CHANGED_OR_FAILED"
+        throw "NPM_CI_LOCK_ERROR: Simulated npm ci EPERM lock error on lightningcss.win32-x64-msvc.node"
+      }
+      if ($MockLockChanged) {
+        Stop-VerifiedSamAttProcesses -TargetPort $Port
+        $State.NpmCiExecuted = $true
+        $State.NpmCiReason = "LOCKFILE_CHANGED"
+      } else {
+        $State.NpmCiExecuted = $false
+        $State.NpmCiReason = "SKIPPED_LOCKFILE_UNCHANGED"
+      }
+    } else {
+      $LockHashNow = Get-FileSha256Safe -FilePath (Join-Path $AppDir "package-lock.json")
+      $PkgHashNow = Get-FileSha256Safe -FilePath (Join-Path $AppDir "package.json")
+      $LockUnchanged = ($LockHashNow -eq $State.LockHashBefore) -and ($PkgHashNow -eq $State.PkgHashBefore) -and (-not [string]::IsNullOrWhiteSpace($LockHashNow))
+      $ModulesOk = Test-NodeModulesHealthy -AppDirectory $AppDir
+
+      if ($LockUnchanged -and $ModulesOk) {
+        $State.NpmCiExecuted = $false
+        $State.NpmCiReason = "SKIPPED_LOCKFILE_UNCHANGED"
+        Write-DeployLog -Message "Dependencies unchanged (package-lock.json SHA-256=$LockHashNow) and node_modules intact; skipping npm ci to prevent Windows EPERM lock."
+      } else {
+        $State.NpmCiExecuted = $true
+        $State.NpmCiReason = if (-not $LockUnchanged) { "LOCKFILE_OR_PKG_CHANGED" } else { "NODE_MODULES_INCOMPLETE" }
+        Write-DeployLog -Message "Dependencies update required ($($State.NpmCiReason)). Stopping verified Sam_Att process BEFORE npm ci..."
+        Stop-VerifiedSamAttProcesses -TargetPort $Port
+
+        $NpmSucceeded = $false
+        $LastNpmOut = ""
+        for ($NpmAttempt = 1; $NpmAttempt -le 3; $NpmAttempt++) {
+          Write-DeployLog -Message "Running npm ci --no-audit --no-fund (attempt $NpmAttempt/3)..."
+          $NpmCiRes = Invoke-NativeCli -Executable "npm" -Arguments @("ci", "--no-audit", "--no-fund")
+          if ($NpmCiRes.ExitCode -eq 0) {
+            $NpmSucceeded = $true
+            break
+          }
+          $LastNpmOut = $NpmCiRes.Output
+          $IsWinLock = $LastNpmOut -match "(?i)(EPERM|EBUSY|EACCES|lightningcss|unlink|operation not permitted)"
+          Write-DeployLog -Message "npm ci attempt $NpmAttempt/3 failed (Exit=$($NpmCiRes.ExitCode), WinLock=$IsWinLock): $LastNpmOut" -Level "WARN"
+          if ($IsWinLock -and $NpmAttempt -lt 3) {
+            Start-Sleep -Seconds 3
+            continue
+          }
+          break
+        }
+        if (-not $NpmSucceeded) {
+          if ($LastNpmOut -match "(?i)(EPERM|EBUSY|lightningcss)") {
+            throw "NPM_CI_LOCK_ERROR: npm ci failed due to Windows file lock after retries (no silent npm install fallback): $LastNpmOut"
+          }
+          throw "NPM_INSTALL_FAILED: npm ci failed after stopping Sam_Att (no silent npm install fallback): $LastNpmOut"
+        }
+      }
+    }
   } finally {
     Pop-Location
   }
 
-  Record-StepOutcome -StepNo 4 -Label "Install Dependencies" -Status "PASS" -Detail "git pull --ff-only + npm dependencies ready"
+  Record-StepOutcome -StepNo 4 -Label "Update Source & Deps" -Status "PASS" -Detail "git pull + Deps ($($State.NpmCiReason))"
 
   # ============================================================================
-  # STEP 5 - Test & Build (TypeScript + Existing Tests + Production Build)
+  # STEP 5 - Check & Build (TypeScript + Production Vite Build; NO npm test on Production)
   # ============================================================================
-  $State.CurrentStep = 5
-  $State.StepName = "Test & Build"
+  Mark-StepRunning -StepNo 5 -StepLabel "Check & Build" -Detail "Running npm run typecheck and npm run build (npm test skipped in Production)"
 
   Push-Location $AppDir
   try {
@@ -1298,50 +1799,8 @@ try {
       $State.TypecheckStatus = "PASS"
     }
 
-    # 5.2 Automated tests in isolated SQLite sandbox (never writes to production MySQL)
-    if ($SkipTests) {
-      $State.TestStatus = "SKIPPED (-SkipTests)"
-    } elseif ($null -ne $MockConfig) {
-      if ($null -ne $MockConfig.PSObject.Properties["simulateTestFailure"] -and $MockConfig.simulateTestFailure -eq $true) {
-        $State.TestStatus = "FAIL"
-        throw "UNIT_TESTS_FAILED: Automated test suite (npm test) failed"
-      }
-      $State.TestStatus = "PASS (Mock)"
-    } else {
-      Write-DeployLog -Message "Running automated tests (npm test) in isolated SQLite sandbox..."
-      $PrevEngine = $env:SAM_ATT_DB_ENGINE
-      $PrevMode = $env:SAM_ATT_DATA_MODE
-      $PrevNodeEnv = $env:NODE_ENV
-      $PrevTestIso = $env:SAM_ATT_TEST_ISOLATION
-      $PrevHosHost = $env:HOSOFFICE_DB_HOST
-      $PrevHosPass = $env:HOSOFFICE_DB_PASSWORD
-      $PrevHosPush = $env:HOSOFFICE_LIVE_PUSH_ENABLED
-      try {
-        $env:SAM_ATT_TEST_ISOLATION = "true"
-        $env:SAM_ATT_DB_ENGINE = "sqlite_sandbox"
-        $env:SAM_ATT_DATA_MODE = "DEMO"
-        $env:NODE_ENV = "test"
-        $env:HOSOFFICE_DB_HOST = "CHANGE_ME"
-        $env:HOSOFFICE_DB_PASSWORD = "CHANGE_ME"
-        $env:HOSOFFICE_LIVE_PUSH_ENABLED = "false"
-        $TestRes = Invoke-NativeCli -Executable "npm" -Arguments @("test")
-        if ($TestRes.ExitCode -ne 0) {
-          $State.TestStatus = "FAIL"
-          throw "UNIT_TESTS_FAILED: Automated tests failed:`n$($TestRes.Output)"
-        }
-        $State.TestStatus = "PASS"
-      } finally {
-        $env:SAM_ATT_TEST_ISOLATION = $PrevTestIso
-        $env:SAM_ATT_DB_ENGINE = $PrevEngine
-        $env:SAM_ATT_DATA_MODE = $PrevMode
-        $env:NODE_ENV = $PrevNodeEnv
-        $env:HOSOFFICE_DB_HOST = $PrevHosHost
-        $env:HOSOFFICE_DB_PASSWORD = $PrevHosPass
-        $env:HOSOFFICE_LIVE_PUSH_ENABLED = $PrevHosPush
-      }
-    }
-
-    # 5.3 Frontend Vite production build & Backend entry verification
+    # 5.2 Production Build & Entry Verification (NEVER run npm test against Production host)
+    $State.TestStatus = "SKIPPED (Production Application-Only Policy)"
     if ($null -ne $MockConfig) {
       if ($null -ne $MockConfig.PSObject.Properties["simulateBuildFailure"] -and $MockConfig.simulateBuildFailure -eq $true) {
         $State.BuildStatus = "FAIL"
@@ -1380,13 +1839,12 @@ try {
     Pop-Location
   }
 
-  Record-StepOutcome -StepNo 5 -Label "Test & Build" -Status "PASS" -Detail "Typecheck=$($State.TypecheckStatus), Tests=$($State.TestStatus), Build=$($State.BuildStatus)"
+  Record-StepOutcome -StepNo 5 -Label "Check & Build" -Status "PASS" -Detail "Typecheck=$($State.TypecheckStatus), Build=$($State.BuildStatus)"
 
   # ============================================================================
-  # STEP 6 - Deploy Application (Sam_Att Frontend/Backend Only; Port 4101)
+  # STEP 6 - Restart Application (Sam_Att Frontend/Backend Only; Port 4101)
   # ============================================================================
-  $State.CurrentStep = 6
-  $State.StepName = "Deploy Application"
+  Mark-StepRunning -StepNo 6 -StepLabel "Restart Application" -Detail "Starting/restarting isolated Sam_Att process on port $Port"
 
   if ($State.IisRoutingMode -eq "IIS_STATIC_VIRTUAL_DIR" -and -not [string]::IsNullOrWhiteSpace($State.IisStaticTargetDir)) {
     Write-DeployLog -Message "Updating static IIS folder for Sam_Att only at $($State.IisStaticTargetDir)..."
@@ -1397,19 +1855,18 @@ try {
 
   Restart-SamAttBackendOnly -IsRollback $false
 
-  Record-StepOutcome -StepNo 6 -Label "Deploy Application" -Status "PASS" -Detail "Port=$Port, Mode=$($State.BackendProcessMode), Isolated=True"
+  Record-StepOutcome -StepNo 6 -Label "Restart Application" -Status "PASS" -Detail "Port=$Port, Mode=$($State.BackendProcessMode), Isolated=True"
 
   # ============================================================================
   # STEP 7 - Health Check (Frontend, API, Read-Only MySQL Connection, Port 4101, Logs)
   # ============================================================================
-  $State.CurrentStep = 7
-  $State.StepName = "Health Check"
+  Mark-StepRunning -StepNo 7 -StepLabel "Health Check" -Detail "Verifying /Sam_Att/ and /api/Sam_Att/health on port $Port"
 
   $HealthOutcome = Test-SamAttHealthEndpoint `
     -TargetPort $Port `
     -ExpectedDbEngine $State.ExpectedDbEngine `
     -ExpectedDbName $State.ExpectedDbName `
-    -MaxRetries $(if ($null -ne $MockConfig) { 1 } else { 8 }) `
+    -MaxRetries $(if ($null -ne $MockConfig) { 1 } else { 10 }) `
     -RetryDelaySec $(if ($null -ne $MockConfig) { 0 } else { 2 })
 
   if (-not $HealthOutcome.Healthy) {
@@ -1417,7 +1874,6 @@ try {
   }
   $State.HealthOutcome = $HealthOutcome
 
-  # Inspect runtime stderr log for post-deploy errors without touching database
   if (-not [string]::IsNullOrWhiteSpace($State.RuntimeStderrLog) -and (Test-Path $State.RuntimeStderrLog)) {
     $ErrLines = @(Get-Content -Path $State.RuntimeStderrLog -ErrorAction SilentlyContinue | Where-Object { $_ -match "(?i)(UnhandledPromiseRejection|EADDRINUSE|FATAL|SyntaxError|ReferenceError)" })
     if ($ErrLines.Count -gt 0) {
@@ -1436,9 +1892,8 @@ try {
   # ============================================================================
   # STEP 8 - Deployment Report
   # ============================================================================
-  $State.CurrentStep = 8
-  $State.StepName = "Deployment Report"
-
+  Mark-StepRunning -StepNo 8 -StepLabel "Deployment Report" -Detail "Finalizing deployment report"
+  $State.JobStatus = "SUCCESS"
   Record-StepOutcome -StepNo 8 -Label "Deployment Report" -Status "PASS" -Detail "All 8 steps completed"
   Write-DeploymentReport -Succeeded $true
 
@@ -1450,6 +1905,12 @@ try {
 } catch {
   $ErrMessage = Protect-SensitiveText -InputText $_.Exception.Message
   $RemediationText = Get-RemediationHint -StepNo $State.CurrentStep -ErrorMessage $ErrMessage
+  if ($ErrMessage -match "^([A-Z0-9_]+)\s*:") {
+    $State.ErrorCode = $Matches[1]
+  } else {
+    $State.ErrorCode = "DEPLOYMENT_FAILED"
+  }
+  $State.ErrorMessage = $ErrMessage
 
   if ($State.CurrentStep -ge 1 -and $State.CurrentStep -le $TotalSteps) {
     Record-StepOutcome -StepNo $State.CurrentStep -Label $State.StepName -Status "FAIL" -Detail $ErrMessage
@@ -1458,8 +1919,9 @@ try {
   Write-Host "ERROR [$($State.StepName)]: $ErrMessage" -ForegroundColor Red
   Write-DeployLog -Message "FAILED at Step $($State.CurrentStep) ($($State.StepName)): $ErrMessage" -Level "ERROR"
 
-  if ($State.CurrentStep -ge 4 -or $State.GitPulled) {
+  if ((-not $RollbackOnly) -and ($State.CurrentStep -ge 4 -or $State.GitPulled -or $State.ProcessStoppedForDeps)) {
     $RolledBack = Invoke-SafeAppRollback -FailureReason $ErrMessage
+    $State.JobStatus = if ($RolledBack) { "ROLLED_BACK" } else { "FAILED" }
     Write-DeploymentReport -Succeeded $false -FailureReason $ErrMessage -Remediation $RemediationText
     if ($RolledBack) {
       Write-Host ""
@@ -1472,8 +1934,11 @@ try {
     }
   }
 
+  $State.JobStatus = "FAILED"
   Write-DeploymentReport -Succeeded $false -FailureReason $ErrMessage -Remediation $RemediationText
   Write-Host ""
   Write-Host "DEPLOYMENT ABORTED (NO SYSTEM CHANGES APPLIED)" -ForegroundColor Yellow
   exit 1
+} finally {
+  Release-DeployLockFile
 }

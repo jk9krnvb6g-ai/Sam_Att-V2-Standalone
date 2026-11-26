@@ -463,6 +463,7 @@ export interface RunMigrationsOptions {
   verifySchemaPostApply?: boolean;
   forceRunInProductionCli?: boolean;
   simulateFailureAtStatement?: number;
+  startupReadOnlyOnMysql?: boolean;
 }
 
 function splitSqlStatements(rawSql: string): string[] {
@@ -1075,9 +1076,13 @@ export async function runMigrations(
     const isExplicitMigrateCli =
       options.forceRunInProductionCli === true ||
       process.argv.some((arg) => arg.includes('cli-migrate'));
-    if (cfg.nodeEnv === 'production' && process.env.SAM_ATT_AUTO_MIGRATE !== 'true' && !isExplicitMigrateCli) {
+    const skipAutoMigrateOnStartup =
+      (options.startupReadOnlyOnMysql === true || cfg.nodeEnv === 'production') &&
+      process.env.SAM_ATT_AUTO_MIGRATE !== 'true' &&
+      !isExplicitMigrateCli;
+    if (skipAutoMigrateOnStartup) {
       console.log(
-        '[Sam_Att DB] Production safety policy: Skipping automatic DDL migration during server startup. Run `npm run db:migrate` with admin approval when schema changes are needed.'
+        '[Sam_Att DB] Read-only startup policy: Skipping automatic DDL migration during server startup. Run `npm run db:migrate` manually when schema changes are needed.'
       );
       const [tbls] = await pool.query('SHOW TABLES');
       return {
@@ -1213,16 +1218,25 @@ export async function runMigrations(
  * - ตรวจสอบและซ่อมแซมข้อความภาษาไทยของข้อมูลตั้งต้นที่อาจเพี้ยน (Mojibake เช่น "เธเธนเน...") จากการรัน SQL บน Windows ที่ไม่ได้ระบุ UTF-8
  * - หมายเหตุ Production Safety: ห้ามรัน DDL ALTER TABLE อัตโนมัติในโหมด production ระหว่าง Server Startup
  */
-export async function ensureBaselineSystemCatalog(): Promise<void> {
+export async function ensureBaselineSystemCatalog(
+  options: { startupReadOnlyOnMysql?: boolean } = {}
+): Promise<void> {
   const cfg = loadConfig();
   const isExplicitMigrateCli = process.argv.some((arg) => arg.includes('cli-migrate'));
+  const readOnlyMysqlStartup =
+    options.startupReadOnlyOnMysql === true &&
+    cfg.dbEngine === 'mysql' &&
+    process.env.SAM_ATT_AUTO_MIGRATE !== 'true' &&
+    !isExplicitMigrateCli;
   const allowAdditiveStartupDdl =
-    cfg.nodeEnv !== 'production' ||
-    isExplicitMigrateCli ||
-    process.env.SAM_ATT_AUTO_MIGRATE === 'true';
+    !readOnlyMysqlStartup &&
+    (cfg.nodeEnv !== 'production' ||
+      isExplicitMigrateCli ||
+      process.env.SAM_ATT_AUTO_MIGRATE === 'true' ||
+      cfg.dbEngine === 'sqlite_sandbox');
 
   if (allowAdditiveStartupDdl) {
-    // 0. Safe additive schema upgrades for dev/test or explicit CLI migrate
+    // 0. Safe additive schema upgrades for dev/test or explicit CLI migrate (skip existing columns first to avoid Duplicate column logs)
     const additiveAlterStatements = [
       "ALTER TABLE personnel_type_rules ADD COLUMN default_start_time VARCHAR(5) NOT NULL DEFAULT '08:00'",
       "ALTER TABLE personnel_type_rules ADD COLUMN default_end_time VARCHAR(5) NOT NULL DEFAULT '16:00'",
@@ -1270,15 +1284,34 @@ export async function ensureBaselineSystemCatalog(): Promise<void> {
       "ALTER TABLE personnel_type_rules ADD COLUMN default_workdays VARCHAR(32) NOT NULL DEFAULT '1,2,3,4,5,6,0'",
       'ALTER TABLE personnel_type_rule_history ADD COLUMN default_workdays VARCHAR(32) NULL',
     ];
+    const tableColumnsCache = new Map<string, Map<string, LiveColumnMetadata>>();
     for (const alterSql of additiveAlterStatements) {
       try {
-        await dbExecute(alterSql);
+        const alterMatch = alterSql.match(
+          /^ALTER\s+TABLE\s+`?([a-zA-Z0-9_]+)`?\s+ADD\s+(?:COLUMN\s+)?`?([a-zA-Z0-9_]+)`?\s+/i
+        );
+        if (alterMatch) {
+          const tblName = alterMatch[1];
+          const colName = alterMatch[2].toLowerCase();
+          const tblKey = tblName.toLowerCase();
+          if (!tableColumnsCache.has(tblKey)) {
+            tableColumnsCache.set(tblKey, await getTableColumnsMetadata(tblName));
+          }
+          const cols = tableColumnsCache.get(tblKey)!;
+          if (cols.size === 0 || cols.has(colName)) {
+            continue;
+          }
+          await dbExecute(alterSql);
+          tableColumnsCache.set(tblKey, await getTableColumnsMetadata(tblName));
+        } else {
+          await dbExecute(alterSql);
+        }
       } catch {
-        // Column already exists
+        // Column already exists or table pending migration
       }
     }
   }
-  if (cfg.dbEngine === 'mysql') {
+  if (cfg.dbEngine === 'mysql' && allowAdditiveStartupDdl) {
     await dbExecute(`
       CREATE TABLE IF NOT EXISTS personnel_type_rule_history (
         id INT AUTO_INCREMENT PRIMARY KEY,
