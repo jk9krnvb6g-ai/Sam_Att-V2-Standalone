@@ -7,7 +7,7 @@
  * - Success ปิดอัตโนมัติใน 4000ms (ตามมาตรฐาน alert system)
  * - Error แสดงชัดเจนจนกว่าผู้ใช้จะกดปิดเอง และรองรับ requestId
  */
-import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { FloatingToastStack, type FloatingToastData } from './SharedComponents.tsx';
 
 export interface ToastInput {
@@ -121,42 +121,44 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
     [showToast]
   );
 
+  const contextValue = useMemo<ToastContextValue>(
+    () => ({
+      showToast,
+      showSuccess,
+      showError,
+      showWarning,
+      showInfo,
+      success: showSuccess,
+      error: showError,
+      warning: showWarning,
+      info: showInfo,
+      dismissToast,
+    }),
+    [showToast, showSuccess, showError, showWarning, showInfo, dismissToast]
+  );
+
   return (
-    <ToastContext.Provider
-      value={{
-        showToast,
-        showSuccess,
-        showError,
-        showWarning,
-        showInfo,
-        success: showSuccess,
-        error: showError,
-        warning: showWarning,
-        info: showInfo,
-        dismissToast,
-      }}
-    >
+    <ToastContext.Provider value={contextValue}>
       {children}
       <FloatingToastStack toasts={toasts} onDismiss={dismissToast} />
     </ToastContext.Provider>
   );
 }
 
+const NOOP_TOAST_CONTEXT: ToastContextValue = {
+  showToast: () => '',
+  showSuccess: () => '',
+  showError: () => '',
+  showWarning: () => '',
+  showInfo: () => '',
+  success: () => '',
+  error: () => '',
+  warning: () => '',
+  info: () => '',
+  dismissToast: () => {},
+};
+
 export function useToast(): ToastContextValue {
   const ctx = useContext(ToastContext);
-  if (!ctx) {
-    return {
-      showToast: () => '',
-      showSuccess: () => '',
-      showError: () => '',
-      showWarning: () => '',
-      showInfo: () => '',
-      success: () => '',
-      error: () => '',
-      warning: () => '',
-      info: () => '',
-      dismissToast: () => {},
-    };
-  }
-  return ctx;
+  return ctx || NOOP_TOAST_CONTEXT;
 }

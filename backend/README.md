@@ -32,7 +32,11 @@ backend/
 │       ├── reports/routes.ts         # API รายงานสถิติการมาสายและดาวน์โหลดไฟล์ CSV
 │       ├── hosoffice/routes.ts       # API จำลองการส่งข้อมูล (Dry-Run Preview) และส่งข้อมูลจริงกลับ HOSOffice
 │       ├── audit/service.ts          # บริการบันทึกประวัติความปลอดภัยลงตาราง audit_logs พร้อมปิดบังรหัสผ่าน
+│       ├── deployment/
+│       │   └── githubUpdateCenter.ts # ศูนย์ตรวจเวอร์ชัน GitHub: Shared Cache 30 นาที, Single-Flight, ETag 304, Cooldown & Stale Fallback
 │       └── settings/routes.ts        # API จัดการผู้ใช้งาน, ดู Audit Logs, ทดสอบการเชื่อมต่อ และศูนย์อัปเดต
 └── tests/
-    └── sam-att.test.ts               # ชุดทดสอบอัตโนมัติ 8 หมวด (Integration & Security Test Suite)
+    ├── sam-att.test.ts                        # ชุดทดสอบอัตโนมัติ 8 หมวด (Integration & Security Test Suite)
+    ├── github-update-center.test.ts           # ชุดทดสอบ GitHub Update Center, Token & Diagnostics
+    └── update-center-loop-protection.test.ts  # ชุดทดสอบป้องกัน API Loop และ GitHub Rate Limit Protection 18 สถานการณ์
 ```

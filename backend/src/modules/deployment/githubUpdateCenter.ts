@@ -93,6 +93,7 @@ export interface GitHubRateLimitInfo {
   resetEpochSec: number | null;
   resetAt: string | null;
   resetAtThai: string | null;
+  retryAfterSec?: number | null;
 }
 
 export interface GitHubVersionCheckResult {
@@ -131,6 +132,12 @@ export interface GitHubVersionCheckResult {
   fromCache: boolean;
   cacheExpiresAt: string | null;
   cacheTtlMinutes: number;
+  isStale?: boolean;
+  staleWarningThai?: string | null;
+  lastSuccessfulCheckedAt?: string | null;
+  cooldownActive?: boolean;
+  cooldownUntil?: string | null;
+  cooldownUntilThai?: string | null;
   rateLimit: GitHubRateLimitInfo | null;
 }
 
@@ -173,16 +180,35 @@ export interface GitHubHttpResponse {
 
 export type GitHubFetcher = (url: string, headers: Record<string, string>, timeoutMs: number) => Promise<GitHubHttpResponse>;
 
-let customGitHubFetcher: GitHubFetcher | null = null;
-let cachedNotificationResult: {
+interface CachedVersionCheckEntry {
   cacheKey: string;
+  cachedAt: number;
   expiresAt: number;
   payload: GitHubVersionCheckResult;
-} | null = null;
+}
+
+interface RateLimitCooldownState {
+  blockedUntilMs: number;
+  consecutiveCount: number;
+  rateLimit: GitHubRateLimitInfo | null;
+  errorCode: string;
+  statusLabelThai: string;
+  githubError: string;
+  remediationThai: string;
+}
+
+let customGitHubFetcher: GitHubFetcher | null = null;
+const versionCheckCache = new Map<string, CachedVersionCheckEntry>();
+const lastKnownGoodCache = new Map<string, GitHubVersionCheckResult>();
+const inFlightChecks = new Map<string, Promise<GitHubVersionCheckResult>>();
+const rateLimitCooldownMap = new Map<string, RateLimitCooldownState>();
 const etagResponseCache = new Map<string, { etag: string; response: GitHubHttpResponse }>();
 
 export function clearGitHubUpdateCache(): void {
-  cachedNotificationResult = null;
+  versionCheckCache.clear();
+  lastKnownGoodCache.clear();
+  inFlightChecks.clear();
+  rateLimitCooldownMap.clear();
   etagResponseCache.clear();
 }
 
@@ -361,23 +387,63 @@ function formatThaiResetTime(resetEpochSec: number): string {
   }
 }
 
+function formatThaiTimestamp(isoOrDate: string | Date): string {
+  try {
+    const dt = typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
+    return (
+      new Intl.DateTimeFormat('th-TH', {
+        timeZone: 'Asia/Bangkok',
+        year: 'numeric',
+        month: 'short',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).format(dt) + ' น.'
+    );
+  } catch {
+    return typeof isoOrDate === 'string' ? isoOrDate : isoOrDate.toISOString();
+  }
+}
+
 export function extractRateLimitInfo(headers?: Record<string, string>): GitHubRateLimitInfo | null {
   if (!headers) return null;
   const rawLimit = headers['x-ratelimit-limit'];
   const rawRemaining = headers['x-ratelimit-remaining'];
   const rawReset = headers['x-ratelimit-reset'];
+  const rawRetryAfter = headers['retry-after'];
 
-  if (rawLimit === undefined && rawRemaining === undefined && rawReset === undefined) {
+  if (
+    rawLimit === undefined &&
+    rawRemaining === undefined &&
+    rawReset === undefined &&
+    rawRetryAfter === undefined
+  ) {
     return null;
   }
 
   const limit = rawLimit !== undefined && /^\d+$/.test(rawLimit.trim()) ? Number(rawLimit.trim()) : null;
   const remaining = rawRemaining !== undefined && /^\d+$/.test(rawRemaining.trim()) ? Number(rawRemaining.trim()) : null;
   const resetEpochSec = rawReset !== undefined && /^\d+$/.test(rawReset.trim()) ? Number(rawReset.trim()) : null;
-  const resetAt = resetEpochSec ? new Date(resetEpochSec * 1000).toISOString() : null;
-  const resetAtThai = resetEpochSec ? formatThaiResetTime(resetEpochSec) : null;
+  let retryAfterSec: number | null = null;
+  if (rawRetryAfter !== undefined) {
+    const trimmedRetry = rawRetryAfter.trim();
+    if (/^\d+$/.test(trimmedRetry)) {
+      retryAfterSec = Number(trimmedRetry);
+    } else {
+      const parsedDate = Date.parse(trimmedRetry);
+      if (Number.isFinite(parsedDate)) {
+        retryAfterSec = Math.max(1, Math.ceil((parsedDate - Date.now()) / 1000));
+      }
+    }
+  }
+  const effectiveResetSec =
+    resetEpochSec ?? (retryAfterSec !== null ? Math.ceil((Date.now() + retryAfterSec * 1000) / 1000) : null);
+  const resetAt = effectiveResetSec ? new Date(effectiveResetSec * 1000).toISOString() : null;
+  const resetAtThai = effectiveResetSec ? formatThaiResetTime(effectiveResetSec) : null;
 
-  return { limit, remaining, resetEpochSec, resetAt, resetAtThai };
+  return { limit, remaining, resetEpochSec, resetAt, resetAtThai, retryAfterSec };
 }
 
 function classifyGitHubHttpFailure(params: {
@@ -393,6 +459,7 @@ function classifyGitHubHttpFailure(params: {
   githubError: string;
   remediationThai: string;
   rateLimit: GitHubRateLimitInfo | null;
+  isRateLimited: boolean;
 } {
   const { status, json, headers, repo, branch, tokenConfigured } = params;
   const rateLimit = extractRateLimitInfo(headers);
@@ -411,12 +478,16 @@ function classifyGitHubHttpFailure(params: {
       remediationThai:
         'สร้าง Personal Access Token (PAT) ใหม่บน GitHub แล้วกรอกบันทึกในส่วนตั้งค่า GITHUB_TOKEN ด้านล่าง (หรือแก้ไขในไฟล์ .env)',
       rateLimit,
+      isRateLimited: false,
     };
   }
 
   const isRateLimited =
     status === 429 ||
-    (status === 403 && (headers?.['x-ratelimit-remaining'] === '0' || /rate limit/i.test(rawGhMsg)));
+    (status === 403 &&
+      (headers?.['x-ratelimit-remaining'] === '0' ||
+        Boolean(headers?.['retry-after']) ||
+        /rate limit/i.test(rawGhMsg)));
 
   if (isRateLimited) {
     const resetDetail = rateLimit?.resetAtThai
@@ -432,6 +503,7 @@ function classifyGitHubHttpFailure(params: {
           ? `กำหนด GITHUB_TOKEN ด้านล่างเพื่อเพิ่มโควตาเป็น 5,000 ครั้ง/ชม. ทันที หรือรอให้โควตารีเซ็ตเวลา ${rateLimit.resetAtThai}`
           : 'กำหนด GITHUB_TOKEN ในฟอร์มด้านล่างเพื่อเพิ่มโควตาเป็น 5,000 ครั้ง/ชม. และลดการยิง API ซ้ำซ้อน',
         rateLimit,
+        isRateLimited: true,
       };
     }
     return {
@@ -442,6 +514,7 @@ function classifyGitHubHttpFailure(params: {
         ? `กรุณารอให้โควตา GitHub API รีเซ็ตเวลา ${rateLimit.resetAtThai} แล้วกดตรวจสอบเวอร์ชันล่าสุดใหม่อีกครั้ง`
         : 'กรุณารอสักครู่แล้วกด "ตรวจสอบเวอร์ชันล่าสุดใหม่" อีกครั้ง',
       rateLimit,
+      isRateLimited: true,
     };
   }
 
@@ -453,6 +526,7 @@ function classifyGitHubHttpFailure(params: {
       remediationThai:
         'ตรวจสอบสิทธิ์ของ GITHUB_TOKEN (ต้องมีสิทธิ์ repo หรือ Contents: Read) และตรวจสอบว่าไม่ได้ติดข้อจำกัด SSO/องค์กรบน GitHub',
       rateLimit,
+      isRateLimited: false,
     };
   }
 
@@ -466,6 +540,7 @@ function classifyGitHubHttpFailure(params: {
       remediationThai:
         'ตรวจสอบชื่อ Repository/Branch ให้ถูกต้อง และหากเป็น Private Repository กรุณากำหนด GITHUB_TOKEN ที่มีสิทธิ์ repo หรือ Contents: Read-only ในฟอร์มด้านล่าง',
       rateLimit,
+      isRateLimited: false,
     };
   }
 
@@ -475,7 +550,60 @@ function classifyGitHubHttpFailure(params: {
     githubError: `GitHub API ตอบกลับ HTTP ${status}: ${ghMsg}`,
     remediationThai: 'ตรวจสอบสถานะบริการ GitHub หรือลองกดตรวจสอบเวอร์ชันล่าสุดใหม่อีกครั้ง',
     rateLimit,
+    isRateLimited: false,
   };
+}
+
+function recordRateLimitCooldown(
+  tokenScopeKey: string,
+  failure: {
+    errorCode: string;
+    statusLabelThai: string;
+    githubError: string;
+    remediationThai: string;
+    rateLimit: GitHubRateLimitInfo | null;
+    isRateLimited: boolean;
+  }
+): number | null {
+  if (!failure.isRateLimited) return null;
+  const now = Date.now();
+  const prev = rateLimitCooldownMap.get(tokenScopeKey);
+  const consecutiveCount = (prev?.consecutiveCount || 0) + 1;
+  let blockedUntilMs: number;
+
+  if (failure.rateLimit?.retryAfterSec && failure.rateLimit.retryAfterSec > 0) {
+    blockedUntilMs = now + Math.min(failure.rateLimit.retryAfterSec * 1000, 60 * 60 * 1000);
+  } else if (failure.rateLimit?.resetEpochSec) {
+    const resetMs = failure.rateLimit.resetEpochSec * 1000;
+    blockedUntilMs = resetMs > now ? Math.min(resetMs, now + 2 * 60 * 60 * 1000) : now;
+  } else {
+    // Bounded exponential backoff (60s -> 120s -> 240s -> 480s -> max 900s)
+    const backoffMs = Math.min(15 * 60 * 1000, 60 * 1000 * Math.pow(2, Math.min(consecutiveCount - 1, 4)));
+    blockedUntilMs = now + backoffMs;
+  }
+
+  if (blockedUntilMs > now) {
+    const resetEpochSec = Math.ceil(blockedUntilMs / 1000);
+    const enrichedRateLimit: GitHubRateLimitInfo = {
+      limit: failure.rateLimit?.limit ?? null,
+      remaining: 0,
+      resetEpochSec: failure.rateLimit?.resetEpochSec ?? resetEpochSec,
+      resetAt: failure.rateLimit?.resetAt ?? new Date(blockedUntilMs).toISOString(),
+      resetAtThai: failure.rateLimit?.resetAtThai ?? formatThaiResetTime(resetEpochSec),
+      retryAfterSec: failure.rateLimit?.retryAfterSec ?? Math.ceil((blockedUntilMs - now) / 1000),
+    };
+    rateLimitCooldownMap.set(tokenScopeKey, {
+      blockedUntilMs,
+      consecutiveCount,
+      rateLimit: enrichedRateLimit,
+      errorCode: failure.errorCode,
+      statusLabelThai: failure.statusLabelThai,
+      githubError: failure.githubError,
+      remediationThai: failure.remediationThai,
+    });
+    return blockedUntilMs;
+  }
+  return null;
 }
 
 function classifyGitHubNetworkFailure(err: unknown, timeoutMs: number): {
@@ -841,19 +969,23 @@ export async function checkGitHubUpdates(options?: {
 
   const installed = await readInstalledVersionInfo(options?.cwd || process.cwd(), options?.overrideGit);
   const branch = cfg.github.branch || installed.branch || 'main';
-  const cacheKey = `${repo}|${branch}|${getTokenScopeFingerprint(cfg.github.token)}|${installed.currentCommit || 'none'}`;
+  const tokenScopeKey = getTokenScopeFingerprint(cfg.github.token);
+  const cacheKey = `${repo}|${branch}|${tokenScopeKey}|${installed.currentCommit || 'none'}`;
+  const forceRefresh = Boolean(options?.forceRefresh);
 
-  // ใช้ In-memory Cache (10 นาที) เมื่อไม่ได้สั่ง ?force=true และ key ตรงกัน เพื่อลดการยิง GitHub API ซ้ำซ้อน
-  if (
-    !options?.forceRefresh &&
-    cachedNotificationResult &&
-    cachedNotificationResult.cacheKey === cacheKey &&
-    cachedNotificationResult.expiresAt > Date.now()
-  ) {
+  // 1. ใช้ Shared In-memory Cache (ค่าเริ่มต้น 30 นาที) เมื่อไม่ได้สั่ง ?force=true
+  const cachedEntry = versionCheckCache.get(cacheKey);
+  if (!forceRefresh && cachedEntry && cachedEntry.expiresAt > Date.now()) {
     return {
-      ...cachedNotificationResult.payload,
+      ...cachedEntry.payload,
       fromCache: true,
-      cacheExpiresAt: new Date(cachedNotificationResult.expiresAt).toISOString(),
+      isStale: false,
+      staleWarningThai: null,
+      lastSuccessfulCheckedAt: cachedEntry.payload.checkedAt,
+      cooldownActive: false,
+      cooldownUntil: null,
+      cooldownUntilThai: null,
+      cacheExpiresAt: new Date(cachedEntry.expiresAt).toISOString(),
       cacheTtlMinutes,
     };
   }
@@ -878,84 +1010,170 @@ export async function checkGitHubUpdates(options?: {
     remediationThai: string;
     rateLimit: GitHubRateLimitInfo | null;
     changelogNotice: string;
-  }): GitHubVersionCheckResult => ({
-    repository: repo,
-    repositoryUrl: repoUrl,
-    branch,
-    checkedAt,
-    status: 'GITHUB_UNREACHABLE',
-    statusLabelThai: failure.statusLabelThai,
-    hasUpdates: false,
-    githubReachable: false,
-    githubError: failure.githubError,
-    githubErrorCode: failure.errorCode,
-    remediationThai: failure.remediationThai,
-    installedVersion: installed.packageVersion,
-    installedReleaseTag: installed.installedReleaseTag,
-    currentCommit: installed.currentCommit || 'unknown',
-    currentCommitShort: installed.currentCommitShort || 'unknown',
-    latestVersion: null,
-    latestRelease: null,
-    targetCommit: installed.currentCommit || 'unknown',
-    targetCommitShort: installed.currentCommitShort || 'unknown',
-    latestCommitDate: null,
-    latestCommitMessage: null,
-    latestCommitAuthor: null,
-    commitsBehind: 0,
-    commitsAhead: 0,
-    compareStatus: null,
-    localGitAvailable: installed.localGitAvailable,
-    workingTreeClean: installed.workingTreeClean,
-    dirtyFiles: installed.dirtyFiles,
-    compareMigrationFiles: [],
-    changelog: makeEmptyChangelog(failure.changelogNotice),
-    tokenConfigured: cfg.github.tokenConfigured,
-    tokenMaskedHint: cfg.github.tokenMaskedHint,
-    fromCache: false,
-    cacheExpiresAt: null,
-    cacheTtlMinutes,
-    rateLimit: failure.rateLimit,
-  });
+    cooldownUntilMs?: number | null;
+    allowStaleFallback?: boolean;
+  }): GitHubVersionCheckResult => {
+    const cooldownActive = Boolean(failure.cooldownUntilMs && failure.cooldownUntilMs > Date.now());
+    const cooldownUntil = cooldownActive ? new Date(failure.cooldownUntilMs!).toISOString() : null;
+    const cooldownUntilThai = cooldownActive
+      ? formatThaiResetTime(Math.ceil(failure.cooldownUntilMs! / 1000))
+      : null;
 
-  // 1. ตรวจสอบ Branch HEAD Commit จาก GitHub (Read-Only)
-  let branchRes: GitHubHttpResponse;
-  try {
-    branchRes = await fetchGitHubJson(`/commits/${encodeURIComponent(branch)}`);
-  } catch (err: unknown) {
-    const netErr = classifyGitHubNetworkFailure(err, cfg.github.timeoutMs);
-    return buildUnreachableResult({
-      ...netErr,
-      rateLimit: null,
-      changelogNotice: 'ไม่สามารถดึงรายละเอียดการเปลี่ยนแปลงได้เนื่องจากไม่สามารถเชื่อมต่อ api.github.com',
-    });
-  }
+    const lastGood = failure.allowStaleFallback !== false ? lastKnownGoodCache.get(cacheKey) : undefined;
+    if (lastGood) {
+      return {
+        ...lastGood,
+        checkedAt,
+        status: 'GITHUB_UNREACHABLE',
+        statusLabelThai: failure.statusLabelThai,
+        githubReachable: false,
+        githubError: failure.githubError,
+        githubErrorCode: failure.errorCode,
+        remediationThai: failure.remediationThai,
+        tokenConfigured: cfg.github.tokenConfigured,
+        tokenMaskedHint: cfg.github.tokenMaskedHint,
+        fromCache: true,
+        cacheExpiresAt: null,
+        cacheTtlMinutes,
+        isStale: true,
+        staleWarningThai: `ไม่สามารถเชื่อมต่อ GitHub API ได้ (${failure.statusLabelThai}) — กำลังแสดงข้อมูลเวอร์ชันล่าสุดที่บันทึกไว้เมื่อ ${formatThaiTimestamp(lastGood.checkedAt)}`,
+        lastSuccessfulCheckedAt: lastGood.checkedAt,
+        cooldownActive,
+        cooldownUntil,
+        cooldownUntilThai,
+        rateLimit: failure.rateLimit ?? lastGood.rateLimit,
+      };
+    }
 
-  let latestRateLimit = extractRateLimitInfo(branchRes.headers);
-
-  if (!branchRes.ok || !branchRes.json || typeof branchRes.json !== 'object') {
-    const httpErr = classifyGitHubHttpFailure({
-      status: branchRes.status,
-      json: branchRes.json,
-      headers: branchRes.headers,
-      repo,
+    return {
+      repository: repo,
+      repositoryUrl: repoUrl,
       branch,
+      checkedAt,
+      status: 'GITHUB_UNREACHABLE',
+      statusLabelThai: failure.statusLabelThai,
+      hasUpdates: false,
+      githubReachable: false,
+      githubError: failure.githubError,
+      githubErrorCode: failure.errorCode,
+      remediationThai: failure.remediationThai,
+      installedVersion: installed.packageVersion,
+      installedReleaseTag: installed.installedReleaseTag,
+      currentCommit: installed.currentCommit || 'unknown',
+      currentCommitShort: installed.currentCommitShort || 'unknown',
+      latestVersion: null,
+      latestRelease: null,
+      targetCommit: installed.currentCommit || 'unknown',
+      targetCommitShort: installed.currentCommitShort || 'unknown',
+      latestCommitDate: null,
+      latestCommitMessage: null,
+      latestCommitAuthor: null,
+      commitsBehind: 0,
+      commitsAhead: 0,
+      compareStatus: null,
+      localGitAvailable: installed.localGitAvailable,
+      workingTreeClean: installed.workingTreeClean,
+      dirtyFiles: installed.dirtyFiles,
+      compareMigrationFiles: [],
+      changelog: makeEmptyChangelog(failure.changelogNotice),
       tokenConfigured: cfg.github.tokenConfigured,
-    });
+      tokenMaskedHint: cfg.github.tokenMaskedHint,
+      fromCache: false,
+      cacheExpiresAt: null,
+      cacheTtlMinutes,
+      isStale: false,
+      staleWarningThai: null,
+      lastSuccessfulCheckedAt: null,
+      cooldownActive,
+      cooldownUntil,
+      cooldownUntilThai,
+      rateLimit: failure.rateLimit,
+    };
+  };
+
+  // 2. Rate-Limit Cooldown Guard: หยุดยิง GitHub API จนกว่าจะพ้นเวลา reset (แม้กด refresh ซ้ำในช่วง cooldown)
+  const activeCooldown = rateLimitCooldownMap.get(tokenScopeKey);
+  if (activeCooldown && activeCooldown.blockedUntilMs > Date.now()) {
+    const cooldownThai = formatThaiResetTime(Math.ceil(activeCooldown.blockedUntilMs / 1000));
     return buildUnreachableResult({
-      ...httpErr,
-      changelogNotice: 'ไม่สามารถดึงรายละเอียดการเปลี่ยนแปลงได้เนื่องจาก GitHub API ตอบกลับข้อผิดพลาด',
+      errorCode: activeCooldown.errorCode,
+      statusLabelThai: activeCooldown.statusLabelThai,
+      githubError: `${activeCooldown.githubError} (ระบบพักการเรียก GitHub API อัตโนมัติถึงเวลา ${cooldownThai} เพื่อป้องกัน Rate Limit)`,
+      remediationThai: activeCooldown.remediationThai,
+      rateLimit: activeCooldown.rateLimit,
+      changelogNotice: 'อยู่ในช่วงพักการเรียก GitHub API ชั่วคราวหลังติด Rate Limit',
+      cooldownUntilMs: activeCooldown.blockedUntilMs,
+      allowStaleFallback: true,
     });
+  } else if (activeCooldown && activeCooldown.blockedUntilMs <= Date.now()) {
+    rateLimitCooldownMap.delete(tokenScopeKey);
   }
 
-  const branchData = branchRes.json as {
-    sha?: string;
-    commit?: {
-      message?: string;
-      author?: { name?: string; date?: string };
-      committer?: { name?: string; date?: string };
+  // 3. Single-Flight Request Deduplication: รวมคำขอที่เข้ามาพร้อมกันให้ยิง GitHub API เพียงชุดเดียว
+  const forceFlightKey = `${cacheKey}|force`;
+  const normalFlightKey = `${cacheKey}|normal`;
+  if (!forceRefresh) {
+    const existingFlight = inFlightChecks.get(forceFlightKey) || inFlightChecks.get(normalFlightKey);
+    if (existingFlight) {
+      return existingFlight;
+    }
+  } else {
+    const existingForceFlight = inFlightChecks.get(forceFlightKey);
+    if (existingForceFlight) {
+      return existingForceFlight;
+    }
+  }
+
+  const flightKey = forceRefresh ? forceFlightKey : normalFlightKey;
+
+  const runLiveCheck = async (): Promise<GitHubVersionCheckResult> => {
+    // 1. ตรวจสอบ Branch HEAD Commit จาก GitHub (Read-Only)
+    let branchRes: GitHubHttpResponse;
+    try {
+      branchRes = await fetchGitHubJson(`/commits/${encodeURIComponent(branch)}`);
+    } catch (err: unknown) {
+      const netErr = classifyGitHubNetworkFailure(err, cfg.github.timeoutMs);
+      return buildUnreachableResult({
+        ...netErr,
+        rateLimit: null,
+        changelogNotice: 'ไม่สามารถดึงรายละเอียดการเปลี่ยนแปลงได้เนื่องจากไม่สามารถเชื่อมต่อ api.github.com',
+        allowStaleFallback: true,
+      });
+    }
+
+    let latestRateLimit = extractRateLimitInfo(branchRes.headers);
+
+    if (!branchRes.ok || !branchRes.json || typeof branchRes.json !== 'object') {
+      const httpErr = classifyGitHubHttpFailure({
+        status: branchRes.status,
+        json: branchRes.json,
+        headers: branchRes.headers,
+        repo,
+        branch,
+        tokenConfigured: cfg.github.tokenConfigured,
+      });
+      const cooldownUntilMs = recordRateLimitCooldown(tokenScopeKey, httpErr);
+      const allowStale =
+        httpErr.errorCode !== 'GITHUB_UNAUTHORIZED' &&
+        httpErr.errorCode !== 'GITHUB_FORBIDDEN' &&
+        httpErr.errorCode !== 'GITHUB_NOT_FOUND';
+      return buildUnreachableResult({
+        ...httpErr,
+        cooldownUntilMs,
+        allowStaleFallback: allowStale,
+        changelogNotice: 'ไม่สามารถดึงรายละเอียดการเปลี่ยนแปลงได้เนื่องจาก GitHub API ตอบกลับข้อผิดพลาด',
+      });
+    }
+
+    const branchData = branchRes.json as {
+      sha?: string;
+      commit?: {
+        message?: string;
+        author?: { name?: string; date?: string };
+        committer?: { name?: string; date?: string };
+      };
+      html_url?: string;
     };
-    html_url?: string;
-  };
 
   const targetCommit = String(branchData.sha || '').trim();
   const targetCommitShort = targetCommit ? targetCommit.slice(0, 8) : 'unknown';
@@ -980,7 +1198,12 @@ export async function checkGitHubUpdates(options?: {
           url: typeof r.html_url === 'string' ? r.html_url : null,
           body: typeof r.body === 'string' ? r.body : '',
         }));
-    } else if (relRes.status === 401 || relRes.status === 429 || (relRes.status === 403 && relRes.headers?.['x-ratelimit-remaining'] === '0')) {
+    } else if (
+      relRes.status === 401 ||
+      relRes.status === 429 ||
+      (relRes.status === 403 &&
+        (relRes.headers?.['x-ratelimit-remaining'] === '0' || Boolean(relRes.headers?.['retry-after'])))
+    ) {
       const httpErr = classifyGitHubHttpFailure({
         status: relRes.status,
         json: relRes.json,
@@ -989,8 +1212,11 @@ export async function checkGitHubUpdates(options?: {
         branch,
         tokenConfigured: cfg.github.tokenConfigured,
       });
+      const cooldownUntilMs = recordRateLimitCooldown(tokenScopeKey, httpErr);
       return buildUnreachableResult({
         ...httpErr,
+        cooldownUntilMs,
+        allowStaleFallback: httpErr.errorCode !== 'GITHUB_UNAUTHORIZED',
         changelogNotice: 'ไม่สามารถดึงข้อมูล Release Notes ได้เนื่องจาก GitHub API ปฏิเสธคำขอ',
       });
     }
@@ -1071,7 +1297,8 @@ export async function checkGitHubUpdates(options?: {
       } else if (
         cmpRes.status === 401 ||
         cmpRes.status === 429 ||
-        (cmpRes.status === 403 && cmpRes.headers?.['x-ratelimit-remaining'] === '0')
+        (cmpRes.status === 403 &&
+          (cmpRes.headers?.['x-ratelimit-remaining'] === '0' || Boolean(cmpRes.headers?.['retry-after'])))
       ) {
         const httpErr = classifyGitHubHttpFailure({
           status: cmpRes.status,
@@ -1081,8 +1308,11 @@ export async function checkGitHubUpdates(options?: {
           branch,
           tokenConfigured: cfg.github.tokenConfigured,
         });
+        const cooldownUntilMs = recordRateLimitCooldown(tokenScopeKey, httpErr);
         return buildUnreachableResult({
           ...httpErr,
+          cooldownUntilMs,
+          allowStaleFallback: httpErr.errorCode !== 'GITHUB_UNAUTHORIZED',
           changelogNotice: 'ไม่สามารถเปรียบเทียบประวัติ Commit ได้เนื่องจาก GitHub API ปฏิเสธคำขอ',
         });
       }
@@ -1301,64 +1531,92 @@ export async function checkGitHubUpdates(options?: {
   const latestVersionDisplay =
     latestReleaseFull?.tagName || (targetCommitShort !== 'unknown' ? `commit ${targetCommitShort}` : null);
 
-  const expiresAtMs = Date.now() + cacheTtlMs;
-  const result: GitHubVersionCheckResult = {
-    repository: repo,
-    repositoryUrl: repoUrl,
-    branch,
-    checkedAt,
-    status,
-    statusLabelThai,
-    hasUpdates,
-    githubReachable: true,
-    githubError: null,
-    githubErrorCode: null,
-    remediationThai: null,
-    installedVersion: installed.packageVersion,
-    installedReleaseTag: installed.installedReleaseTag,
-    currentCommit: installed.currentCommit || 'unknown',
-    currentCommitShort: installed.currentCommitShort || 'unknown',
-    latestVersion: latestVersionDisplay,
-    latestRelease,
-    targetCommit: targetCommit || 'unknown',
-    targetCommitShort,
-    latestCommitDate,
-    latestCommitMessage,
-    latestCommitAuthor,
-    commitsBehind,
-    commitsAhead,
-    compareStatus,
-    localGitAvailable: installed.localGitAvailable,
-    workingTreeClean: installed.workingTreeClean,
-    dirtyFiles: installed.dirtyFiles,
-    compareMigrationFiles,
-    changelog: {
-      sourceType,
-      sourceLabelThai,
-      hasOfficialReleaseNotes,
-      isAutomatedThaiSummary,
-      noticeThai,
-      versionRangeLabel,
-      isMultiVersionJump,
-      includedReleases,
-      totalEntries,
-      categories,
-    },
-    tokenConfigured: cfg.github.tokenConfigured,
-    tokenMaskedHint: cfg.github.tokenMaskedHint,
-    fromCache: false,
-    cacheExpiresAt: new Date(expiresAtMs).toISOString(),
-    cacheTtlMinutes,
-    rateLimit: latestRateLimit,
+    const nowMs = Date.now();
+    const expiresAtMs = nowMs + cacheTtlMs;
+    const result: GitHubVersionCheckResult = {
+      repository: repo,
+      repositoryUrl: repoUrl,
+      branch,
+      checkedAt,
+      status,
+      statusLabelThai,
+      hasUpdates,
+      githubReachable: true,
+      githubError: null,
+      githubErrorCode: null,
+      remediationThai: null,
+      installedVersion: installed.packageVersion,
+      installedReleaseTag: installed.installedReleaseTag,
+      currentCommit: installed.currentCommit || 'unknown',
+      currentCommitShort: installed.currentCommitShort || 'unknown',
+      latestVersion: latestVersionDisplay,
+      latestRelease,
+      targetCommit: targetCommit || 'unknown',
+      targetCommitShort,
+      latestCommitDate,
+      latestCommitMessage,
+      latestCommitAuthor,
+      commitsBehind,
+      commitsAhead,
+      compareStatus,
+      localGitAvailable: installed.localGitAvailable,
+      workingTreeClean: installed.workingTreeClean,
+      dirtyFiles: installed.dirtyFiles,
+      compareMigrationFiles,
+      changelog: {
+        sourceType,
+        sourceLabelThai,
+        hasOfficialReleaseNotes,
+        isAutomatedThaiSummary,
+        noticeThai,
+        versionRangeLabel,
+        isMultiVersionJump,
+        includedReleases,
+        totalEntries,
+        categories,
+      },
+      tokenConfigured: cfg.github.tokenConfigured,
+      tokenMaskedHint: cfg.github.tokenMaskedHint,
+      fromCache: false,
+      cacheExpiresAt: new Date(expiresAtMs).toISOString(),
+      cacheTtlMinutes,
+      isStale: false,
+      staleWarningThai: null,
+      lastSuccessfulCheckedAt: checkedAt,
+      cooldownActive: false,
+      cooldownUntil: null,
+      cooldownUntilThai: null,
+      rateLimit: latestRateLimit,
+    };
+
+    rateLimitCooldownMap.delete(tokenScopeKey);
+    if (versionCheckCache.size >= 50) {
+      const oldestKey = versionCheckCache.keys().next().value;
+      if (oldestKey) versionCheckCache.delete(oldestKey);
+    }
+    versionCheckCache.set(cacheKey, {
+      cacheKey,
+      cachedAt: nowMs,
+      expiresAt: expiresAtMs,
+      payload: result,
+    });
+    if (lastKnownGoodCache.size >= 50) {
+      const oldestKey = lastKnownGoodCache.keys().next().value;
+      if (oldestKey) lastKnownGoodCache.delete(oldestKey);
+    }
+    lastKnownGoodCache.set(cacheKey, result);
+
+    return result;
   };
 
-  cachedNotificationResult = {
-    cacheKey,
-    expiresAt: expiresAtMs,
-    payload: result,
-  };
+  const flightPromise = runLiveCheck().finally(() => {
+    if (inFlightChecks.get(flightKey) === flightPromise) {
+      inFlightChecks.delete(flightKey);
+    }
+  });
+  inFlightChecks.set(flightKey, flightPromise);
 
-  return result;
+  return flightPromise;
 }
 
 export function evaluateDeploymentReadiness(params: {

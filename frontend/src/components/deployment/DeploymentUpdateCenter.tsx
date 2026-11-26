@@ -11,7 +11,7 @@
  * D. ดำเนินการอัปเดต + Migration Approval Modal + วิเคราะห์ข้อผิดพลาด + แนวทาง Rollback
  * E. ประวัติการอัปเดตและ Log ที่ปกปิดข้อมูลความลับ
  */
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -57,7 +57,7 @@ import {
 } from '../common/SharedComponents.tsx';
 import { useToast } from '../common/ToastContext.tsx';
 import { PageHelpAction } from '../common/ContextualHelp.tsx';
-import type { NavViewKey } from '../layout/Sidebar.tsx';
+import type { NavViewKey, SidebarUpdateBadge } from '../layout/Sidebar.tsx';
 import { formatThaiDateTime } from '../../utils/thaiFormat.ts';
 
 type ChangelogCategoryKey =
@@ -170,7 +170,7 @@ export function DeploymentUpdateCenter({
 }: {
   userRole?: UserRole;
   onNavigate?: (view: NavViewKey) => void;
-  onNotificationChange?: () => void;
+  onNotificationChange?: (badge?: SidebarUpdateBadge | null) => void;
 }) {
   const { showToast } = useToast();
 
@@ -218,106 +218,181 @@ export function DeploymentUpdateCenter({
   // History Detail Drawer
   const [selectedHistoryRow, setSelectedHistoryRow] = useState<any | null>(null);
 
-  const loadInitialData = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [statusRes, checkRes] = await Promise.all([
-        apiRequest('/deployment/status'),
-        apiRequest('/deployment/check-updates', {
-          method: 'POST',
-          body: JSON.stringify({ force: false }),
-        }).catch(() => null),
-      ]);
-      setDeployStatus(statusRes);
-      if (checkRes) {
-        setCheckResult(checkRes);
-        if (checkRes.readiness) {
-          setReadiness(checkRes.readiness);
-        }
-        if (checkRes.githubReachable === false && (checkRes.githubErrorCode === 'GITHUB_RATE_LIMITED' || checkRes.githubErrorCode === 'GITHUB_UNAUTHORIZED' || checkRes.githubErrorCode === 'GITHUB_NOT_FOUND')) {
-          setTokenPanelOpen(true);
-        }
-      } else {
-        const readRes = await apiRequest<DeploymentReadinessReport>('/deployment/readiness').catch(() => null);
-        if (readRes) setReadiness(readRes);
-      }
-      onNotificationChange?.();
-    } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      } else {
-        setError({ message: 'ไม่สามารถโหลดข้อมูลศูนย์อัปเดตระบบได้' });
-      }
-    } finally {
-      setLoading(false);
-    }
+  // Lifecycle, Concurrency & Stale-Response Protection Refs
+  const onNotificationChangeRef = useRef(onNotificationChange);
+  useEffect(() => {
+    onNotificationChangeRef.current = onNotificationChange;
   }, [onNotificationChange]);
 
+  const mountedRef = useRef(true);
+  const activeControllerRef = useRef<AbortController | null>(null);
+  const inFlightCheckRef = useRef<Promise<void> | null>(null);
+  const inFlightForceRef = useRef(false);
+  const requestSeqRef = useRef(0);
+
+  const runVersionCheck = useCallback(
+    async (opts: { force: boolean; showToastOnResult: boolean; isInitial: boolean }) => {
+      if (inFlightCheckRef.current) {
+        if (!opts.force || inFlightForceRef.current) {
+          return inFlightCheckRef.current;
+        }
+        // Manual force check supersedes an older non-forced initial load
+        activeControllerRef.current?.abort();
+      }
+
+      const seq = ++requestSeqRef.current;
+      const controller = new AbortController();
+      activeControllerRef.current = controller;
+      inFlightForceRef.current = opts.force;
+
+      if (opts.isInitial) {
+        setLoading(true);
+      } else {
+        setCheckingUpdates(true);
+        setNotice(null);
+      }
+      setError(null);
+
+      let task!: Promise<void>;
+      task = (async () => {
+        try {
+          const checkEndpoint = opts.force
+            ? '/deployment/check-updates?force=true'
+            : '/deployment/check-updates';
+
+          const [statusRes, checkRes] = await Promise.all([
+            apiRequest('/deployment/status', { signal: controller.signal }),
+            apiRequest(checkEndpoint, {
+              method: 'POST',
+              body: JSON.stringify({ force: opts.force }),
+              signal: controller.signal,
+            }).catch((checkErr) => {
+              if (
+                opts.force ||
+                controller.signal.aborted ||
+                (checkErr instanceof Error && checkErr.name === 'AbortError')
+              ) {
+                throw checkErr;
+              }
+              return null;
+            }),
+          ]);
+
+          if (controller.signal.aborted || !mountedRef.current || seq !== requestSeqRef.current) {
+            return;
+          }
+
+          setDeployStatus(statusRes);
+          if (checkRes) {
+            setCheckResult(checkRes);
+            if (checkRes.readiness) {
+              setReadiness(checkRes.readiness);
+            }
+            if (
+              checkRes.githubReachable === false &&
+              (checkRes.githubErrorCode === 'GITHUB_RATE_LIMITED' ||
+                checkRes.githubErrorCode === 'GITHUB_UNAUTHORIZED' ||
+                checkRes.githubErrorCode === 'GITHUB_NOT_FOUND')
+            ) {
+              setTokenPanelOpen(true);
+            }
+            onNotificationChangeRef.current?.({
+              hasUpdate: Boolean(checkRes.hasUpdates),
+              label: checkRes.statusLabelThai,
+              githubReachable: checkRes.githubReachable,
+            });
+          } else {
+            const readRes = await apiRequest<DeploymentReadinessReport>('/deployment/readiness', {
+              signal: controller.signal,
+            }).catch(() => null);
+            if (controller.signal.aborted || !mountedRef.current || seq !== requestSeqRef.current) {
+              return;
+            }
+            if (readRes) setReadiness(readRes);
+          }
+
+          if (opts.showToastOnResult && checkRes) {
+            if (!checkRes.githubReachable) {
+              showToast({
+                type: 'error',
+                title: checkRes.statusLabelThai || 'เชื่อมต่อ GitHub ไม่สำเร็จ',
+                message: checkRes.githubError || 'ไม่สามารถดึงข้อมูลจาก GitHub ได้ในขณะนี้',
+              });
+            } else if (checkRes.pendingMigrations?.length > 0) {
+              showToast({
+                type: 'warning',
+                title: `พบ Database Migration ${checkRes.pendingMigrations.length} ไฟล์`,
+                message: 'กรุณาตรวจสอบรายละเอียดและอนุมัติด้วยรหัสผ่านผู้ดูแลระบบก่อนอัปเดต',
+              });
+            } else if (checkRes.hasUpdates) {
+              showToast({
+                type: 'info',
+                title: checkRes.statusLabelThai || 'พบอัปเดตใหม่บน GitHub',
+                message: `Commit เป้าหมาย: ${checkRes.targetCommitShort}`,
+              });
+            } else {
+              showToast({
+                type: 'success',
+                title: checkRes.statusLabelThai || 'ตรวจสอบเวอร์ชันเรียบร้อย',
+                message: `ตรวจสอบล่าสุดเมื่อ ${formatThaiDateTime(checkRes.checkedAt)}`,
+              });
+            }
+          }
+        } catch (err) {
+          if (controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+            return;
+          }
+          if (!mountedRef.current || seq !== requestSeqRef.current) {
+            return;
+          }
+          if (err instanceof ApiClientError) {
+            setError({ code: err.code, message: err.message });
+          } else {
+            setError({
+              message: opts.isInitial
+                ? 'ไม่สามารถโหลดข้อมูลศูนย์อัปเดตระบบได้'
+                : 'เกิดข้อผิดพลาดขณะตรวจสอบเวอร์ชันจาก GitHub',
+            });
+          }
+        } finally {
+          if (inFlightCheckRef.current === task) {
+            inFlightCheckRef.current = null;
+            inFlightForceRef.current = false;
+          }
+          if (activeControllerRef.current === controller) {
+            activeControllerRef.current = null;
+          }
+          if (mountedRef.current && seq === requestSeqRef.current) {
+            setLoading(false);
+            setCheckingUpdates(false);
+          }
+        }
+      })();
+
+      inFlightCheckRef.current = task;
+      return task;
+    },
+    [showToast]
+  );
+
+  const loadInitialData = useCallback(async () => {
+    return runVersionCheck({ force: false, showToastOnResult: false, isInitial: true });
+  }, [runVersionCheck]);
+
   useEffect(() => {
-    loadInitialData();
+    mountedRef.current = true;
+    void loadInitialData();
+    return () => {
+      mountedRef.current = false;
+      activeControllerRef.current?.abort();
+      activeControllerRef.current = null;
+      inFlightCheckRef.current = null;
+      inFlightForceRef.current = false;
+    };
   }, [loadInitialData]);
 
   async function handleRecheckVersion() {
-    setCheckingUpdates(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const [statusRes, checkRes] = await Promise.all([
-        apiRequest('/deployment/status'),
-        apiRequest('/deployment/check-updates?force=true', {
-          method: 'POST',
-          body: JSON.stringify({ force: true }),
-        }),
-      ]);
-      setDeployStatus(statusRes);
-      setCheckResult(checkRes);
-      if (checkRes.readiness) {
-        setReadiness(checkRes.readiness);
-      }
-      onNotificationChange?.();
-
-      if (!checkRes.githubReachable) {
-        if (
-          checkRes.githubErrorCode === 'GITHUB_RATE_LIMITED' ||
-          checkRes.githubErrorCode === 'GITHUB_UNAUTHORIZED' ||
-          checkRes.githubErrorCode === 'GITHUB_NOT_FOUND'
-        ) {
-          setTokenPanelOpen(true);
-        }
-        showToast({
-          type: 'error',
-          title: checkRes.statusLabelThai || 'เชื่อมต่อ GitHub ไม่สำเร็จ',
-          message: checkRes.githubError || 'ไม่สามารถดึงข้อมูลจาก GitHub ได้ในขณะนี้',
-        });
-      } else if (checkRes.pendingMigrations?.length > 0) {
-        showToast({
-          type: 'warning',
-          title: `พบ Database Migration ${checkRes.pendingMigrations.length} ไฟล์`,
-          message: 'กรุณาตรวจสอบรายละเอียดและอนุมัติด้วยรหัสผ่านผู้ดูแลระบบก่อนอัปเดต',
-        });
-      } else if (checkRes.hasUpdates) {
-        showToast({
-          type: 'info',
-          title: checkRes.statusLabelThai || 'พบอัปเดตใหม่บน GitHub',
-          message: `Commit เป้าหมาย: ${checkRes.targetCommitShort}`,
-        });
-      } else {
-        showToast({
-          type: 'success',
-          title: checkRes.statusLabelThai || 'ตรวจสอบเวอร์ชันเรียบร้อย',
-          message: `ตรวจสอบล่าสุดเมื่อ ${formatThaiDateTime(checkRes.checkedAt)}`,
-        });
-      }
-    } catch (err) {
-      if (err instanceof ApiClientError) {
-        setError({ code: err.code, message: err.message });
-      } else {
-        setError({ message: 'เกิดข้อผิดพลาดขณะตรวจสอบเวอร์ชันจาก GitHub' });
-      }
-    } finally {
-      setCheckingUpdates(false);
-    }
+    await runVersionCheck({ force: true, showToastOnResult: true, isInitial: false });
   }
 
   async function handleSaveGitHubToken(e: React.FormEvent) {
@@ -334,6 +409,7 @@ export function DeploymentUpdateCenter({
         method: 'POST',
         body: JSON.stringify({ token: trimmed }),
       });
+      if (!mountedRef.current) return;
       setTokenInput('');
       setShowTokenInput(false);
       setDeployStatus((prev: any) => ({
@@ -344,11 +420,15 @@ export function DeploymentUpdateCenter({
       }));
       if (res.checkResult) {
         setCheckResult(res.checkResult);
+        onNotificationChangeRef.current?.({
+          hasUpdate: Boolean(res.checkResult.hasUpdates),
+          label: res.checkResult.statusLabelThai,
+          githubReachable: res.checkResult.githubReachable,
+        });
       }
       if (res.readiness) {
         setReadiness(res.readiness);
       }
-      onNotificationChange?.();
 
       if (res.checkResult?.githubReachable) {
         setNotice(res.message || 'บันทึก GITHUB_TOKEN และเชื่อมต่อ GitHub สำเร็จแล้ว');
@@ -370,6 +450,7 @@ export function DeploymentUpdateCenter({
         });
       }
     } catch (err) {
+      if (!mountedRef.current) return;
       if (err instanceof ApiClientError) {
         setTokenFormError(err.message);
         showToast({ type: 'error', title: 'ไม่สามารถบันทึก GITHUB_TOKEN ได้', message: err.message });
@@ -377,7 +458,9 @@ export function DeploymentUpdateCenter({
         setTokenFormError('ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์เพื่อบันทึก GITHUB_TOKEN ได้');
       }
     } finally {
-      setSavingToken(false);
+      if (mountedRef.current) {
+        setSavingToken(false);
+      }
     }
   }
 
@@ -389,6 +472,7 @@ export function DeploymentUpdateCenter({
         method: 'POST',
         body: JSON.stringify({ clear: true }),
       });
+      if (!mountedRef.current) return;
       setTokenInput('');
       setShowTokenInput(false);
       setDeployStatus((prev: any) => ({
@@ -398,11 +482,15 @@ export function DeploymentUpdateCenter({
       }));
       if (res.checkResult) {
         setCheckResult(res.checkResult);
+        onNotificationChangeRef.current?.({
+          hasUpdate: Boolean(res.checkResult.hasUpdates),
+          label: res.checkResult.statusLabelThai,
+          githubReachable: res.checkResult.githubReachable,
+        });
       }
       if (res.readiness) {
         setReadiness(res.readiness);
       }
-      onNotificationChange?.();
       setNotice('ล้างค่า GITHUB_TOKEN จากไฟล์ .env เรียบร้อยแล้ว (สลับกลับเป็นโหมดสาธารณะ 60 ครั้ง/ชั่วโมง)');
       showToast({
         type: 'info',
@@ -410,13 +498,16 @@ export function DeploymentUpdateCenter({
         message: 'ระบบใช้การตรวจสอบแบบไม่ระบุตัวตน (เฉพาะ Public Repository)',
       });
     } catch (err) {
+      if (!mountedRef.current) return;
       if (err instanceof ApiClientError) {
         setTokenFormError(err.message);
       } else {
         setTokenFormError('ไม่สามารถล้างค่า GITHUB_TOKEN ได้');
       }
     } finally {
-      setSavingToken(false);
+      if (mountedRef.current) {
+        setSavingToken(false);
+      }
     }
   }
 
@@ -730,7 +821,7 @@ export function DeploymentUpdateCenter({
           </button>
         </div>
 
-        {/* GitHub Unreachable Explicit Alert with Distinct Cause & Remediation */}
+        {/* GitHub Unreachable Explicit Alert with Distinct Cause, Rate-Limit Cooldown & Stale Fallback Notice */}
         {checkResult && checkResult.githubReachable === false && (
           <div
             role="alert"
@@ -749,11 +840,20 @@ export function DeploymentUpdateCenter({
                   {checkResult.githubErrorCode ? ` (${checkResult.githubErrorCode})` : ''}
                 </span>
               </div>
-              {rateLimit?.resetAtThai && checkResult.githubErrorCode === 'GITHUB_RATE_LIMITED' && (
-                <StatusBadge tone="warning">รีเซ็ตโควตาเวลา {rateLimit.resetAtThai}</StatusBadge>
-              )}
+              {(checkResult.cooldownUntilThai || rateLimit?.resetAtThai) &&
+                checkResult.githubErrorCode === 'GITHUB_RATE_LIMITED' && (
+                  <StatusBadge tone="warning">
+                    รีเซ็ตโควตาเวลา {checkResult.cooldownUntilThai || rateLimit.resetAtThai}
+                  </StatusBadge>
+                )}
             </div>
             <p className="text-[13.5px] leading-relaxed">{checkResult.githubError}</p>
+            {checkResult.isStale && checkResult.staleWarningThai && (
+              <div className="text-[13px] bg-[#FEF7EA] border border-[#F2DCBA] rounded-lg px-3.5 py-2.5 text-[#7C4E0E]">
+                <span className="font-bold">ข้อมูลแคชล่าสุด: </span>
+                {checkResult.staleWarningThai}
+              </div>
+            )}
             {checkResult.remediationThai && (
               <div className="text-[13px] bg-white/80 border border-[#E5B8BF]/60 rounded-lg px-3.5 py-2.5 text-[#4E3978]">
                 <span className="font-bold">แนวทางแก้ไข: </span>

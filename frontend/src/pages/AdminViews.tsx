@@ -48,7 +48,7 @@ import {
 import { useToast } from '../components/common/ToastContext.tsx';
 import { PageHelpAction } from '../components/common/ContextualHelp.tsx';
 import { DeploymentUpdateCenter } from '../components/deployment/DeploymentUpdateCenter.tsx';
-import type { NavViewKey } from '../components/layout/Sidebar.tsx';
+import type { NavViewKey, SidebarUpdateBadge } from '../components/layout/Sidebar.tsx';
 import { formatThaiDateTime } from '../utils/thaiFormat.ts';
 
 const AUDIT_ACTION_THAI_LABELS: Record<string, string> = {
@@ -102,7 +102,7 @@ export function AdminViews({
   mode: 'users' | 'auditLogs' | 'deployment';
   userRole?: UserRole;
   onNavigate?: (view: NavViewKey) => void;
-  onNotificationChange?: () => void;
+  onNotificationChange?: (badge?: SidebarUpdateBadge | null) => void;
 }) {
   if (mode === 'deployment') {
     return (

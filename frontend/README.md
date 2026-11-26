@@ -19,8 +19,12 @@ frontend/
     │   └── thaiFormat.ts             # ฟังก์ชันแปลงวันที่/เวลาเป็นภาษาไทย (พ.ศ.) และคำนวณช่วงวันที่จากตัวกรอง
     ├── components/
     │   ├── StatusText.tsx            # ป้ายแสดงสถานะการลงเวลา (StatusBadge), ป้ายสิทธิ์ผู้ใช้ และกล่องแจ้งเตือนข้อผิดพลาด
-    │   └── common/
-    │       └── SharedComponents.tsx  # คอมโพเนนต์กลางที่ใช้ร่วมกันทุกหน้า (PageHeader, PeriodFilterBar, Pagination, Modal, Drawer)
+    │   ├── common/
+    │   │   ├── SharedComponents.tsx  # คอมโพเนนต์กลางที่ใช้ร่วมกันทุกหน้า (PageHeader, PeriodFilterBar, Pagination, Modal, Drawer)
+    │   │   └── ToastContext.tsx      # ระบบแจ้งเตือนแบบ Floating Toast (useMemo Context ป้องกันการ Re-render/Loop)
+    │   └── deployment/
+    │       ├── DeploymentUpdateCenter.tsx # ศูนย์อัปเดตระบบ & อนุมัติ Migration (StrictMode/AbortController/Dedup Safe)
+    │       └── GitHubUpdateCenter.tsx     # คอนโซลอัปเดตระบบจาก GitHub พร้อม Changelog ภาษาไทยและ Rate-Limit Guard
     └── pages/
         ├── DashboardView.tsx         # หน้าภาพรวมองค์กร, แถบสัดส่วน 100%, ตารางสรุปแผนก และหน้าต่างเจาะลึก (Drill-Down)
         ├── MyAttendanceView.tsx      # หน้าเวลาปฏิบัติงานของฉัน (สำหรับบุคลากรทุกคนดูผลลงเวลา ตารางเวร และสแกนของตนเอง)

@@ -11,7 +11,7 @@
  *   E. ประวัติการอัปเดตระบบและประวัติ Database Migration พร้อมดู Log ที่ปกปิดข้อมูลลับแล้ว
  */
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -140,67 +140,143 @@ export function GitHubUpdateCenter({
     requiresAdminDatabaseRestore?: boolean;
   } | null>(null);
 
+  const onUpdateBadgeChangeRef = useRef(onUpdateBadgeChange);
+  useEffect(() => {
+    onUpdateBadgeChangeRef.current = onUpdateBadgeChange;
+  }, [onUpdateBadgeChange]);
+
+  const toastRef = useRef(toast);
+  useEffect(() => {
+    toastRef.current = toast;
+  }, [toast]);
+
+  const mountedRef = useRef(true);
+  const activeControllerRef = useRef<AbortController | null>(null);
+  const inFlightCheckRef = useRef<Promise<void> | null>(null);
+  const inFlightForceRef = useRef(false);
+  const requestSeqRef = useRef(0);
+
   const refreshStatusAndCheck = useCallback(
-    async (opts?: { showToast?: boolean }) => {
+    async (opts?: { showToast?: boolean; force?: boolean }) => {
+      const force = Boolean(opts?.force);
+      if (inFlightCheckRef.current) {
+        if (!force || inFlightForceRef.current) {
+          return inFlightCheckRef.current;
+        }
+        activeControllerRef.current?.abort();
+      }
+
+      const seq = ++requestSeqRef.current;
+      const controller = new AbortController();
+      activeControllerRef.current = controller;
+      inFlightForceRef.current = force;
+
       setCheckingUpdates(true);
       setError(null);
       if (opts?.showToast) {
         setNotice(null);
       }
-      try {
-        const [statusRes, checkRes] = await Promise.all([
-          apiRequest('/deployment/status'),
-          apiRequest('/deployment/check-updates', { method: 'POST' }),
-        ]);
-        setDeployStatus(statusRes);
-        setUpdateReport(checkRes);
 
-        const isUpdateAvail = checkRes?.versionStatus === 'UPDATE_AVAILABLE';
-        onUpdateBadgeChange?.(isUpdateAvail);
+      let task!: Promise<void>;
+      task = (async () => {
+        try {
+          const checkEndpoint = force
+            ? '/deployment/check-updates?force=true'
+            : '/deployment/check-updates';
 
-        if (opts?.showToast) {
-          if (checkRes?.versionStatus === 'GITHUB_UNREACHABLE') {
-            toast.warning(
-              'ไม่สามารถตรวจสอบ GitHub ได้',
-              checkRes?.statusDescriptionThai || 'กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ตของเซิร์ฟเวอร์'
-            );
-          } else if (checkRes?.checksumMismatches?.length > 0) {
-            toast.error(
-              'พบ Checksum ของ Migration ไม่ตรงกัน',
-              'ระบบระงับการอัปเดตเพื่อความปลอดภัย กรุณาตรวจสอบรายละเอียด'
-            );
-          } else if (checkRes?.migrationApprovalRequired) {
-            const msg = `ตรวจพบ Database Migration รออนุมัติ (${(checkRes.pendingMigrations || []).join(', ')})`;
-            setNotice(msg);
-            toast.warning('พบ Database Migration รออนุมัติ', msg);
-          } else if (isUpdateAvail) {
-            const msg = checkRes?.statusLabelThai || 'พบอัปเดตใหม่บน GitHub';
-            setNotice(msg);
-            toast.info('พบเวอร์ชันใหม่บน GitHub', checkRes?.statusDescriptionThai || msg);
-          } else if (checkRes?.versionStatus === 'UP_TO_DATE') {
-            setNotice('ระบบเป็นเวอร์ชันล่าสุดตรงกับ GitHub แล้ว');
-            toast.success('ตรวจสอบเวอร์ชันแล้ว', 'ระบบเป็นเวอร์ชันล่าสุดแล้ว');
+          const [statusRes, checkRes] = await Promise.all([
+            apiRequest('/deployment/status', { signal: controller.signal }),
+            apiRequest(checkEndpoint, {
+              method: 'POST',
+              body: JSON.stringify({ force }),
+              signal: controller.signal,
+            }),
+          ]);
+
+          if (controller.signal.aborted || !mountedRef.current || seq !== requestSeqRef.current) {
+            return;
+          }
+
+          setDeployStatus(statusRes);
+          setUpdateReport(checkRes);
+
+          const isUpdateAvail =
+            Boolean(checkRes?.hasUpdates) || checkRes?.versionStatus === 'UPDATE_AVAILABLE';
+          onUpdateBadgeChangeRef.current?.(isUpdateAvail);
+
+          if (opts?.showToast) {
+            const currentToast = toastRef.current;
+            if (checkRes?.versionStatus === 'GITHUB_UNREACHABLE' || checkRes?.githubReachable === false) {
+              currentToast.warning(
+                'ไม่สามารถตรวจสอบ GitHub ได้',
+                checkRes?.githubError ||
+                  checkRes?.statusDescriptionThai ||
+                  'กรุณาตรวจสอบการเชื่อมต่ออินเทอร์เน็ตของเซิร์ฟเวอร์'
+              );
+            } else if (checkRes?.checksumMismatches?.length > 0) {
+              currentToast.error(
+                'พบ Checksum ของ Migration ไม่ตรงกัน',
+                'ระบบระงับการอัปเดตเพื่อความปลอดภัย กรุณาตรวจสอบรายละเอียด'
+              );
+            } else if (checkRes?.migrationApprovalRequired) {
+              const msg = `ตรวจพบ Database Migration รออนุมัติ (${(checkRes.pendingMigrations || []).join(', ')})`;
+              setNotice(msg);
+              currentToast.warning('พบ Database Migration รออนุมัติ', msg);
+            } else if (isUpdateAvail) {
+              const msg = checkRes?.statusLabelThai || 'พบอัปเดตใหม่บน GitHub';
+              setNotice(msg);
+              currentToast.info('พบเวอร์ชันใหม่บน GitHub', checkRes?.statusDescriptionThai || msg);
+            } else if (checkRes?.versionStatus === 'UP_TO_DATE' || checkRes?.status === 'UP_TO_DATE') {
+              setNotice('ระบบเป็นเวอร์ชันล่าสุดตรงกับ GitHub แล้ว');
+              currentToast.success('ตรวจสอบเวอร์ชันแล้ว', 'ระบบเป็นเวอร์ชันล่าสุดแล้ว');
+            } else {
+              setNotice(checkRes?.statusDescriptionThai || 'ตรวจสอบสถานะระบบเรียบร้อยแล้ว');
+              currentToast.info('ตรวจสอบเวอร์ชันแล้ว', checkRes?.statusLabelThai || 'ตรวจสอบเรียบร้อยแล้ว');
+            }
+          }
+        } catch (err) {
+          if (controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+            return;
+          }
+          if (!mountedRef.current || seq !== requestSeqRef.current) {
+            return;
+          }
+          if (err instanceof ApiClientError) {
+            setError({ code: err.code, message: err.message });
           } else {
-            setNotice(checkRes?.statusDescriptionThai || 'ตรวจสอบสถานะระบบเรียบร้อยแล้ว');
-            toast.info('ตรวจสอบเวอร์ชันแล้ว', checkRes?.statusLabelThai || 'ตรวจสอบเรียบร้อยแล้ว');
+            setError({ message: 'ไม่สามารถโหลดข้อมูลศูนย์อัปเดตระบบได้' });
+          }
+        } finally {
+          if (inFlightCheckRef.current === task) {
+            inFlightCheckRef.current = null;
+            inFlightForceRef.current = false;
+          }
+          if (activeControllerRef.current === controller) {
+            activeControllerRef.current = null;
+          }
+          if (mountedRef.current && seq === requestSeqRef.current) {
+            setCheckingUpdates(false);
+            setLoadingInitial(false);
           }
         }
-      } catch (err) {
-        if (err instanceof ApiClientError) {
-          setError({ code: err.code, message: err.message });
-        } else {
-          setError({ message: 'ไม่สามารถโหลดข้อมูลศูนย์อัปเดตระบบได้' });
-        }
-      } finally {
-        setCheckingUpdates(false);
-        setLoadingInitial(false);
-      }
+      })();
+
+      inFlightCheckRef.current = task;
+      return task;
     },
-    [onUpdateBadgeChange, toast]
+    []
   );
 
   useEffect(() => {
-    refreshStatusAndCheck({ showToast: false });
+    mountedRef.current = true;
+    void refreshStatusAndCheck({ showToast: false, force: false });
+    return () => {
+      mountedRef.current = false;
+      activeControllerRef.current?.abort();
+      activeControllerRef.current = null;
+      inFlightCheckRef.current = null;
+      inFlightForceRef.current = false;
+    };
   }, [refreshStatusAndCheck]);
 
   // Derived real values from backend response
@@ -444,9 +520,22 @@ export function GitHubUpdateCenter({
     }
   }
 
-  const changelogCategories: ChangelogCategory[] = changelog?.categories || [];
-  const changelogCommits: any[] = changelog?.commits || [];
-  const changelogReleases: any[] = changelog?.releasesIncluded || [];
+  const rawCategories = changelog?.categories;
+  const changelogCategories: ChangelogCategory[] = Array.isArray(rawCategories)
+    ? rawCategories
+    : rawCategories && typeof rawCategories === 'object'
+      ? Object.entries(rawCategories)
+          .filter(([, items]) => Array.isArray(items) && items.length > 0)
+          .map(([key, items]) => ({
+            key,
+            labelThai: key,
+            items: items as any[],
+          }))
+      : [];
+  const changelogCommits: any[] = Array.isArray(changelog?.commits) ? changelog.commits : [];
+  const changelogReleases: any[] = Array.isArray(changelog?.releasesIncluded)
+    ? changelog.releasesIncluded
+    : [];
 
   return (
     <div className="space-y-6">
@@ -460,7 +549,7 @@ export function GitHubUpdateCenter({
             <button
               type="button"
               disabled={checkingUpdates || deployRunning}
-              onClick={() => refreshStatusAndCheck({ showToast: true })}
+              onClick={() => refreshStatusAndCheck({ showToast: true, force: true })}
               className="ent-btn-secondary"
             >
               <RefreshCw
@@ -916,7 +1005,7 @@ export function GitHubUpdateCenter({
             <button
               type="button"
               disabled={checkingUpdates || deployRunning}
-              onClick={() => refreshStatusAndCheck({ showToast: true })}
+              onClick={() => refreshStatusAndCheck({ showToast: true, force: true })}
               className="ent-btn-secondary"
             >
               <RefreshCw

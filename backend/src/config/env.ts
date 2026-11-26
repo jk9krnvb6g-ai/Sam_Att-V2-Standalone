@@ -543,7 +543,12 @@ export function loadConfig(): AppConfig {
         tokenConfigured,
         tokenMaskedHint: tokenConfigured ? maskTokenHint(rawToken) : null,
         timeoutMs: parseBoundedPositiveInteger(process.env.GITHUB_API_TIMEOUT_MS, 10000, 2000, 30000),
-        cacheTtlMs: parseBoundedPositiveInteger(process.env.GITHUB_CACHE_TTL_MS, 10 * 60 * 1000, 60 * 1000, 60 * 60 * 1000),
+        cacheTtlMs: parseBoundedPositiveInteger(
+          process.env.GITHUB_CACHE_TTL_MS,
+          30 * 60 * 1000,
+          isAutomatedTestRuntime() ? 50 : 60 * 1000,
+          24 * 60 * 60 * 1000
+        ),
       };
     })(),
   };

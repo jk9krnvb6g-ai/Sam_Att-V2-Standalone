@@ -5,7 +5,7 @@
  * ============================================================================
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   LogOut,
   Menu,
@@ -45,6 +45,8 @@ import { UserManualView } from './pages/UserManualView.tsx';
 import { ToastProvider } from './components/common/ToastContext.tsx';
 import { ConfirmDialog } from './components/common/SharedComponents.tsx';
 
+export const UPDATE_NOTIFICATION_POLL_INTERVAL_MS = 30 * 60 * 1000;
+
 export default function App() {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [dataMode, setDataMode] = useState<'REAL' | 'DEMO'>('REAL');
@@ -55,6 +57,24 @@ export default function App() {
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [updateBadge, setUpdateBadge] = useState<SidebarUpdateBadge | null>(null);
+  const userRoleRef = useRef<AuthUser['role'] | null>(null);
+  const notificationAbortRef = useRef<AbortController | null>(null);
+  const inFlightNotificationRef = useRef<Promise<void> | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      notificationAbortRef.current?.abort();
+      notificationAbortRef.current = null;
+      inFlightNotificationRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    userRoleRef.current = user?.role ?? null;
+  }, [user?.role]);
 
   // ปิดการเข้าถึงเส้นทางหน้าตั้งค่าระบบหรือตรวจสอบสถานะการเชื่อมต่อเดิมหากผู้ใช้พิมพ์ URL/Hash โดยตรง
   useEffect(() => {
@@ -106,34 +126,112 @@ export default function App() {
     restoreSession();
   }, []);
 
-  async function refreshAdminUpdateNotification(role: AuthUser['role']) {
-    if (role !== 'ADMIN') {
-      setUpdateBadge(null);
-      return;
-    }
-    try {
-      const res = await apiRequest<{
-        hasUpdate?: boolean;
-        statusLabelThai?: string;
-        githubReachable?: boolean;
-      }>('/deployment/update-notification');
-      setUpdateBadge({
-        hasUpdate: Boolean(res.hasUpdate),
-        label: res.statusLabelThai,
-        githubReachable: res.githubReachable,
-      });
-    } catch {
-      setUpdateBadge(null);
-    }
-  }
+  const applyUpdateBadge = useCallback((next: SidebarUpdateBadge | null) => {
+    setUpdateBadge((prev) => {
+      if (next === null) {
+        return prev === null ? prev : null;
+      }
+      if (
+        prev &&
+        prev.hasUpdate === next.hasUpdate &&
+        prev.label === next.label &&
+        prev.githubReachable === next.githubReachable
+      ) {
+        return prev;
+      }
+      return next;
+    });
+  }, []);
+
+  const refreshAdminUpdateNotification = useCallback(
+    async (role: AuthUser['role']) => {
+      if (role !== 'ADMIN') {
+        applyUpdateBadge(null);
+        return;
+      }
+      if (inFlightNotificationRef.current) {
+        return inFlightNotificationRef.current;
+      }
+
+      const controller = new AbortController();
+      notificationAbortRef.current = controller;
+
+      let task!: Promise<void>;
+      task = (async () => {
+        try {
+          const res = await apiRequest<{
+            hasUpdate?: boolean;
+            statusLabelThai?: string;
+            githubReachable?: boolean;
+          }>('/deployment/update-notification', { signal: controller.signal });
+
+          if (controller.signal.aborted || !mountedRef.current) return;
+
+          applyUpdateBadge({
+            hasUpdate: Boolean(res.hasUpdate),
+            label: res.statusLabelThai,
+            githubReachable: res.githubReachable,
+          });
+        } catch (err) {
+          if (controller.signal.aborted || (err instanceof Error && err.name === 'AbortError')) {
+            return;
+          }
+          if (mountedRef.current) {
+            applyUpdateBadge(null);
+          }
+        } finally {
+          if (notificationAbortRef.current === controller) {
+            notificationAbortRef.current = null;
+          }
+          if (inFlightNotificationRef.current === task) {
+            inFlightNotificationRef.current = null;
+          }
+        }
+      })();
+
+      inFlightNotificationRef.current = task;
+      return task;
+    },
+    [applyUpdateBadge]
+  );
+
+  const handleNotificationChange = useCallback(
+    (badgeOverride?: SidebarUpdateBadge | null) => {
+      if (badgeOverride !== undefined) {
+        applyUpdateBadge(badgeOverride);
+        return;
+      }
+      const currentRole = userRoleRef.current;
+      if (currentRole === 'ADMIN') {
+        void refreshAdminUpdateNotification(currentRole);
+      } else {
+        applyUpdateBadge(null);
+      }
+    },
+    [applyUpdateBadge, refreshAdminUpdateNotification]
+  );
+
+  const userId = user?.id ?? null;
+  const userRole = user?.role ?? null;
 
   useEffect(() => {
-    if (user && user.role === 'ADMIN') {
-      refreshAdminUpdateNotification(user.role);
-    } else {
-      setUpdateBadge(null);
+    if (userId && userRole === 'ADMIN') {
+      void refreshAdminUpdateNotification('ADMIN');
+      const timerId = window.setInterval(() => {
+        void refreshAdminUpdateNotification('ADMIN');
+      }, UPDATE_NOTIFICATION_POLL_INTERVAL_MS);
+
+      return () => {
+        window.clearInterval(timerId);
+        notificationAbortRef.current?.abort();
+        notificationAbortRef.current = null;
+        inFlightNotificationRef.current = null;
+      };
     }
-  }, [user]);
+
+    applyUpdateBadge(null);
+    return undefined;
+  }, [userId, userRole, applyUpdateBadge, refreshAdminUpdateNotification]);
 
   async function handleLogout() {
     setLoggingOut(true);
@@ -346,7 +444,7 @@ export default function App() {
               mode="deployment"
               userRole={user.role}
               onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-              onNotificationChange={() => refreshAdminUpdateNotification(user.role)}
+              onNotificationChange={handleNotificationChange}
             />
           )}
           {activeView === 'workflowGuide' && (
