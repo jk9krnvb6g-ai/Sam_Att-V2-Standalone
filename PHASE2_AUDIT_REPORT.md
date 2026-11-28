@@ -23,7 +23,19 @@
 
 ---
 
-## 2. การรับรองการอยู่ร่วมกับระบบอื่นบนเซิร์ฟเวอร์ (Multi-System Coexistence Guarantee)
+## 2. สรุปผลการตรวจสอบและแก้ไข Final Safety Patch (`FIX 01` – `FIX 05`)
+
+| รหัส | หัวข้อการตรวจสอบ | สถานะ | รายละเอียดการแก้ไขและการยืนยันใน Source Code |
+| :--- | :--- | :---: | :--- |
+| **FINAL FIX 01** | **Absolute Production Database Startup Safety** | **PASS** | ตัดเงื่อนไข `SAM_ATT_AUTO_MIGRATE=true` ที่อาจเปิดช่องให้ Production Server Startup รัน DDL/DML ออกทั้งหมดใน `backend/src/database/adapter.ts` และ `backend/src/config/env.ts` หาก `NODE_ENV=production` พบ `SAM_ATT_AUTO_MIGRATE=true` (หรือ `1`/`yes`) ระบบจะ **Fail-Closed ทันที** ด้วยรหัส `PRODUCTION_AUTO_MIGRATE_FORBIDDEN` ทั้งใน `validateProductionConfig()`, `runMigrations()` และ `ensureBaselineSystemCatalog()` การรัน Migration อนุญาตเฉพาะผ่าน CLI ผู้ดูแลระบบที่ระบุ `allowProductionCliMigration: true` (`npm run db:migrate`) เท่านั้น |
+| **FINAL FIX 02** | **Atomic Lifecycle Lock** | **PASS** | สร้างศูนย์กลาง Lock Engine แบบ Atomic ที่ `scripts/LifecycleLock.ps1` โดยใช้ `[System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::Read)` (และ `fs.openSync(lockFilePath, 'wx')` ใน `backend/src/modules/deployment/jobStore.ts`) แทน `Test-Path` + `Set-Content` ให้ `Install_Sam_Att.ps1`, `Deploy_Sam_Att.ps1`, `Backup_Sam_Att.ps1`, `Rollback_Sam_Att.ps1`, `Uninstall_Sam_Att.ps1` และ `deployment/Deploy_Sam_Att.ps1` ใช้กลไกเดียวกันทั้งหมด รองรับ `-ParentLockId` (`InheritedLockId`) และตรวจสอบความเป็นเจ้าของ (`lockId` + `ownerPid`) ก่อนปลดล็อกทุกครั้ง |
+| **FINAL FIX 03** | **Node.js Runtime Verification** | **PASS** | เพิ่ม Windows CI Matrix (`22.x` และ `26.x`) ใน `.github/workflows/ci.yml` และปรับ `Install_Sam_Att.ps1`, `Preflight_Sam_Att.ps1`, `Deploy_Sam_Att.ps1` ให้ผูก `$resolvedNodeExe` และ `$resolvedNpmCmd` จากโฟลเดอร์เดียวกัน พร้อมส่ง `--scripts-prepend-node-path=true` และเรียก `& $resolvedNodeExe --import tsx backend/src/database/cli-preflight.ts` โดยตรง เพื่อให้ทั้ง Build, Test, Preflight และ Windows Service (`SamAttV2Standalone.xml`) ใช้ Node.js ตัวที่เลือก (`v26.13.1` บนเซิร์ฟเวอร์จริง) ตรงกัน 100% |
+| **FINAL FIX 04** | **Fresh Installation Test Gate** | **PASS** | ปรับ `Install_Sam_Att.ps1` Step 6 ให้รัน `npm run typecheck`, `npm run lint`, **Isolated Automated Test Gate (`npm test`)** และ `npm run build` พร้อมตรวจ `$LASTEXITCODE` ทุกขั้นตอนก่อนลงทะเบียนและสตาร์ท Windows Service โดยบังคับ `NODE_ENV=test`, `SAM_ATT_TEST_ISOLATION=true`, `SAM_ATT_DB_ENGINE=sqlite_sandbox` และใช้ไฟล์ชั่วคราวใน `$env:TEMP` เพื่อรับประกันว่าชุดทดสอบจะไม่แตะต้องฐานข้อมูล Production MySQL (`10.1.0.201`) หรือ `Config\.env` จริงอย่างเด็ดขาด |
+| **FINAL FIX 05** | **Scanner Runtime Confirmation** | **PASS** | ตรวจสอบ Binary PE Header ของ `ScannerReader/ScannerSyncCli.exe` และไฟล์ `.dll` ทั้ง 17 ไฟล์ใน `ScannerReader/` ยืนยันว่าทุกไฟล์เป็น **32-bit `x86` (`IMAGE_FILE_MACHINE_I386 = 0x014c`) 100%** จึงต้องใช้ **`.NET 10.0 Runtime (x86 / 32-bit)` เท่านั้น** และจากการตรวจ PE Export/Import Table ยืนยันว่าไม่มี DLL ใด Export `DllRegisterServer` โดย `ScannerSyncCli.dll` เรียก `FK623Attend.dll` ผ่าน Win32 P/Invoke (`SetDllDirectory`) โดยตรง จึง**ไม่ต้องรัน `regsvr32`** บนเซิร์ฟเวอร์จริง |
+
+---
+
+## 3. การรับรองการอยู่ร่วมกับระบบอื่นบนเซิร์ฟเวอร์ (Multi-System Coexistence Guarantee)
 
 1. **ห้ามฆ่าโปรเซสแบบเหวี่ยงแห:** ตรวจสอบด้วย Automated Test ยืนยันว่าไม่มีคำสั่ง `taskkill /F /IM node.exe` หรือ `Stop-Process -Name node` ในสคริปต์ใดๆ
 2. **ห้ามรบกวน IIS และบริการอื่น:** ไม่มีคำสั่ง `iisreset`, ไม่หยุด `W3SVC` และไม่แก้ไขกฎไฟร์วอลล์ของแอปพลิเคชันอื่น

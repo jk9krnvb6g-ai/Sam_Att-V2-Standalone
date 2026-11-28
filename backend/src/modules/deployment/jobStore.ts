@@ -68,6 +68,7 @@ export interface PersistentDeployJob {
 
 export interface DeployLockInfo {
   locked: boolean;
+  acquired?: boolean;
   staleCleaned: boolean;
   lockFilePath: string;
   jobId: string | null;
@@ -453,45 +454,120 @@ export function acquireDeployLock(params: {
   jobId: string;
   pid?: number | null;
   actorUsername: string;
+  inheritedJobId?: string | null;
 }): DeployLockInfo {
-  const status = getDeployLockStatus();
-  if (status.locked) {
-    return status;
+  const safeJobId = sanitizeSafeJobId(params.jobId);
+  const callerPid = params.pid ?? process.pid;
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const status = getDeployLockStatus();
+    if (status.locked) {
+      // Allow same jobId (e.g., parent handing off PID to spawned child) or explicit inheritedJobId
+      if (status.jobId === safeJobId) {
+        const updatedPayload = {
+          jobId: safeJobId,
+          pid: callerPid,
+          actorUsername: params.actorUsername,
+          startedAt: status.startedAt || new Date().toISOString(),
+        };
+        atomicWriteJson(status.lockFilePath, updatedPayload);
+        return {
+          locked: true,
+          acquired: true,
+          staleCleaned: status.staleCleaned,
+          lockFilePath: status.lockFilePath,
+          jobId: updatedPayload.jobId,
+          pid: updatedPayload.pid,
+          startedAt: updatedPayload.startedAt,
+          actorUsername: updatedPayload.actorUsername,
+        };
+      }
+      if (params.inheritedJobId && status.jobId === params.inheritedJobId) {
+        return {
+          ...status,
+          locked: true,
+          acquired: true,
+        };
+      }
+      return {
+        ...status,
+        locked: true,
+        acquired: false,
+      };
+    }
+
+    const lockFilePath = status.lockFilePath;
+    const dir = path.dirname(lockFilePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    const payload = {
+      jobId: safeJobId,
+      pid: callerPid,
+      actorUsername: params.actorUsername,
+      startedAt: new Date().toISOString(),
+    };
+
+    try {
+      // Atomic exclusive file creation (O_CREAT | O_EXCL via 'wx') -- FIX 02
+      const fd = fs.openSync(lockFilePath, 'wx');
+      try {
+        fs.writeFileSync(fd, JSON.stringify(payload, null, 2), 'utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
+      return {
+        locked: true,
+        acquired: true,
+        staleCleaned: status.staleCleaned,
+        lockFilePath,
+        jobId: payload.jobId,
+        pid: payload.pid,
+        startedAt: payload.startedAt,
+        actorUsername: payload.actorUsername,
+      };
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code;
+      if (code === 'EEXIST') {
+        const active = getDeployLockStatus();
+        if (active.locked) {
+          return {
+            ...active,
+            locked: true,
+            acquired: false,
+          };
+        }
+        continue;
+      }
+      throw err;
+    }
   }
-  const lockFilePath = status.lockFilePath;
-  const payload = {
-    jobId: sanitizeSafeJobId(params.jobId),
-    pid: params.pid ?? process.pid,
-    actorUsername: params.actorUsername,
-    startedAt: new Date().toISOString(),
-  };
-  atomicWriteJson(lockFilePath, payload);
+
   return {
-    locked: true,
-    staleCleaned: status.staleCleaned,
-    lockFilePath,
-    jobId: payload.jobId,
-    pid: payload.pid,
-    startedAt: payload.startedAt,
-    actorUsername: payload.actorUsername,
+    ...getDeployLockStatus(),
+    acquired: false,
   };
 }
 
-export function releaseDeployLock(expectedJobId?: string): void {
+export function releaseDeployLock(expectedJobId?: string, expectedPid?: number): boolean {
   const lockFilePath = getDeployLockFilePath();
-  if (!fs.existsSync(lockFilePath)) return;
+  if (!fs.existsSync(lockFilePath)) return false;
   try {
-    if (expectedJobId) {
-      const raw = JSON.parse(fs.readFileSync(lockFilePath, 'utf8').replace(/^\uFEFF/, '')) as {
-        jobId?: string;
-      };
-      if (raw.jobId && raw.jobId !== expectedJobId) {
-        return;
-      }
+    const raw = JSON.parse(fs.readFileSync(lockFilePath, 'utf8').replace(/^\uFEFF/, '')) as {
+      jobId?: string;
+      pid?: number;
+    };
+    if (expectedJobId && raw.jobId && raw.jobId !== expectedJobId) {
+      return false;
+    }
+    if (typeof expectedPid === 'number' && typeof raw.pid === 'number' && raw.pid !== expectedPid) {
+      return false;
     }
     fs.unlinkSync(lockFilePath);
+    return true;
   } catch {
-    // ignore
+    return false;
   }
 }
 

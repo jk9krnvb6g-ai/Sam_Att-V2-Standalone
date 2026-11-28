@@ -43,18 +43,44 @@ jobs:
         run: npm run build
 
   windows-production-readiness:
-    name: Windows Server PowerShell 5.1 & Production Readiness (Windows Runner)
+    name: Windows Server PowerShell 5.1 & Node.js (${{ matrix.node_label }})
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - node_label: "22.x LTS"
+            node_spec: "22.x"
+            require_official_binary: true
+          - node_label: "26.x (Target Server v26.13.1)"
+            node_spec: "26.x"
+            require_official_binary: false
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js 22 LTS on Windows
+      - name: Set up Node.js (${{ matrix.node_label }}) on Windows
+        id: setup_node
+        continue-on-error: ${{ !matrix.require_official_binary }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node_spec }}
+          cache: 'npm'
+
+      - name: Fallback to .nvmrc if Node ${{ matrix.node_spec }} binary is not yet published in public nodejs.org dist index
+        if: steps.setup_node.outcome != 'success'
         uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
+
+      - name: Report Active Node.js & npm Runtime on Windows Runner
+        shell: powershell
+        run: |
+          Write-Host "Active Node.js path: $((Get-Command node).Source)"
+          Write-Host "Active Node.js version: $(node -v)"
+          Write-Host "Active npm version: $(npm -v)"
 
       - name: Install dependencies cleanly (npm ci)
         run: npm ci
@@ -75,7 +101,7 @@ jobs:
           SCANNER_INGEST_SHARED_TOKEN: ci-win-ephemeral-scanner-ingest-token-isolated-998877
         run: npm test
 
-      - name: Validate Windows PowerShell 5.1 AST Parsing, DryRun, HealthCheck Failures & Backup/Rollback Integrity
+      - name: Validate Windows PowerShell 5.1 AST Parsing, Atomic Lifecycle Lock Concurrency, DryRun, HealthCheck & Backup/Rollback Integrity
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -88,6 +114,7 @@ jobs:
             "Rollback_Sam_Att.ps1",
             "Uninstall_Sam_Att.ps1",
             "deployment\Deploy_Sam_Att.ps1",
+            "scripts\LifecycleLock.ps1",
             "scripts\health-check.ps1",
             "scripts\install-windows.ps1",
             "scripts\backup.ps1",
@@ -106,10 +133,56 @@ jobs:
             Write-Host "[PASS] PowerShell 5.1 AST verified: $rel" -ForegroundColor Green
           }
 
-          # 1. Verify Installer DryRun makes zero disk/lock mutations
           $testRoot = Join-Path $env:TEMP "sam_att_ci_win_$(Get-Random)"
           $testBackup = Join-Path $testRoot "Backups"
           $testDeploy = Join-Path $testRoot "Deployments"
+          New-Item -ItemType Directory -Path $testRoot, $testBackup, $testDeploy -Force | Out-Null
+
+          # 0. Verify Atomic Lifecycle Lock Concurrency, ParentLockId Inheritance & Ownership Protection (FIX 02)
+          . .\scripts\LifecycleLock.ps1
+          $primaryLock = Acquire-AtomicLifecycleLock -DeploymentsDir $testDeploy -Operation "Deploy"
+          if (-not $primaryLock.Acquired -or $primaryLock.ReusedParent) {
+            throw "Primary atomic lifecycle lock acquisition failed"
+          }
+          $contendedBlocked = $false
+          try {
+            [void](Acquire-AtomicLifecycleLock -DeploymentsDir $testDeploy -Operation "Backup")
+          } catch {
+            if ($_.Exception.Message -match "LIFECYCLE_LOCK_ACTIVE") {
+              $contendedBlocked = $true
+            }
+          }
+          if (-not $contendedBlocked) {
+            throw "Second concurrent lifecycle operation without ParentLockId must fail closed with LIFECYCLE_LOCK_ACTIVE!"
+          }
+          $childLock = Acquire-AtomicLifecycleLock -DeploymentsDir $testDeploy -Operation "Backup" -InheritedLockId $primaryLock.LockId
+          if (-not $childLock.Acquired -or -not $childLock.ReusedParent) {
+            throw "Child operation with matching InheritedLockId must reuse parent lock safely"
+          }
+          Release-AtomicLifecycleLock -LockHandle $childLock
+          if (-not (Test-Path $primaryLock.LockFile)) {
+            throw "Releasing child ReusedParent handle must NOT delete parent lifecycle.lock!"
+          }
+          $spoofHandle = [PSCustomObject]@{
+            LockFile     = $primaryLock.LockFile
+            LockId       = "spoofed_lock_id"
+            Operation    = "Spoof"
+            OwnerPid     = $PID
+            Acquired     = $true
+            ReusedParent = $false
+            DryRun       = $false
+          }
+          Release-AtomicLifecycleLock -LockHandle $spoofHandle
+          if (-not (Test-Path $primaryLock.LockFile)) {
+            throw "Non-owner LockId must NOT be able to release lifecycle.lock!"
+          }
+          Release-AtomicLifecycleLock -LockHandle $primaryLock
+          if (Test-Path $primaryLock.LockFile) {
+            throw "True owner LockHandle failed to release lifecycle.lock!"
+          }
+          Write-Host "[PASS] Atomic Lifecycle Lock Concurrency & Ownership verified." -ForegroundColor Green
+
+          # 1. Verify Installer DryRun makes zero disk/lock mutations
           & .\Install_Sam_Att.ps1 -Mode FreshInstall -SamAttRoot (Join-Path $testRoot "WebApps") -BackupDir $testBackup -DeploymentsDir $testDeploy -FirewallRemoteAddress "10.2.0.0/24" -ConfirmDatabaseTarget -DbPassword "Complex#Pass`$123&456" -NonInteractive -DryRun
           if ($LASTEXITCODE -ne 0) { throw "Install_Sam_Att.ps1 -DryRun failed" }
           if (Test-Path (Join-Path $testDeploy "lifecycle.lock")) { throw "DryRun must not leave lifecycle.lock on disk" }

@@ -139,19 +139,30 @@ if ($nodeVer -match "^v(\d+)\.(\d+)\.(\d+)") {
     Add-CheckResult -Id "PF-04" -Title "Node.js Runtime Compatibility" -Status "FAIL" -Detail "Node.js executable not found or failed to execute. Specify -NodeExecutablePath or install Node.js 22 LTS / 26.x."
 }
 
-# 5. npm Check
+# 5. npm Check (bound to selected $resolvedNodeExe directory -- FIX 03)
 $npmVer = ""
+$resolvedNpmCmd = "npm"
 try {
-    $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
-    if ($null -ne $npmCmd) {
-        $npmVer = (& $npmCmd.Source -v 2>$null).Trim()
+    if ($null -ne $resolvedNodeExe) {
+        $nodeDir = Split-Path -Parent $resolvedNodeExe
+        $candidateNpm = Join-Path $nodeDir "npm.cmd"
+        if (Test-Path $candidateNpm) {
+            $resolvedNpmCmd = $candidateNpm
+        }
+    }
+    if ($resolvedNpmCmd -eq "npm") {
+        $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
+        if ($null -ne $npmCmd) { $resolvedNpmCmd = $npmCmd.Source }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($resolvedNpmCmd)) {
+        $npmVer = (& $resolvedNpmCmd -v 2>$null).Trim()
         if ($LASTEXITCODE -ne 0) { $npmVer = "" }
     }
 } catch {}
 if (-not [string]::IsNullOrWhiteSpace($npmVer)) {
-    Add-CheckResult -Id "PF-05" -Title "npm Package Manager" -Status "PASS" -Detail "npm v$npmVer detected."
+    Add-CheckResult -Id "PF-05" -Title "npm Package Manager" -Status "PASS" -Detail "npm v$npmVer detected at '$resolvedNpmCmd'."
 } else {
-    Add-CheckResult -Id "PF-05" -Title "npm Package Manager" -Status "FAIL" -Detail "npm is not installed or not in PATH."
+    Add-CheckResult -Id "PF-05" -Title "npm Package Manager" -Status "FAIL" -Detail "npm is not installed or not found alongside Node.js."
 }
 
 # 6. Git Check
@@ -287,11 +298,15 @@ if ($SkipDatabaseSchemaCheck) {
     try {
         Push-Location $appDir
         $env:SAM_ATT_ENV_PATH = $configEnvPath
-        $dbOut = & npm run db:preflight -- --json 2>$null
+        if ($null -ne $resolvedNodeExe) {
+            $dbOut = & $resolvedNodeExe --import tsx backend/src/database/cli-preflight.ts --json 2>$null
+        } else {
+            $dbOut = & $resolvedNpmCmd run db:preflight -- --json 2>$null
+        }
         $dbExit = $LASTEXITCODE
         Pop-Location
         if ($dbExit -eq 0) {
-            Add-CheckResult -Id "PF-10" -Title "Database Schema Preflight (Read-Only)" -Status "PASS" -Detail "All required tables and columns verified in Read-Only mode."
+            Add-CheckResult -Id "PF-10" -Title "Database Schema Preflight (Read-Only)" -Status "PASS" -Detail "All required tables and columns verified in Read-Only mode via '$resolvedNodeExe'."
         } else {
             Add-CheckResult -Id "PF-10" -Title "Database Schema Preflight (Read-Only)" -Status "FAIL" -Detail "Database schema check failed (exit code $dbExit). Run 'npm run db:preflight' to inspect missing tables/columns."
         }

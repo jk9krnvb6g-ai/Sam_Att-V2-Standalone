@@ -991,6 +991,18 @@ export async function runMigrations(
   }
 
   const cfg = loadConfig();
+  const rawAutoMigrateTop = (process.env.SAM_ATT_AUTO_MIGRATE || '').trim().toLowerCase();
+  const isAutoMigrateEnabledTop =
+    rawAutoMigrateTop === 'true' || rawAutoMigrateTop === '1' || rawAutoMigrateTop === 'yes';
+
+  if (cfg.nodeEnv === 'production' && isAutoMigrateEnabledTop) {
+    const err = new Error(
+      'PRODUCTION_AUTO_MIGRATE_FORBIDDEN: ห้ามเปิดใช้ SAM_ATT_AUTO_MIGRATE=true ในโหมด Production เด็ดขาด การรัน Migration บน Production ต้องดำเนินการผ่าน Explicit Administrative CLI (npm run db:migrate) ที่ได้รับอนุมัติเท่านั้น'
+    ) as Error & { code?: string };
+    err.code = 'PRODUCTION_AUTO_MIGRATE_FORBIDDEN';
+    throw err;
+  }
+
   const migrationsDir = options.migrationsDir
     ? path.resolve(options.migrationsDir)
     : path.resolve(process.cwd(), 'database/migrations');
@@ -1097,10 +1109,22 @@ export async function runMigrations(
     const isExplicitMigrateCli =
       options.forceRunInProductionCli === true ||
       process.argv.some((arg) => arg.includes('cli-migrate'));
+    const rawAutoMigrate = (process.env.SAM_ATT_AUTO_MIGRATE || '').trim().toLowerCase();
+    const isAutoMigrateEnabled = rawAutoMigrate === 'true' || rawAutoMigrate === '1' || rawAutoMigrate === 'yes';
+
+    if (cfg.nodeEnv === 'production' && isAutoMigrateEnabled) {
+      const err = new Error(
+        'PRODUCTION_AUTO_MIGRATE_FORBIDDEN: ห้ามเปิดใช้ SAM_ATT_AUTO_MIGRATE=true ในโหมด Production เด็ดขาด การรัน Migration บน Production ต้องดำเนินการผ่าน Explicit Administrative CLI (npm run db:migrate) ที่ได้รับอนุมัติเท่านั้น'
+      ) as Error & { code?: string };
+      err.code = 'PRODUCTION_AUTO_MIGRATE_FORBIDDEN';
+      throw err;
+    }
+
     const skipAutoMigrateOnStartup =
-      (options.startupReadOnlyOnMysql === true || cfg.nodeEnv === 'production' || cfg.dbEngine === 'mysql') &&
-      process.env.SAM_ATT_AUTO_MIGRATE !== 'true' &&
-      !isExplicitMigrateCli;
+      !isExplicitMigrateCli &&
+      (cfg.nodeEnv === 'production' ||
+        options.startupReadOnlyOnMysql === true ||
+        (cfg.dbEngine === 'mysql' && !isAutoMigrateEnabled));
     if (skipAutoMigrateOnStartup) {
       console.log(
         '[Sam_Att DB] Read-only startup policy: Skipping automatic DDL migration during server startup. Run `npm run db:migrate` manually when schema changes are needed.'
@@ -1246,11 +1270,22 @@ export async function ensureBaselineSystemCatalog(
   const isExplicitMigrateCli =
     options.forceRunInProductionCli === true ||
     process.argv.some((arg) => arg.includes('cli-migrate'));
+  const rawAutoMigrate = (process.env.SAM_ATT_AUTO_MIGRATE || '').trim().toLowerCase();
+  const isAutoMigrateEnabled = rawAutoMigrate === 'true' || rawAutoMigrate === '1' || rawAutoMigrate === 'yes';
+
+  if (cfg.nodeEnv === 'production' && isAutoMigrateEnabled) {
+    const err = new Error(
+      'PRODUCTION_AUTO_MIGRATE_FORBIDDEN: ห้ามเปิดใช้ SAM_ATT_AUTO_MIGRATE=true ในโหมด Production เด็ดขาด การเตรียมข้อมูลตั้งต้นหรือปรับโครงสร้างฐานข้อมูลต้องรันผ่าน Explicit Administrative CLI เท่านั้น'
+    ) as Error & { code?: string };
+    err.code = 'PRODUCTION_AUTO_MIGRATE_FORBIDDEN';
+    throw err;
+  }
+
   const readOnlyMysqlOrProdStartup =
-    (options.startupReadOnlyOnMysql === true || cfg.nodeEnv === 'production' || cfg.dbEngine === 'mysql') &&
-    (cfg.dbEngine === 'mysql' || cfg.nodeEnv === 'production') &&
-    process.env.SAM_ATT_AUTO_MIGRATE !== 'true' &&
-    !isExplicitMigrateCli;
+    !isExplicitMigrateCli &&
+    (cfg.nodeEnv === 'production' ||
+      options.startupReadOnlyOnMysql === true ||
+      (cfg.dbEngine === 'mysql' && !isAutoMigrateEnabled));
 
   if (readOnlyMysqlOrProdStartup) {
     console.log(
@@ -1261,8 +1296,7 @@ export async function ensureBaselineSystemCatalog(
 
   const allowAdditiveStartupDdl =
     (cfg.nodeEnv !== 'production' && cfg.dbEngine === 'sqlite_sandbox') ||
-    isExplicitMigrateCli ||
-    process.env.SAM_ATT_AUTO_MIGRATE === 'true';
+    isExplicitMigrateCli;
 
   if (allowAdditiveStartupDdl) {
     // 0. Safe additive schema upgrades for dev/test or explicit CLI migrate (skip existing columns first to avoid Duplicate column logs)

@@ -301,6 +301,16 @@ if ($Mode -eq "FreshInstall") {
 }
 
 $resolvedNodeExe = Resolve-NodeExecutable -ExplicitPath $NodeExecutablePath
+$resolvedNodeDir = Split-Path -Parent $resolvedNodeExe
+$resolvedNpmCmd  = Join-Path $resolvedNodeDir "npm.cmd"
+if (-not (Test-Path $resolvedNpmCmd)) {
+    $npmInPath = Get-Command npm -ErrorAction SilentlyContinue
+    $resolvedNpmCmd = if ($null -ne $npmInPath) { $npmInPath.Source } else { "npm" }
+}
+$env:NODE_EXECUTABLE_PATH = $resolvedNodeExe
+if (-not [string]::IsNullOrWhiteSpace($resolvedNodeDir) -and (Test-Path $resolvedNodeDir)) {
+    $env:PATH = "${resolvedNodeDir};$($env:PATH)"
+}
 
 if ($isDryRunMode) {
     Write-Host "=================================================================" -ForegroundColor Yellow
@@ -313,6 +323,7 @@ if ($isDryRunMode) {
     Write-Host " Backup Directory      : $BackupDir"
     Write-Host " Lifecycle Lock Path   : $LockFilePath"
     Write-Host " Node.js Executable    : $resolvedNodeExe"
+    Write-Host " npm Executable        : $resolvedNpmCmd"
     Write-Host " Database Target       : ${DbUser}@${DbHost}:${DbPort}/${DbName}"
     Write-Host " Firewall Rule         : TCP Port $HttpsPort ONLY -> Scope: $FirewallRemoteAddress"
     Write-Host " Scanner AutoScheduler : $(if ($EnableScannerAutoScheduler) { 'true' } else { 'false (Standby Mode)' })"
@@ -320,47 +331,16 @@ if ($isDryRunMode) {
     exit 0
 }
 
-function Acquire-SharedLifecycleLock {
-    param([string]$Path, [string]$Operation)
-    $lockDir = Split-Path -Parent $Path
-    if (-not (Test-Path $lockDir)) {
-        New-Item -ItemType Directory -Path $lockDir -Force | Out-Null
-    }
-    if (Test-Path $Path) {
-        try {
-            $existing = Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json
-            $ownerPid = [int]$existing.pid
-            $proc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
-            if ($null -ne $proc) {
-                throw "LIFECYCLE_LOCK_ACTIVE: Another lifecycle operation ($($existing.operation), lockId=$($existing.lockId), PID=$ownerPid) is currently running since $($existing.startedAt)."
-            }
-        } catch {
-            if ($_.Exception.Message -like "LIFECYCLE_LOCK_ACTIVE*") {
-                throw $_
-            }
-        }
-        Remove-Item $Path -Force -ErrorAction SilentlyContinue
-    }
-    $newLockId = "$Operation-$((Get-Date).ToString('yyyyMMddHHmmss'))-$PID"
-    $payload = @{
-        lockId    = $newLockId
-        operation = $Operation
-        pid       = $PID
-        startedAt = (Get-Date).ToString("o")
-        user      = [Environment]::UserName
-    }
-    $payload | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding UTF8
-    return @{ acquiredNew = $true; lockId = $newLockId }
+$lifecycleLockModule = Join-Path $PSScriptRoot "scripts\LifecycleLock.ps1"
+if (-not (Test-Path $lifecycleLockModule)) {
+    $lifecycleLockModule = Join-Path $AppDir "scripts\LifecycleLock.ps1"
 }
-
-function Release-SharedLifecycleLock {
-    param([string]$Path, [hashtable]$LockHandle)
-    if ($null -ne $LockHandle -and $LockHandle.acquiredNew -and (Test-Path $Path)) {
-        Remove-Item $Path -Force -ErrorAction SilentlyContinue
-    }
+if (-not (Test-Path $lifecycleLockModule)) {
+    throw "LIFECYCLE_LOCK_ENGINE_MISSING: Could not find scripts\LifecycleLock.ps1"
 }
+. $lifecycleLockModule
 
-$lockHandle = Acquire-SharedLifecycleLock -Path $LockFilePath -Operation "INSTALL_$Mode"
+$lockHandle = Acquire-AtomicLifecycleLock -Path $LockFilePath -Operation "INSTALL_$Mode"
 
 try {
     # Step 1: Run Pre-Flight Verification
@@ -519,28 +499,74 @@ try {
         Write-Host "  Trusted generated Server Certificate in Cert:\LocalMachine\Root (Thumbprint: $thumb)" -ForegroundColor Green
     }
 
-    # Step 6: Install Dependencies, TypeCheck, Build Frontend, and Run Read-Only DB Preflight
-    Write-StepHeader "6/9" "Building Production Frontend and Running Read-Only Database Preflight..."
+    # Step 6: Install Dependencies, TypeCheck, Lint, Isolated Automated Test Gate, Build Frontend, and Read-Only DB Preflight (FIX 03 & FIX 04)
+    Write-StepHeader "6/9" "Running TypeCheck, Lint, Isolated Sandbox Test Gate, Production Build, and Read-Only DB Preflight (using $resolvedNodeExe)..."
     Push-Location $AppDir
     try {
-        $env:SAM_ATT_ENV_PATH = $EnvFilePath
         if (-not (Test-Path (Join-Path $AppDir "node_modules"))) {
-            Write-Host "  Running npm ci..." -ForegroundColor Cyan
-            & npm ci
+            Write-Host "  Running npm ci (via $resolvedNpmCmd)..." -ForegroundColor Cyan
+            & $resolvedNpmCmd ci --scripts-prepend-node-path=true
             if ($LASTEXITCODE -ne 0) { throw "NPM_CI_FAILED: npm ci exited with code $LASTEXITCODE" }
         }
         Write-Host "  Running npm run typecheck..." -ForegroundColor Cyan
-        & npm run typecheck
-        if ($LASTEXITCODE -ne 0) { throw "TYPECHECK_FAILED: TypeScript verification failed." }
+        & $resolvedNpmCmd run typecheck --scripts-prepend-node-path=true
+        if ($LASTEXITCODE -ne 0) { throw "TYPECHECK_FAILED: TypeScript verification failed (ExitCode=$LASTEXITCODE)." }
+
+        Write-Host "  Running npm run lint..." -ForegroundColor Cyan
+        & $resolvedNpmCmd run lint --scripts-prepend-node-path=true
+        if ($LASTEXITCODE -ne 0) { throw "LINT_FAILED: Lint verification failed (ExitCode=$LASTEXITCODE)." }
+
+        if ($Mode -eq "FreshInstall") {
+            Write-Host "  Running Fresh Installation Automated Test Gate in 100% Isolated SQLite Sandbox (disconnected from Production .env and MySQL)..." -ForegroundColor Cyan
+            $isolatedSqliteFile = Join-Path ([System.IO.Path]::GetTempPath()) "sam_att_freshinstall_test_$PID.sqlite"
+            $isolatedEnvFile    = Join-Path ([System.IO.Path]::GetTempPath()) "sam_att_freshinstall_env_$PID.env"
+            @(
+                "NODE_ENV=test",
+                "SAM_ATT_TEST_ISOLATION=true",
+                "SAM_ATT_DB_ENGINE=sqlite_sandbox",
+                "SAM_ATT_DATA_MODE=REAL",
+                "SAM_ATT_DB_HOST=127.0.0.1",
+                "SAM_ATT_SQLITE_PATH=$isolatedSqliteFile"
+            ) -join "`r`n" | Set-Content -Path $isolatedEnvFile -Encoding UTF8
+
+            $prevNodeEnv = $env:NODE_ENV
+            $prevTestIso = $env:SAM_ATT_TEST_ISOLATION
+            $prevDbEng   = $env:SAM_ATT_DB_ENGINE
+            $prevDbHost  = $env:SAM_ATT_DB_HOST
+            $prevSqlite  = $env:SAM_ATT_SQLITE_PATH
+            $prevEnvPath = $env:SAM_ATT_ENV_PATH
+            try {
+                $env:NODE_ENV               = "test"
+                $env:SAM_ATT_TEST_ISOLATION = "true"
+                $env:SAM_ATT_DB_ENGINE      = "sqlite_sandbox"
+                $env:SAM_ATT_DB_HOST        = "127.0.0.1"
+                $env:SAM_ATT_SQLITE_PATH    = $isolatedSqliteFile
+                $env:SAM_ATT_ENV_PATH       = $isolatedEnvFile
+
+                & $resolvedNpmCmd test --scripts-prepend-node-path=true
+                if ($LASTEXITCODE -ne 0) {
+                    throw "FRESH_INSTALL_TEST_GATE_FAILED: Automated test gate failed with exit code $LASTEXITCODE. Installation aborted before service registration."
+                }
+            } finally {
+                $env:NODE_ENV               = $prevNodeEnv
+                $env:SAM_ATT_TEST_ISOLATION = $prevTestIso
+                $env:SAM_ATT_DB_ENGINE      = $prevDbEng
+                $env:SAM_ATT_DB_HOST        = $prevDbHost
+                $env:SAM_ATT_SQLITE_PATH    = $prevSqlite
+                $env:SAM_ATT_ENV_PATH       = $prevEnvPath
+                Remove-Item -Path $isolatedSqliteFile, $isolatedEnvFile -Force -ErrorAction SilentlyContinue
+            }
+        }
 
         Write-Host "  Running npm run build..." -ForegroundColor Cyan
-        & npm run build
-        if ($LASTEXITCODE -ne 0) { throw "VITE_BUILD_FAILED: Frontend production build failed." }
+        & $resolvedNpmCmd run build --scripts-prepend-node-path=true
+        if ($LASTEXITCODE -ne 0) { throw "VITE_BUILD_FAILED: Frontend production build failed (ExitCode=$LASTEXITCODE)." }
 
-        Write-Host "  Running Read-Only Database Preflight (npm run db:preflight)..." -ForegroundColor Cyan
-        & npm run db:preflight
+        Write-Host "  Running Read-Only Database Preflight (using $resolvedNodeExe and $EnvFilePath)..." -ForegroundColor Cyan
+        $env:SAM_ATT_ENV_PATH = $EnvFilePath
+        & $resolvedNodeExe --import tsx backend/src/database/cli-preflight.ts
         if ($LASTEXITCODE -ne 0) {
-            throw "DATABASE_PREFLIGHT_FAILED: Production MySQL database schema check failed. No changes were made to the database."
+            throw "DATABASE_PREFLIGHT_FAILED: Production MySQL database schema check failed (ExitCode=$LASTEXITCODE). No changes were made to the database."
         }
     } finally {
         Pop-Location
@@ -562,7 +588,7 @@ try {
         Write-Host "  Created Windows Firewall Rule '$ruleName' (RemoteAddress: $($remoteAddresses -join ', '))" -ForegroundColor Green
     }
 
-    # Step 8: Configure & Register WinSW Windows Service (SamAttV2Standalone) with Configurable NodeExecutablePath (FIX 04)
+    # Step 8: Configure & Register WinSW Windows Service (SamAttV2Standalone) with Configurable NodeExecutablePath (FIX 03 & FIX 04)
     Write-StepHeader "8/9" "Configuring WinSW Windows Service ($ServiceName)..."
     $templateXmlPath = Join-Path $AppDir "scripts\winsw-sam-att.xml"
     $targetXmlPath   = Join-Path $ServiceDir "$ServiceName.xml"
@@ -614,5 +640,5 @@ try {
     Write-Host "=================================================================" -ForegroundColor Green
     exit 0
 } finally {
-    Release-SharedLifecycleLock -Path $LockFilePath -LockHandle $lockHandle
+    Release-AtomicLifecycleLock -Path $LockFilePath -LockHandle $lockHandle
 }

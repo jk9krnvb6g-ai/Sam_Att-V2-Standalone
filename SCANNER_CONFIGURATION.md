@@ -4,11 +4,19 @@
 
 ---
 
-## 1. สถาปัตยกรรม `ScannerSyncCli.exe` และข้อกำหนด Runtime จริง (FIX 04)
+## 1. สถาปัตยกรรม `ScannerSyncCli.exe`, การตรวจสอบ Binary PE Header และข้อกำหนด Runtime จริง (FIX 04 & Final Safety Patch FIX 05)
 
-จากการตรวจสอบไฟล์ `ScannerReader/ScannerSyncCli.runtimeconfig.json` และ `ScannerReader/ScannerSyncCli.deps.json`:
+จากการตรวจสอบไฟล์ `ScannerReader/ScannerSyncCli.runtimeconfig.json`, `ScannerReader/ScannerSyncCli.deps.json` และการตรวจสอบ **PE Binary Header + Export/Import Table** ของไฟล์ `.exe` และ `.dll` ทั้ง 18 ไฟล์ในโฟลเดอร์ `ScannerReader/`:
 
+- **ผลตรวจสอบ PE Header (Machine Type) ของทั้ง 18 ไฟล์:** ทุกไฟล์มีค่า Machine Type = **`0x014c` (`IMAGE_FILE_MACHINE_I386` / 32-bit `x86`) 100%** ไม่มีไฟล์ 64-bit (`0x8664`) ปะปน
 - **Target Framework & Architecture:** `.NETCoreApp,Version=v10.0/win-x86` (**`.NET 10.0 Runtime (32-bit / x86)`**, `Microsoft.NETCore.App` version `10.0.0`)
+- **ต้องติดตั้ง `.NET 10.0 Runtime (x86)` หรือ `(x64)` หรือทั้งคู่?:**
+  - ต้องติดตั้ง **`.NET 10.0 Runtime (x86 / 32-bit)` เท่านั้น** (พาธ `C:\Program Files (x86)\dotnet\dotnet.exe`)
+  - เนื่องจาก `ScannerSyncCli.exe` เป็น 32-bit (`x86`) AppHost และโหลด Native DLL 32-bit (`FK623Attend.dll`, `FKAttend.dll`) ในโปรเซสเดียวกัน (WOW64 บน Windows Server 64-bit) การติดตั้งเฉพาะ `.NET 10.0 Runtime (x64)` จะ**ไม่สามารถ**รัน `ScannerSyncCli.exe` ได้ (ส่วน `.NET 10.0 x64` ไม่จำเป็นสำหรับ `ScannerSyncCli.exe`)
+- **การตรวจสอบ COM Registration (`regsvr32`):**
+  - จากการตรวจสอบ PE Export Table ของ DLL ทั้ง 17 ไฟล์ใน `ScannerReader/` **ไม่มีไฟล์ใด Export ฟังก์ชัน `DllRegisterServer`**
+  - จากการตรวจสอบ Import Table ของ `ScannerSyncCli.dll` ตัวโปรแกรมเรียกใช้ **`FK623Attend.dll`** โดยตรงผ่าน Win32 P/Invoke (`SetDllDirectory` ใน `kernel32.dll` -> `FK_ConnectNet`, `FK_DisConnect`, `FK_LoadGeneralLogData`, `FK_GetGeneralLogData_StringID`, `FK_GetLogDataIsSupportStringID`) และเชื่อมต่อ MySQL ผ่าน `MySqlConnector.dll` โดยไม่ได้เรียก `CoCreateInstance` ของ COM
+  - **สรุป:** **ไม่ต้องรัน `regsvr32`** ลงทะเบียน COM DLL ใดๆ บน Production Server เพียงวางไฟล์ทั้ง 18 ไฟล์ไว้ในโฟลเดอร์ `D:\WebApps\Sam_Att\App\ScannerReader\` เดียวกันก็ทำงานได้ทันทีเมื่อมี `.NET 10.0 Runtime (x86)`
 - **ตำแหน่งไฟล์ใน Production:** `D:\WebApps\Sam_Att\App\ScannerReader\ScannerSyncCli.exe`
 - **พาธ .NET Host ที่ต้องการบน Windows Server (64-bit):** `C:\Program Files (x86)\dotnet\dotnet.exe`
 - **เครื่องสแกนลายนิ้วมือของโรงพยาบาลสามชุก (พอร์ต TCP `5005`):**
@@ -16,32 +24,19 @@
   2. เครื่องที่ 2 (`10.2.0.52:5005`) — อาคารอุบัติเหตุฉุกเฉิน (ER)
   3. เครื่องที่ 3 (`10.2.0.53:5005`) — อาคารสำนักงานบริหาร
 
-### รายการไฟล์และ Native / Managed 32-bit DLLs ในโฟลเดอร์ `ScannerReader/`
-```text
-ScannerReader/
-├── ScannerSyncCli.exe
-├── ScannerSyncCli.dll
-├── ScannerSyncCli.deps.json
-├── ScannerSyncCli.runtimeconfig.json
-├── FK623Attend.dll
-├── FKAttend.dll
-├── FKPwdEncDec.dll
-├── FKViaDev.dll
-├── LFWViaDev.dll
-├── FpDataConv.dll
-├── FaceDataConv.dll
-├── UniversalOfflineSDK.dll
-├── Interop.RealSvrOcxTcpLib.dll
-├── LIBCURL.DLL
-├── mb.dll
-├── ShockwaveFlashObjects.dll
-├── stdole.dll
-├── MySqlConnector.dll (v2.6.2)
-├── Microsoft.Extensions.DependencyInjection.Abstractions.dll (v8.0.2)
-└── Microsoft.Extensions.Logging.Abstractions.dll (v8.0.2)
-```
+### รายการไฟล์และผลการตรวจสอบ PE Header / COM Registration ในโฟลเดอร์ `ScannerReader/`
 
-> **กฎความปลอดภัย:** สคริปต์ติดตั้ง (`Install_Sam_Att.ps1`) และสคริปต์ตรวจสอบความพร้อม (`Preflight_Sam_Att.ps1`) จะตรวจสอบการมีอยู่ของ `.NET 10.0 Runtime (x86)` และไฟล์ DLL ทั้งหมดแบบ Read-Only เท่านั้น **ห้ามติดตั้ง Runtime หรือรัน `regsvr32` ลงทะเบียน COM DLL โดยอัตโนมัติโดยไม่ได้รับอนุมัติจากผู้ดูแลระบบ**
+| ไฟล์ใน `ScannerReader/` | PE Machine Type | ชนิดไบนารี | Export `DllRegisterServer` | บทบาทจริงในการทำงานของ `ScannerSyncCli.exe` |
+| :--- | :---: | :---: | :---: | :--- |
+| `ScannerSyncCli.exe` | `0x014c` (`x86`) | Native .NET 10.0 AppHost | ไม่มี | ตัวรันหลัก (32-bit AppHost โหลด `ScannerSyncCli.dll`) |
+| `ScannerSyncCli.dll` | `0x014c` (`x86`) | Managed .NET 10.0 Assembly | ไม่มี | ลอจิกหลัก เรียก P/Invoke `FK623Attend.dll` และบันทึกผ่าน `MySqlConnector.dll` |
+| `FK623Attend.dll` | `0x014c` (`x86`) | Native Win32 DLL | ไม่มี | **ไดรเวอร์หลัก** ที่ถูก P/Invoke (`FK_ConnectNet`, `FK_LoadGeneralLogData` ฯลฯ) |
+| `FKAttend.dll` | `0x014c` (`x86`) | Native Win32 DLL | ไม่มี | Core Protocol ของตระกูลเครื่องสแกน FK |
+| `FKPwdEncDec.dll`, `FKViaDev.dll`, `LFWViaDev.dll`, `FpDataConv.dll`, `FaceDataConv.dll`, `UniversalOfflineSDK.dll`, `LIBCURL.DLL`, `mb.dll` | `0x014c` (`x86`) | Native Win32 Helper DLLs | ไม่มี | ไลบรารีประกอบของชุด SDK เครื่องสแกนนิ้ว (โหลดในโฟลเดอร์เดียวกันผ่าน `SetDllDirectory`) |
+| `MySqlConnector.dll` (2.6.2), `Microsoft.Extensions.*.dll` (8.0.2) | `0x014c` (`x86`) | Managed .NET Assemblies | ไม่มี | ไดรเวอร์เชื่อมต่อฐานข้อมูล MySQL และ Logging |
+| `Interop.RealSvrOcxTcpLib.dll`, `ShockwaveFlashObjects.dll`, `stdole.dll` | `0x014c` (`x86`) | Managed COM Interop Wrappers | ไม่มี | ไฟล์ Wrapper ที่ติดมากับชุด SDK เดิม (ไม่ได้ถูกเรียกใช้ในโหมด TCP Polling ของ `ScannerSyncCli.dll` และไม่ต้อง `regsvr32`) |
+
+> **กฎความปลอดภัย:** สคริปต์ติดตั้ง (`Install_Sam_Att.ps1`) และสคริปต์ตรวจสอบความพร้อม (`Preflight_Sam_Att.ps1`) จะตรวจสอบการมีอยู่ของ `.NET 10.0 Runtime (x86)` และไฟล์ DLL ทั้งหมดแบบ Read-Only เท่านั้น **ห้ามติดตั้ง Runtime หรือรัน `regsvr32` บน Production Server โดยอัตโนมัติ**
 
 ---
 

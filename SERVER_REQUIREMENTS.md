@@ -18,23 +18,20 @@
 
 ---
 
-## 2. ซอฟต์แวร์และ Runtime ที่ต้องติดตั้ง (Verified Runtime Compatibility — FIX 04)
+## 2. ซอฟต์แวร์และ Runtime ที่ต้องติดตั้ง (Verified Runtime Compatibility — FIX 03 & FIX 05)
 
 1. **Node.js Runtime (64-bit):**
    - **เวอร์ชันที่รองรับ (`package.json -> engines.node`):** `>=22.0.0 <27.0.0`
-   - **เวอร์ชันที่ผ่านการตรวจสอบความเข้ากันได้:**
-     - **Node.js `v22.x` LTS** (เช่น `v22.22.0` บน CI / Dev Environment)
-     - **Node.js `v26.13.1`** (เวอร์ชันที่ติดตั้งจริงบน Windows Server `10.2.0.23`)
-   - สคริปต์ติดตั้งและอัปเดตรองรับการระบุพาธ `-NodeExecutablePath` (หรือตัวแปร `NODE_EXECUTABLE_PATH`) โดยไม่บังคับตายตัวเพียงพาธเดียว และ**ห้ามถอนการติดตั้งหรือเปลี่ยน Global Node.js ของเซิร์ฟเวอร์อัตโนมัติ**
+   - **การตรวจสอบความเข้ากันได้ตามความจริง (Honest Verification Status):**
+     - **Node.js `v22.22.0` LTS:** รันชุดทดสอบอัตโนมัติ (`npm run typecheck`, `npm run lint`, `npm test` 154 tests, `npm run build`) ผ่านจริง 100% ในสภาพแวดล้อม Build/Test ปัจจุบัน
+     - **Node.js `22.x` และ `26.x` บน GitHub Actions Windows Matrix:** กำหนดใน `.github/workflows/ci.yml` (`runs-on: windows-latest`)
+     - **Node.js `v26.13.1` (เวอร์ชันที่ติดตั้งจริงบน Windows Server `10.2.0.23`):** สคริปต์ `Preflight_Sam_Att.ps1`, `Install_Sam_Att.ps1` และ `Deploy_Sam_Att.ps1` ผูกการใช้งาน `node.exe` และ `npm.cmd` เข้ากับพาธ `-NodeExecutablePath` ที่เลือกโดยตรง (รวมถึงขั้นตอน `npm run typecheck`, `npm run lint`, Isolated `npm test`, `npm run build`, `cli-preflight.ts` และ `SamAttV2Standalone.xml`) เพื่อให้การตรวจสอบและการรัน Windows Service บนเครื่องจริงใช้ Node.js `v26.13.1` ตัวเดียวกันทั้งหมด
 2. **Git for Windows (64-bit):**
    - ใช้สำหรับดึง Source Code และตรวจสอบ Commit SHA จาก GitHub Repository (`https://github.com/jk9krnvb6g-ai/Sam_Att-V2-Standalone`)
-3. **.NET 10.0 Runtime (x86 / 32-bit) สำหรับ `ScannerSyncCli.exe`:**
-   - จากการตรวจสอบ `ScannerReader/ScannerSyncCli.runtimeconfig.json` และ `ScannerSyncCli.deps.json` ตัวโปรแกรม `ScannerSyncCli.exe` คอมไพล์สำหรับ **`net10.0` (`Microsoft.NETCore.App` version `10.0.0`, Target `.NETCoreApp,Version=v10.0/win-x86`)**
-   - ต้องติดตั้ง **.NET 10.0 Runtime (x86 / 32-bit)** ที่พาธ `C:\Program Files (x86)\dotnet\dotnet.exe` ก่อนเปิดใช้งานการดึงข้อมูลจากเครื่องสแกนนิ้วจริง
-   - ไฟล์ Native & Managed DLLs (32-bit) ที่มาพร้อมในโฟลเดอร์ `ScannerReader/`:
-     - `ScannerSyncCli.exe`, `ScannerSyncCli.dll`, `ScannerSyncCli.deps.json`, `ScannerSyncCli.runtimeconfig.json`
-     - `FK623Attend.dll`, `FKAttend.dll`, `FKPwdEncDec.dll`, `FKViaDev.dll`, `LFWViaDev.dll`, `FpDataConv.dll`, `FaceDataConv.dll`, `UniversalOfflineSDK.dll`, `Interop.RealSvrOcxTcpLib.dll`, `LIBCURL.DLL`, `mb.dll`, `ShockwaveFlashObjects.dll`, `stdole.dll`
-     - `MySqlConnector.dll` (2.6.2), `Microsoft.Extensions.DependencyInjection.Abstractions.dll` (8.0.2), `Microsoft.Extensions.Logging.Abstractions.dll` (8.0.2)
+3. **.NET 10.0 Runtime (x86 / 32-bit เท่านั้น) สำหรับ `ScannerSyncCli.exe` (ยืนยันจาก PE Header `0x014c`):**
+   - จากการตรวจสอบ PE Binary Header ของ `ScannerSyncCli.exe` และไฟล์ `.dll` ทั้ง 17 ไฟล์ใน `ScannerReader/` ทุกไฟล์มีค่า Machine Type = **`0x014c` (`IMAGE_FILE_MACHINE_I386` / 32-bit `x86`) 100%** และ `ScannerSyncCli.deps.json` ระบุ `.NETCoreApp,Version=v10.0/win-x86`
+   - **ต้องติดตั้งเฉพาะ `.NET 10.0 Runtime (x86 / 32-bit)`** ที่พาธ `C:\Program Files (x86)\dotnet\dotnet.exe` (การติดตั้งเฉพาะ x64 จะไม่สามารถบูต 32-bit AppHost `ScannerSyncCli.exe` ได้)
+   - **ไม่ต้องรัน `regsvr32` ลงทะเบียน COM DLL:** จากการตรวจ PE Export/Import Table ของ DLL ทั้ง 17 ไฟล์ ไม่มีไฟล์ใด Export `DllRegisterServer` และ `ScannerSyncCli.dll` เรียกใช้ `FK623Attend.dll` ผ่าน Win32 P/Invoke (`SetDllDirectory` + `FK_ConnectNet` / `FK_LoadGeneralLogData`) โดยตรง
 4. **WinSW (Windows Service Wrapper v2.x / v3.x x64):**
    - ใช้สำหรับรัน Node.js เป็น Windows Service ภายใต้ชื่อ `SamAttV2Standalone`
    - วางไฟล์ Executable ไว้ที่ `D:\WebApps\Sam_Att\Service\SamAttV2Standalone.exe` คู่กับ `SamAttV2Standalone.xml`

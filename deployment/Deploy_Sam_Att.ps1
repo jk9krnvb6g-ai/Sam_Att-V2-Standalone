@@ -321,28 +321,86 @@ function Update-JobStatusJson {
 }
 
 function Acquire-DeployLockFile {
+  $Dir = Split-Path -Parent $LockFile
+  if (-not (Test-Path $Dir)) {
+    New-Item -ItemType Directory -Path $Dir -Force | Out-Null
+  }
   $Payload = [ordered]@{
     jobId         = $JobId
     pid           = $PID
     actorUsername = "admin"
     startedAt     = (Get-Date).ToUniversalTime().ToString("o")
   }
-  Write-AtomicJsonFile -TargetPath $LockFile -Payload $Payload
+  $JsonStr = $Payload | ConvertTo-Json -Depth 5
+  $Bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($JsonStr)
+
+  try {
+    # Atomic exclusive lock creation via FileMode.CreateNew (FIX 02)
+    $Fs = [System.IO.File]::Open(
+      $LockFile,
+      [System.IO.FileMode]::CreateNew,
+      [System.IO.FileAccess]::Write,
+      [System.IO.FileShare]::Read
+    )
+    try {
+      $Fs.Write($Bytes, 0, $Bytes.Length)
+      $Fs.Flush()
+    } finally {
+      $Fs.Dispose()
+    }
+  } catch [System.IO.IOException] {
+    if (Test-Path $LockFile) {
+      try {
+        $Existing = Get-Content -Path $LockFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -ne $Existing -and [string]$Existing.jobId -eq $JobId) {
+          Write-AtomicJsonFile -TargetPath $LockFile -Payload $Payload
+          return
+        }
+        $OwnerPid = 0
+        if ($null -ne $Existing -and $null -ne $Existing.pid) {
+          [void][int]::TryParse([string]$Existing.pid, [ref]$OwnerPid)
+        }
+        $Alive = $false
+        if ($OwnerPid -gt 0) {
+          $Proc = Get-Process -Id $OwnerPid -ErrorAction SilentlyContinue
+          if ($null -ne $Proc) { $Alive = $true }
+        }
+        if (-not $Alive) {
+          Remove-Item -Path $LockFile -Force -ErrorAction SilentlyContinue
+          $Fs2 = [System.IO.File]::Open(
+            $LockFile,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::Read
+          )
+          try {
+            $Fs2.Write($Bytes, 0, $Bytes.Length)
+            $Fs2.Flush()
+          } finally {
+            $Fs2.Dispose()
+          }
+          return
+        }
+        throw "LIFECYCLE_LOCK_ACTIVE: Another deployment job ($([string]$Existing.jobId), PID=$OwnerPid) holds '$LockFile'."
+      } catch {
+        throw
+      }
+    }
+    throw
+  }
 }
 
 function Release-DeployLockFile {
   try {
     if (Test-Path $LockFile) {
-      $ShouldRemove = $true
+      $ShouldRemove = $false
       try {
         $Existing = Get-Content -Path $LockFile -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($null -ne $Existing -and $null -ne $Existing.PSObject.Properties["jobId"] -and -not [string]::IsNullOrWhiteSpace([string]$Existing.jobId)) {
-          if ([string]$Existing.jobId -ne $JobId) {
-            $ShouldRemove = $false
-          }
+        if ($null -ne $Existing -and [string]$Existing.jobId -eq $JobId -and [int]$Existing.pid -eq $PID) {
+          $ShouldRemove = $true
         }
       } catch {
-        $ShouldRemove = $true
+        $ShouldRemove = $false
       }
       if ($ShouldRemove) {
         Remove-Item -Path $LockFile -Force -ErrorAction SilentlyContinue

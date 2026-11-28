@@ -782,6 +782,12 @@ export function validateProductionConfig(cfg: AppConfig = loadConfig()): {
     if (cfg.dbEngine !== 'mysql') {
       violations.push('INVALID_DB_ENGINE: โหมด Production ต้องใช้ SAM_ATT_DB_ENGINE=mysql เท่านั้น');
     }
+    const rawAutoMigrate = (process.env.SAM_ATT_AUTO_MIGRATE || '').trim().toLowerCase();
+    if (rawAutoMigrate === 'true' || rawAutoMigrate === '1' || rawAutoMigrate === 'yes') {
+      violations.push(
+        'PRODUCTION_AUTO_MIGRATE_FORBIDDEN: ห้ามตั้งค่า SAM_ATT_AUTO_MIGRATE=true ในโหมด Production เด็ดขาด การปรับโครงสร้างฐานข้อมูลต้องรันผ่าน Explicit Administrative CLI (npm run db:migrate) ที่ได้รับอนุมัติเท่านั้น'
+      );
+    }
     if (!cfg.samAttDb.host || cfg.samAttDb.host === 'CHANGE_ME') {
       violations.push('MISSING_DB_HOST: กรุณากำหนดค่า SAM_ATT_DB_HOST สำหรับฐานข้อมูล MySQL');
     }

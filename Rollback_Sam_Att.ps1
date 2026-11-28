@@ -141,50 +141,16 @@ if ($isDryRunMode) {
     exit 0
 }
 
-function Acquire-SharedLifecycleLock {
-    param([string]$Path, [string]$Operation, [string]$InheritedLockId)
-    $lockDir = Split-Path -Parent $Path
-    if (-not (Test-Path $lockDir)) {
-        New-Item -ItemType Directory -Path $lockDir -Force | Out-Null
-    }
-    if (Test-Path $Path) {
-        try {
-            $existing = Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json
-            if (-not [string]::IsNullOrWhiteSpace($InheritedLockId) -and $existing.lockId -eq $InheritedLockId) {
-                return @{ acquiredNew = $false; lockId = $InheritedLockId }
-            }
-            $ownerPid = [int]$existing.pid
-            $proc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
-            if ($null -ne $proc) {
-                throw "LIFECYCLE_LOCK_ACTIVE: Another lifecycle operation ($($existing.operation), lockId=$($existing.lockId), PID=$ownerPid) is currently running since $($existing.startedAt)."
-            }
-        } catch {
-            if ($_.Exception.Message -like "LIFECYCLE_LOCK_ACTIVE*") {
-                throw $_
-            }
-        }
-        Remove-Item $Path -Force -ErrorAction SilentlyContinue
-    }
-    $newLockId = "$Operation-$((Get-Date).ToString('yyyyMMddHHmmss'))-$PID"
-    $payload = @{
-        lockId    = $newLockId
-        operation = $Operation
-        pid       = $PID
-        startedAt = (Get-Date).ToString("o")
-        user      = [Environment]::UserName
-    }
-    $payload | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding UTF8
-    return @{ acquiredNew = $true; lockId = $newLockId }
+$lifecycleLockModule = Join-Path $PSScriptRoot "scripts\LifecycleLock.ps1"
+if (-not (Test-Path $lifecycleLockModule)) {
+    $lifecycleLockModule = Join-Path $AppDir "scripts\LifecycleLock.ps1"
 }
-
-function Release-SharedLifecycleLock {
-    param([string]$Path, [hashtable]$LockHandle)
-    if ($null -ne $LockHandle -and $LockHandle.acquiredNew -and (Test-Path $Path)) {
-        Remove-Item $Path -Force -ErrorAction SilentlyContinue
-    }
+if (-not (Test-Path $lifecycleLockModule)) {
+    throw "LIFECYCLE_LOCK_ENGINE_MISSING: Could not find scripts\LifecycleLock.ps1"
 }
+. $lifecycleLockModule
 
-$lockHandle = Acquire-SharedLifecycleLock -Path $LockFilePath -Operation "ROLLBACK" -InheritedLockId $ParentLockId
+$lockHandle = Acquire-AtomicLifecycleLock -Path $LockFilePath -Operation "ROLLBACK" -InheritedLockId $ParentLockId
 
 try {
     Write-Host "=================================================================" -ForegroundColor Yellow
@@ -268,5 +234,5 @@ try {
     Write-Host "[PASS] Application rollback completed safely. Database, Config\.env, and Certs were not modified." -ForegroundColor Green
     exit 0
 } finally {
-    Release-SharedLifecycleLock -Path $LockFilePath -LockHandle $lockHandle
+    Release-AtomicLifecycleLock -Path $LockFilePath -LockHandle $lockHandle
 }
