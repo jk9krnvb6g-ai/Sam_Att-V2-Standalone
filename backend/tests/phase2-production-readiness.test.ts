@@ -501,7 +501,7 @@ test('Phase 2 Production Readiness & Hotfix Verification Suite (FIX 01 - FIX 08)
     }
   });
 
-  await t.test('9. FINAL SAFETY PATCH FIX 02: Atomic Lifecycle Lock Concurrency, ParentLockId Inheritance & Ownership Protection', async () => {
+  await t.test('9. FINAL SAFETY PATCH FIX 02 & TASK 3: Atomic Lifecycle Lock Concurrency, Stale Lock Recovery, PID+StartTime Verification, Corrupt Lock Guard & Ownership Protection', async () => {
     // 1. Verify all 5 lifecycle scripts + deployment/Deploy_Sam_Att.ps1 use the unified atomic lock mechanism
     const rootLifecycleScripts = [
       'Install_Sam_Att.ps1',
@@ -519,6 +519,17 @@ test('Phase 2 Production Readiness & Hotfix Verification Suite (FIX 01 - FIX 08)
         `${scriptName} must use scripts/LifecycleLock.ps1 (Acquire-AtomicLifecycleLock / Release-AtomicLifecycleLock)`
       );
     }
+
+    const lockPsContent = fs.readFileSync(path.resolve(process.cwd(), 'scripts/LifecycleLock.ps1'), 'utf8');
+    assert.ok(
+      lockPsContent.includes('[System.IO.FileMode]::CreateNew') &&
+        lockPsContent.includes('Test-LockOwnerProcessAlive') &&
+        lockPsContent.includes('ownerStartTimeUtc') &&
+        lockPsContent.includes('[System.IO.File]::Move($Path, $staleTrash)') &&
+        lockPsContent.includes('PARTIAL_OR_CORRUPT'),
+      'scripts/LifecycleLock.ps1 must enforce FileMode.CreateNew, PID + StartTime verification, partial/corrupt lock guard, and atomic rename-to-trash stale lock recovery'
+    );
+
     const innerDeployContent = fs.readFileSync(path.resolve(process.cwd(), 'deployment/Deploy_Sam_Att.ps1'), 'utf8');
     assert.ok(
       innerDeployContent.includes('[System.IO.FileMode]::CreateNew'),
@@ -531,7 +542,7 @@ test('Phase 2 Production Readiness & Hotfix Verification Suite (FIX 01 - FIX 08)
     try {
       process.env.SAM_ATT_DEPLOY_LOCK_FILE = tmpLockFile;
 
-      // Launch 8 concurrent contenders trying to acquire the same lock file simultaneously
+      // (A) Concurrent Acquisition: Launch 8 concurrent contenders trying to acquire the same lock file simultaneously
       const contenders = Array.from({ length: 8 }, (_, idx) =>
         Promise.resolve().then(() =>
           acquireDeployLock({
@@ -550,7 +561,7 @@ test('Phase 2 Production Readiness & Hotfix Verification Suite (FIX 01 - FIX 08)
 
       const winningJobId = winners[0].jobId!;
 
-      // Verify ParentLockId / InheritedJobId allows child lifecycle operation to share parent lock safely
+      // (B) ParentLockId / InheritedJobId Validation
       const childReuse = acquireDeployLock({
         jobId: 'child_sub_operation',
         pid: process.pid,
@@ -560,7 +571,15 @@ test('Phase 2 Production Readiness & Hotfix Verification Suite (FIX 01 - FIX 08)
       assert.equal(childReuse.acquired, true, 'Child operation with matching inheritedJobId must succeed');
       assert.equal(childReuse.jobId, winningJobId, 'Underlying lock file must retain parent jobId ownership');
 
-      // Verify non-owner jobId or wrong PID cannot release the lock
+      const badParentReuse = acquireDeployLock({
+        jobId: 'child_wrong_parent',
+        pid: process.pid,
+        actorUsername: 'admin',
+        inheritedJobId: 'wrong_parent_job_id',
+      });
+      assert.equal(badParentReuse.acquired, false, 'Child operation with non-matching inheritedJobId must fail closed');
+
+      // (C) Unauthorized Release Protection: non-owner jobId or wrong PID cannot release the lock
       const wrongJobRelease = releaseDeployLock('non_owner_job_id', process.pid);
       assert.equal(wrongJobRelease, false, 'Non-owner jobId must not release the atomic lock');
       assert.equal(fs.existsSync(tmpLockFile), true);
@@ -569,10 +588,49 @@ test('Phase 2 Production Readiness & Hotfix Verification Suite (FIX 01 - FIX 08)
       assert.equal(wrongPidRelease, false, 'Non-owner PID must not release the atomic lock');
       assert.equal(fs.existsSync(tmpLockFile), true);
 
-      // Verify true owner (matching jobId + matching PID) releases the lock cleanly
+      // True owner (matching jobId + matching PID) releases the lock cleanly
       const ownerReleased = releaseDeployLock(winningJobId, process.pid);
       assert.equal(ownerReleased, true, 'True lock owner must release the lock file');
       assert.equal(fs.existsSync(tmpLockFile), false, 'Lock file must be removed after owner release');
+
+      // (D) Safe Stale Lock Recovery Under Contention: dead PID lock is recovered by exactly ONE contender without deleting the winner's new lock
+      fs.writeFileSync(
+        tmpLockFile,
+        JSON.stringify({
+          jobId: 'crashed_dead_job_999',
+          pid: 999999,
+          actorUsername: 'admin',
+          startedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+        'utf8'
+      );
+
+      const recoveryContenders = Array.from({ length: 6 }, (_, idx) =>
+        Promise.resolve().then(() =>
+          acquireDeployLock({
+            jobId: `recovery_contender_${idx + 1}`,
+            pid: process.pid,
+            actorUsername: 'admin',
+          })
+        )
+      );
+      const recoveryResults = await Promise.all(recoveryContenders);
+      const recoveryWinners = recoveryResults.filter((r) => r.acquired === true);
+      assert.equal(recoveryWinners.length, 1, 'Exactly ONE contender may win stale lock recovery');
+      assert.equal(fs.existsSync(tmpLockFile), true, 'New lock created by recovery winner must remain intact on disk');
+      const onDiskAfterRecovery = JSON.parse(fs.readFileSync(tmpLockFile, 'utf8'));
+      assert.equal(onDiskAfterRecovery.jobId, recoveryWinners[0].jobId);
+      releaseDeployLock(recoveryWinners[0].jobId!, process.pid);
+
+      // (E) Partial / Corrupt Lock File Guard: freshly created partial file (<5000ms old) must NOT be deleted
+      fs.writeFileSync(tmpLockFile, '{partial_corrupt_json', 'utf8');
+      const blockedByFreshPartial = acquireDeployLock({
+        jobId: 'contender_during_partial_write',
+        pid: process.pid,
+        actorUsername: 'admin',
+      });
+      assert.equal(blockedByFreshPartial.acquired, false, 'Fresh partial/corrupt lock file (<5000ms) must not be deleted');
+      assert.equal(fs.existsSync(tmpLockFile), true);
     } finally {
       if (prevLockEnv === undefined) {
         delete process.env.SAM_ATT_DEPLOY_LOCK_FILE;

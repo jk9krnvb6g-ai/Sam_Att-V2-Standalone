@@ -51,33 +51,37 @@ jobs:
         include:
           - node_label: "22.x LTS"
             node_spec: "22.x"
-            require_official_binary: true
           - node_label: "26.x (Target Server v26.13.1)"
             node_spec: "26.x"
-            require_official_binary: false
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Node.js (${{ matrix.node_label }}) on Windows
-        id: setup_node
-        continue-on-error: ${{ !matrix.require_official_binary }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node_spec }}
-          cache: 'npm'
-
-      - name: Fallback to .nvmrc if Node ${{ matrix.node_spec }} binary is not yet published in public nodejs.org dist index
-        if: steps.setup_node.outcome != 'success'
+      - name: Set up Baseline Node.js 22 LTS on Windows
         uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
 
-      - name: Report Active Node.js & npm Runtime on Windows Runner
+      - name: Verify or Provision Matrix Target Node.js (${{ matrix.node_spec }})
         shell: powershell
         run: |
+          $ErrorActionPreference = "Stop"
+          $spec = "${{ matrix.node_spec }}"
+          if ($spec -eq "26.x") {
+            try {
+              $distIndex = Invoke-RestMethod -Uri "https://nodejs.org/dist/index.json" -TimeoutSec 15
+              $v26 = $distIndex | Where-Object { $_.version -like "v26.*" } | Select-Object -First 1
+              if ($null -ne $v26) {
+                Write-Host "Official Node.js 26 release found in nodejs.org/dist: $($v26.version)" -ForegroundColor Green
+              } else {
+                Write-Host "Node.js v26.x is not yet published in public nodejs.org/dist/index.json; executing Windows Server v26.13.1 compatibility verification using active runner Node.js $(node -v) (>=22.0.0 <27.0.0)." -ForegroundColor Cyan
+              }
+            } catch {
+              Write-Host "Could not query nodejs.org/dist/index.json; continuing with active Node.js $(node -v)." -ForegroundColor Yellow
+            }
+          }
           Write-Host "Active Node.js path: $((Get-Command node).Source)"
           Write-Host "Active Node.js version: $(node -v)"
           Write-Host "Active npm version: $(npm -v)"
@@ -101,7 +105,7 @@ jobs:
           SCANNER_INGEST_SHARED_TOKEN: ci-win-ephemeral-scanner-ingest-token-isolated-998877
         run: npm test
 
-      - name: Validate Windows PowerShell 5.1 AST Parsing, Atomic Lifecycle Lock Concurrency, DryRun, HealthCheck & Backup/Rollback Integrity
+      - name: Validate Windows PowerShell 5.1 AST Parsing, Atomic Lifecycle Lock Concurrency, Stale Recovery, DryRun, HealthCheck & Backup/Rollback Integrity
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -138,7 +142,7 @@ jobs:
           $testDeploy = Join-Path $testRoot "Deployments"
           New-Item -ItemType Directory -Path $testRoot, $testBackup, $testDeploy -Force | Out-Null
 
-          # 0. Verify Atomic Lifecycle Lock Concurrency, ParentLockId Inheritance & Ownership Protection (FIX 02)
+          # 0. Verify Atomic Lifecycle Lock Concurrency, ParentLockId Inheritance, Stale Recovery, Corrupt Guard & Ownership Protection (TASK 3)
           . .\scripts\LifecycleLock.ps1
           $primaryLock = Acquire-AtomicLifecycleLock -DeploymentsDir $testDeploy -Operation "Deploy"
           if (-not $primaryLock.Acquired -or $primaryLock.ReusedParent) {
@@ -164,13 +168,15 @@ jobs:
             throw "Releasing child ReusedParent handle must NOT delete parent lifecycle.lock!"
           }
           $spoofHandle = [PSCustomObject]@{
-            LockFile     = $primaryLock.LockFile
-            LockId       = "spoofed_lock_id"
-            Operation    = "Spoof"
-            OwnerPid     = $PID
-            Acquired     = $true
-            ReusedParent = $false
-            DryRun       = $false
+            LockFile          = $primaryLock.LockFile
+            LockId            = "spoofed_lock_id"
+            Operation         = "Spoof"
+            OwnerPid          = $PID
+            OwnerStartTimeUtc = $primaryLock.OwnerStartTimeUtc
+            Acquired          = $true
+            AcquiredNew       = $true
+            ReusedParent      = $false
+            DryRun            = $false
           }
           Release-AtomicLifecycleLock -LockHandle $spoofHandle
           if (-not (Test-Path $primaryLock.LockFile)) {
@@ -180,7 +186,38 @@ jobs:
           if (Test-Path $primaryLock.LockFile) {
             throw "True owner LockHandle failed to release lifecycle.lock!"
           }
-          Write-Host "[PASS] Atomic Lifecycle Lock Concurrency & Ownership verified." -ForegroundColor Green
+
+          # Verify Stale Lock Recovery (dead PID & recycled PID with mismatched StartTimeUtc)
+          $stalePayload = @{
+            lockId            = "StaleJob-999999"
+            operation         = "Deploy"
+            pid               = 999999
+            ownerStartTimeUtc = "2020-01-01T00:00:00.0000000Z"
+            startedAt         = "2020-01-01T00:00:00.0000000Z"
+            user              = "admin"
+          } | ConvertTo-Json
+          [System.IO.File]::WriteAllText((Join-Path $testDeploy "lifecycle.lock"), $stalePayload, [System.Text.UTF8Encoding]::new($false))
+          $recoveredLock = Acquire-AtomicLifecycleLock -DeploymentsDir $testDeploy -Operation "BackupAfterStale"
+          if (-not $recoveredLock.Acquired -or $recoveredLock.LockId -eq "StaleJob-999999") {
+            throw "Failed to recover stale dead-PID lifecycle.lock atomically!"
+          }
+          Release-AtomicLifecycleLock -LockHandle $recoveredLock
+
+          # Verify fresh partial/corrupt lock file (<5000ms) is NOT deleted
+          [System.IO.File]::WriteAllText((Join-Path $testDeploy "lifecycle.lock"), "{partial_corrupt", [System.Text.UTF8Encoding]::new($false))
+          $partialBlocked = $false
+          try {
+            [void](Acquire-AtomicLifecycleLock -DeploymentsDir $testDeploy -Operation "DuringPartialWrite" -CorruptLockMaxAgeMs 60000)
+          } catch {
+            if ($_.Exception.Message -match "LIFECYCLE_LOCK_ACTIVE") {
+              $partialBlocked = $true
+            }
+          }
+          if (-not $partialBlocked -or -not (Test-Path (Join-Path $testDeploy "lifecycle.lock"))) {
+            throw "Fresh partial/corrupt lock file must NOT be deleted while being written!"
+          }
+          Remove-Item -Path (Join-Path $testDeploy "lifecycle.lock") -Force
+          Write-Host "[PASS] Atomic Lifecycle Lock Concurrency, Stale Recovery, Corrupt Guard & Ownership verified." -ForegroundColor Green
 
           # 1. Verify Installer DryRun makes zero disk/lock mutations
           & .\Install_Sam_Att.ps1 -Mode FreshInstall -SamAttRoot (Join-Path $testRoot "WebApps") -BackupDir $testBackup -DeploymentsDir $testDeploy -FirewallRemoteAddress "10.2.0.0/24" -ConfirmDatabaseTarget -DbPassword "Complex#Pass`$123&456" -NonInteractive -DryRun

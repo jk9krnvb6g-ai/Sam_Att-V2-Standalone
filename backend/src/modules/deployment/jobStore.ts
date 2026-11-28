@@ -412,10 +412,23 @@ export function getDeployLockStatus(): DeployLockInfo {
         linkedJob.status === 'NO_CHANGES');
 
     if (isExpired || pidDead || jobAlreadyTerminal) {
+      // Atomic rename-to-trash before unlink so concurrent stale recovery never deletes a newly created lock (TASK 3)
       try {
-        fs.unlinkSync(lockFilePath);
+        const currentRaw = JSON.parse(fs.readFileSync(lockFilePath, 'utf8').replace(/^\uFEFF/, '')) as {
+          jobId?: string;
+          pid?: number;
+        };
+        if (currentRaw.jobId === raw.jobId && currentRaw.pid === raw.pid) {
+          const trashPath = `${lockFilePath}.stale_${process.pid}_${crypto.randomBytes(4).toString('hex')}`;
+          fs.renameSync(lockFilePath, trashPath);
+          try {
+            fs.unlinkSync(trashPath);
+          } catch {
+            // ignore
+          }
+        }
       } catch {
-        // ignore
+        // ignore if another process already recovered the stale lock
       }
       return {
         locked: false,
@@ -438,6 +451,30 @@ export function getDeployLockStatus(): DeployLockInfo {
       actorUsername: raw.actorUsername ? String(raw.actorUsername) : null,
     };
   } catch {
+    // Partial or corrupt lock file: only recover if older than 5000ms (never delete a lock mid-write)
+    try {
+      const stat = fs.statSync(lockFilePath);
+      if (Date.now() - stat.mtimeMs > 5000) {
+        const trashPath = `${lockFilePath}.corrupt_${process.pid}_${crypto.randomBytes(4).toString('hex')}`;
+        fs.renameSync(lockFilePath, trashPath);
+        try {
+          fs.unlinkSync(trashPath);
+        } catch {
+          // ignore
+        }
+        return {
+          locked: false,
+          staleCleaned: true,
+          lockFilePath,
+          jobId: null,
+          pid: null,
+          startedAt: null,
+          actorUsername: null,
+        };
+      }
+    } catch {
+      // ignore
+    }
     return {
       locked: true,
       staleCleaned: false,
@@ -459,7 +496,7 @@ export function acquireDeployLock(params: {
   const safeJobId = sanitizeSafeJobId(params.jobId);
   const callerPid = params.pid ?? process.pid;
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
     const status = getDeployLockStatus();
     if (status.locked) {
       // Allow same jobId (e.g., parent handing off PID to spawned child) or explicit inheritedJobId
@@ -510,7 +547,7 @@ export function acquireDeployLock(params: {
     };
 
     try {
-      // Atomic exclusive file creation (O_CREAT | O_EXCL via 'wx') -- FIX 02
+      // Atomic exclusive file creation (O_CREAT | O_EXCL via 'wx') -- FIX 02 & TASK 3
       const fd = fs.openSync(lockFilePath, 'wx');
       try {
         fs.writeFileSync(fd, JSON.stringify(payload, null, 2), 'utf8');
@@ -558,13 +595,22 @@ export function releaseDeployLock(expectedJobId?: string, expectedPid?: number):
       jobId?: string;
       pid?: number;
     };
-    if (expectedJobId && raw.jobId && raw.jobId !== expectedJobId) {
+    if (!raw || !raw.jobId) {
+      return false;
+    }
+    if (expectedJobId && raw.jobId !== expectedJobId) {
       return false;
     }
     if (typeof expectedPid === 'number' && typeof raw.pid === 'number' && raw.pid !== expectedPid) {
       return false;
     }
-    fs.unlinkSync(lockFilePath);
+    const trashPath = `${lockFilePath}.rel_${process.pid}_${crypto.randomBytes(4).toString('hex')}`;
+    fs.renameSync(lockFilePath, trashPath);
+    try {
+      fs.unlinkSync(trashPath);
+    } catch {
+      // ignore
+    }
     return true;
   } catch {
     return false;

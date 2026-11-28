@@ -30,8 +30,10 @@ const TEST_DB_FILE = path.join(
 
 process.env.NODE_ENV = 'test';
 process.env.DB_ENGINE = 'sqlite';
+process.env.SAM_ATT_DB_ENGINE = 'sqlite_sandbox';
 process.env.SAM_ATT_SQLITE_PATH = TEST_DB_FILE;
 process.env.DEMO_MODE_ENABLED = 'true';
+process.env.SAM_ATT_DATA_MODE = 'DEMO';
 process.env.JWT_SECRET = 'sam-att-modal-alert-test-secret-key-2026';
 process.env.SCANNER_SYNC_ENABLED = 'false';
 process.env.SCANNER_AUTO_SCHEDULER_ENABLED = 'false';
