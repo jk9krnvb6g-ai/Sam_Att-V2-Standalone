@@ -1,4 +1,5 @@
 import { dbExecute } from '../../database/adapter.ts';
+import { appLogger } from '../../utils/logger.ts';
 
 export interface AuditLogInput {
   requestId: string;
@@ -47,6 +48,22 @@ function scrubSensitive(obj: Record<string, unknown> | null | undefined): string
 }
 
 export async function writeAuditLog(input: AuditLogInput): Promise<void> {
+  const scrubbedDetailJson = scrubSensitive(input.detail);
+  appLogger.security(
+    input.action,
+    `[${input.result}] actor=${input.actorUsername || 'anonymous'} (${input.actorRole || 'UNAUTHENTICATED'}) target=${input.targetType}:${input.targetId ?? '-'} ip=${input.ipAddress || '127.0.0.1'}`,
+    {
+      requestId: input.requestId || 'req-internal',
+      actorUsername: input.actorUsername || 'anonymous',
+      actorRole: input.actorRole || 'UNAUTHENTICATED',
+      ipAddress: input.ipAddress || '127.0.0.1',
+      targetType: input.targetType,
+      targetId: input.targetId ?? null,
+      result: input.result,
+      errorCode: input.errorCode ?? null,
+      detail: scrubbedDetailJson ? JSON.parse(scrubbedDetailJson) : null,
+    }
+  );
   try {
     await dbExecute(
       `INSERT INTO audit_logs (
@@ -63,7 +80,7 @@ export async function writeAuditLog(input: AuditLogInput): Promise<void> {
         input.targetId ?? null,
         input.result,
         input.errorCode ?? null,
-        scrubSensitive(input.detail),
+        scrubbedDetailJson,
       ]
     );
   } catch {

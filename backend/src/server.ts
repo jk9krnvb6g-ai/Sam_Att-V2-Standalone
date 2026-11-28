@@ -24,10 +24,15 @@ import {
   runMigrations,
   ensureBaselineSystemCatalog,
   seedDemoSyntheticData,
+  closeDatabaseConnections,
 } from './database/adapter.ts';
 import { reprocessAttendanceRange } from './modules/attendance/processor.ts';
-import { startAutomaticScannerScheduler } from './modules/scanners/scheduler.ts';
+import {
+  startAutomaticScannerScheduler,
+  stopAutomaticScannerScheduler,
+} from './modules/scanners/scheduler.ts';
 import { createExpressApp } from './app.ts';
+import { appLogger } from './utils/logger.ts';
 
 function encodeDerLength(len: number): Buffer {
   if (len < 0x80) return Buffer.from([len]);
@@ -62,11 +67,22 @@ function derUtcTime(date: Date): Buffer {
   return derTag(0x17, Buffer.from(`${yy}${mm}${dd}${hh}${mi}${ss}Z`, 'ascii'));
 }
 
+function parseIpv4Bytes(ip: string): Buffer | null {
+  const parts = ip.trim().split('.');
+  if (parts.length !== 4) return null;
+  const nums = parts.map((p) => Number(p));
+  if (nums.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+  return Buffer.from(nums);
+}
+
 /**
  * สร้างใบรับรอง X.509 v3 Self-Signed และ RSA 2048-bit Private Key ด้วย Pure Node.js (`node:crypto`)
- * ทำให้ทำงานได้บน Windows Server ทุกเครื่องแม้ไม่มีโปรแกรม `openssl.exe` ติดตั้งอยู่
+ * รองรับ SAN สำหรับ DNS:localhost, IP:127.0.0.1 และ IP:10.2.0.23 (หรือ IP เซิร์ฟเวอร์ที่ระบุ)
  */
-export function generateSelfSignedX509CertAndKey(commonName = 'localhost'): { certPem: string; keyPem: string } {
+export function generateSelfSignedX509CertAndKey(
+  commonName = 'localhost',
+  extraIpSans: string[] = ['10.2.0.23']
+): { certPem: string; keyPem: string } {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', {
     modulusLength: 2048,
     publicKeyEncoding: { type: 'spki', format: 'der' },
@@ -98,11 +114,21 @@ export function generateSelfSignedX509CertAndKey(commonName = 'localhost'): { ce
   const notAfter = new Date(now.getTime() + 3650 * 24 * 60 * 60 * 1000);
   const validitySeq = derSequence([derUtcTime(notBefore), derUtcTime(notAfter)]);
 
-  // SubjectAltName (2.5.29.17): DNS:localhost, IP:127.0.0.1
-  const sanValue = derSequence([
+  // SubjectAltName (2.5.29.17): DNS:localhost, IP:127.0.0.1, plus extra IP SANs (e.g. 10.2.0.23)
+  const sanEntries: Buffer[] = [
     derTag(0x82, Buffer.from('localhost', 'ascii')),
     derTag(0x87, Buffer.from([127, 0, 0, 1])),
-  ]);
+  ];
+  const seenIps = new Set<string>(['127.0.0.1']);
+  for (const ip of extraIpSans) {
+    if (!ip || seenIps.has(ip.trim())) continue;
+    const ipBuf = parseIpv4Bytes(ip);
+    if (ipBuf) {
+      seenIps.add(ip.trim());
+      sanEntries.push(derTag(0x87, ipBuf));
+    }
+  }
+  const sanValue = derSequence(sanEntries);
   const sanExt = derSequence([
     derTag(0x06, Buffer.from([0x55, 0x1d, 0x11])),
     derTag(0x04, sanValue),
@@ -139,10 +165,19 @@ export function generateSelfSignedX509CertAndKey(commonName = 'localhost'): { ce
 /**
  * ฟังก์ชันตรวจสอบไฟล์ใบรับรองความปลอดภัย HTTPS (server.crt และ server.key)
  * - หากมีไฟล์อยู่แล้วจะใช้งานไฟล์เดิมทันทีโดยไม่เขียนทับ
- * - หากยังไม่มีไฟล์ จะสร้างใบรับรอง Self-Signed TLS 2048-bit (รองรับทั้ง OpenSSL และ Pure Node.js Crypto Fallback)
+ * - ในโหมด Production ปกติ (เมื่อไม่ได้ระบุ allowExplicitGenerateInProduction) ห้ามสร้าง Self-Signed Certificate อัตโนมัติ
+ *   เพื่อให้ validateProductionConfig() ทำงานแบบ Fail-Closed หากผู้ดูแลระบบยังไม่ได้วางใบรับรองใน D:\WebApps\Sam_Att\Certs
  */
-export function ensureTlsCertificates(certPath: string, keyPath: string, _nodeEnv = process.env.NODE_ENV || 'development'): void {
+export function ensureTlsCertificates(
+  certPath: string,
+  keyPath: string,
+  nodeEnv = process.env.NODE_ENV || 'development',
+  options?: { allowExplicitGenerateInProduction?: boolean; commonName?: string; extraIpSans?: string[] }
+): void {
   if (fs.existsSync(certPath) && fs.existsSync(keyPath)) {
+    return;
+  }
+  if (nodeEnv === 'production' && !options?.allowExplicitGenerateInProduction) {
     return;
   }
   const certDir = path.dirname(certPath);
@@ -154,7 +189,10 @@ export function ensureTlsCertificates(certPath: string, keyPath: string, _nodeEn
     fs.mkdirSync(keyDir, { recursive: true, mode: 0o700 });
   }
 
-  const { certPem, keyPem } = generateSelfSignedX509CertAndKey('localhost');
+  const { certPem, keyPem } = generateSelfSignedX509CertAndKey(
+    options?.commonName || '10.2.0.23',
+    options?.extraIpSans || ['10.2.0.23']
+  );
   fs.writeFileSync(certPath, certPem, { encoding: 'utf8' });
   fs.writeFileSync(keyPath, keyPem, { encoding: 'utf8', mode: 0o600 });
 
@@ -163,6 +201,31 @@ export function ensureTlsCertificates(certPath: string, keyPath: string, _nodeEn
   } catch {
     // ignore on platforms without POSIX chmod
   }
+}
+
+let shutdownHandlersRegistered = false;
+
+export async function gracefulShutdownServers(
+  signal: string,
+  servers: { httpsServer?: https.Server; previewServer?: http.Server }
+): Promise<void> {
+  appLogger.info('SERVER_SHUTDOWN_INITIATED', `Received ${signal}. Stopping Sam_Att V2 Standalone gracefully...`, {
+    signal,
+  });
+  stopAutomaticScannerScheduler();
+
+  const closeServer = (srv?: http.Server | https.Server) =>
+    new Promise<void>((resolve) => {
+      if (!srv || !srv.listening) {
+        resolve();
+        return;
+      }
+      srv.close(() => resolve());
+    });
+
+  await Promise.all([closeServer(servers.httpsServer), closeServer(servers.previewServer)]);
+  await closeDatabaseConnections();
+  appLogger.info('SERVER_SHUTDOWN_COMPLETED', 'Sam_Att V2 Standalone shut down cleanly.', { signal });
 }
 
 /**
@@ -174,14 +237,13 @@ export async function startStandaloneServers(): Promise<{
 }> {
   const cfg = loadConfig();
 
-  // ขั้นตอนที่ 1: ตรวจสอบความพร้อมของใบรับรอง HTTPS (TLS) หากยังไม่มีจะสร้างใบรับรองเริ่มต้นให้อัตโนมัติโดยไม่ทับไฟล์เดิม
+  // ขั้นตอนที่ 1: เตรียมใบรับรอง HTTPS เฉพาะโหมดพัฒนา/ทดสอบ (ในโหมด Production จะไม่สร้างใบรับรองอัตโนมัติ)
   ensureTlsCertificates(cfg.tlsCertPath, cfg.tlsKeyPath, cfg.nodeEnv);
 
-  // ขั้นตอนที่ 2: ตรวจสอบความถูกต้องของค่าตั้งค่าก่อนเปิด Listener (Fail-Closed Production Validation — แก้ไข P1 ข้อ 15)
+  // ขั้นตอนที่ 2: ตรวจสอบความถูกต้องของค่าตั้งค่าและคู่ใบรับรอง TLS ก่อนเปิด Listener (Fail-Closed Production Validation)
   validateProductionConfig(cfg);
 
-  // ขั้นตอนที่ 3: ตรวจสอบสถานะฐานข้อมูลแบบ Read-Only (MySQL Production/Standalone ห้ามแก้ Schema อัตโนมัติตอน Startup)
-  // หากต้องการปรับปรุง Schema ให้รัน `npm run db:migrate` โดยตรงจาก CLI เท่านั้น
+  // ขั้นตอนที่ 3: ตรวจสอบสถานะฐานข้อมูลแบบ Read-Only (MySQL Production/Standalone ห้ามแก้ Schema หรือ Insert ข้อมูลอัตโนมัติตอน Startup)
   await runMigrations({ startupReadOnlyOnMysql: true });
   await ensureBaselineSystemCatalog({ startupReadOnlyOnMysql: true });
 
@@ -197,7 +259,7 @@ export async function startStandaloneServers(): Promise<{
     }
   }
 
-  // ขั้นตอนที่ 4: เริ่มต้น Background Scheduler สำหรับดึงข้อมูลสแกนนิ้วอัตโนมัติตามตาราง sync_schedules (00:00 และ 08:00 น.)
+  // ขั้นตอนที่ 4: เริ่มต้น Background Scheduler สำหรับดึงข้อมูลสแกนนิ้วอัตโนมัติ (ใน Production เริ่มในโหมด Standby เว้นแต่เปิด SCANNER_AUTO_SCHEDULER_ENABLED=true)
   startAutomaticScannerScheduler();
 
   const distPath = path.resolve(process.cwd(), 'dist');
@@ -227,9 +289,15 @@ export async function startStandaloneServers(): Promise<{
   const httpsServer = https.createServer(tlsOptions, app);
   await new Promise<void>((resolve) => {
     httpsServer.listen(cfg.port, cfg.host, () => {
-      console.log(
-        `[Sam_Att V2 Standalone] HTTPS Single-Port Server listening at https://${cfg.host}:${cfg.port}${cfg.publicBasePath} and ${cfg.apiBasePath}`
-      );
+      const msg = `[Sam_Att V2 Standalone] HTTPS Single-Port Server listening at https://${cfg.host}:${cfg.port}${cfg.publicBasePath} and ${cfg.apiBasePath}`;
+      console.log(msg);
+      appLogger.info('SERVER_STARTED', msg, {
+        nodeEnv: cfg.nodeEnv,
+        dataMode: cfg.dataMode,
+        port: cfg.port,
+        dbEngine: cfg.dbEngine,
+        scannerAutoSchedulerEnabled: cfg.scanner.autoSchedulerEnabled,
+      });
       resolve();
     });
   });
@@ -246,6 +314,19 @@ export async function startStandaloneServers(): Promise<{
         resolve();
       });
     });
+  }
+
+  if (!shutdownHandlersRegistered && cfg.nodeEnv !== 'test') {
+    shutdownHandlersRegistered = true;
+    const onSignal = (sig: string) => {
+      gracefulShutdownServers(sig, { httpsServer, previewServer })
+        .catch(() => {})
+        .finally(() => {
+          process.exit(0);
+        });
+    };
+    process.once('SIGINT', () => onSignal('SIGINT'));
+    process.once('SIGTERM', () => onSignal('SIGTERM'));
   }
 
   return { httpsServer, previewServer };

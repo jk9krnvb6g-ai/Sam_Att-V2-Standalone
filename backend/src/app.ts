@@ -75,18 +75,84 @@ export function createExpressApp(options?: { serveStaticBuild?: boolean }): Expr
     next();
   });
 
+  const resolveInstalledCommitShort = (): string => {
+    try {
+      const gitHeadPath = path.resolve(process.cwd(), '.git', 'HEAD');
+      if (fs.existsSync(gitHeadPath)) {
+        const headText = fs.readFileSync(gitHeadPath, 'utf8').trim();
+        if (headText.startsWith('ref:')) {
+          const refRel = headText.replace(/^ref:\s*/, '').trim();
+          const refFile = path.resolve(process.cwd(), '.git', refRel);
+          if (fs.existsSync(refFile)) {
+            return fs.readFileSync(refFile, 'utf8').trim().slice(0, 8);
+          }
+        } else if (/^[0-9a-f]{7,40}$/i.test(headText)) {
+          return headText.slice(0, 8);
+        }
+      }
+    } catch {
+      // ignore git read failure
+    }
+    return process.env.SAM_ATT_COMMIT_SHA?.trim() || 'v2.0.0-standalone';
+  };
+
+  const buildScannerHealthPayload = () => {
+    const exeExists = fs.existsSync(cfg.scanner.readerExePath);
+    const mode = cfg.scanner.autoSchedulerEnabled
+      ? 'ACTIVE_SCHEDULER'
+      : cfg.scanner.syncEnabled
+        ? 'STANDBY_MANUAL_ONLY'
+        : 'STANDBY_DISABLED';
+    return {
+      status: 'READY_OR_STANDBY',
+      mode,
+      syncEnabled: cfg.scanner.syncEnabled,
+      autoSchedulerEnabled: cfg.scanner.autoSchedulerEnabled,
+      exePresent: exeExists,
+      standbySafeForCutover: !cfg.scanner.autoSchedulerEnabled,
+    };
+  };
+
   /**
-   * จุดตรวจสอบสถานะความพร้อมของระบบ (Public Health Endpoint: GET /api/Sam_Att/health)
-   * ทดสอบการคิวรีฐานข้อมูลจริงด้วย SELECT 1 หากฐานข้อมูลล่มจะตอบกลับ HTTP 503 (FAIL_CLOSED)
-   * โดยไม่เปิดเผยข้อมูล Host/Port/Password ของฐานข้อมูลแก่ผู้ใช้ภายนอก (แก้ไข P1 ข้อ 14)
+   * จุดตรวจสอบ Liveness (GET /api/Sam_Att/health/live)
+   * ยืนยันว่าโปรเซส Node.js ของ Sam_Att V2 Standalone ทำงานอยู่
    */
-  app.get(`${cfg.apiBasePath}/health`, async (req: Request, res: Response) => {
+  app.get(`${cfg.apiBasePath}/health/live`, (req: Request, res: Response) => {
+    res.status(200).json({
+      status: 'OK',
+      liveness: 'ALIVE',
+      service: 'Sam_Att V2 Standalone',
+      applicationName: 'Sam_Att V2 Standalone',
+      version: '2.0.0-standalone',
+      commitHash: resolveInstalledCommitShort(),
+      uptimeSeconds: Math.floor(process.uptime()),
+      timestamp: new Date().toISOString(),
+      runtimeNodeVersion: process.version,
+      httpsPort: cfg.port,
+      requestId: req.requestId,
+    });
+  });
+
+  /**
+   * จุดตรวจสอบสถานะความพร้อมของระบบ (Public Health & Readiness Endpoints:
+   * GET /api/Sam_Att/health และ GET /api/Sam_Att/health/ready)
+   * ทดสอบการคิวรีฐานข้อมูลจริงด้วย SELECT 1 หากฐานข้อมูลล่มจะตอบกลับ HTTP 503 (FAIL_CLOSED)
+   * โดยหาก Scanner อยู่ในโหมด Standby (SCANNER_AUTO_SCHEDULER_ENABLED=false) ระบบหลักยังคงถือว่าพร้อมใช้งาน (OK)
+   */
+  const handleReadinessAndHealth = async (req: Request, res: Response) => {
     try {
       const check = await dbQuery<{ ok: number }>('SELECT 1 AS ok');
+      const dbConnected = check.length > 0;
+      const scannerHealth = buildScannerHealthPayload();
       res.status(200).json({
         status: 'OK',
+        readiness: 'READY',
         service: 'Sam_Att V2 Standalone',
+        applicationName: 'Sam_Att V2 Standalone',
         version: '2.0.0-standalone',
+        commitHash: resolveInstalledCommitShort(),
+        uptimeSeconds: Math.floor(process.uptime()),
+        timestamp: new Date().toISOString(),
         dataMode: cfg.dataMode,
         targetNodeEngine: '26.13.1',
         runtimeNodeVersion: process.version,
@@ -95,10 +161,13 @@ export function createExpressApp(options?: { serveStaticBuild?: boolean }): Expr
         apiBasePath: cfg.apiBasePath,
         centralGatewayUsed: false,
         database: {
-          connected: check.length > 0,
+          status: dbConnected ? 'CONNECTED' : 'DISCONNECTED',
+          connected: dbConnected,
           engine: cfg.dbEngine,
           databaseName: cfg.samAttDb.database,
+          readOnlyStartupEnforced: true,
         },
+        scanner: scannerHealth,
         featureFlags: {
           scannerSyncEnabled: cfg.scanner.syncEnabled,
           scannerAutoSchedulerEnabled: cfg.scanner.autoSchedulerEnabled,
@@ -110,13 +179,24 @@ export function createExpressApp(options?: { serveStaticBuild?: boolean }): Expr
       console.error(`[HealthCheck Error][Ref:${req.requestId}]`, err);
       res.status(503).json({
         status: 'FAIL_CLOSED',
+        readiness: 'NOT_READY',
+        service: 'Sam_Att V2 Standalone',
+        applicationName: 'Sam_Att V2 Standalone',
+        version: '2.0.0-standalone',
+        commitHash: resolveInstalledCommitShort(),
+        uptimeSeconds: Math.floor(process.uptime()),
+        timestamp: new Date().toISOString(),
         error: 'DB_UNAVAILABLE',
         message: 'ไม่สามารถเชื่อมต่อฐานข้อมูลหลักของระบบได้ในขณะนี้ (Fail-Closed Mode)',
         centralGatewayUsed: false,
         requestId: req.requestId,
       });
     }
-  });
+  };
+
+  app.get(`${cfg.apiBasePath}/health`, handleReadinessAndHealth);
+  app.get(`${cfg.apiBasePath}/health/ready`, handleReadinessAndHealth);
+  app.get('/Sam_Att/health', handleReadinessAndHealth);
 
   // ผูก Router ของทุกโมดูลเข้าภายใต้พาธ /api/Sam_Att
   const apiPrefix = cfg.apiBasePath;

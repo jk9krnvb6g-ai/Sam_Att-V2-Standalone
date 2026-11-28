@@ -1,0 +1,1476 @@
+# MASTER PROMPT
+# SAM_ATT V2 STANDALONE
+# PHASE 2 — SOURCE CODE AUDIT, FIX & PRODUCTION READINESS
+
+## 1. ROLE AND RESPONSIBILITY
+
+ให้คุณทำหน้าที่เป็นทีมวิศวกรซอฟต์แวร์ระดับ Senior ประกอบด้วย
+
+- Senior Software Architect
+- Senior Full Stack Developer
+- Windows Server Engineer
+- DevOps Engineer
+- Database Engineer
+- Cybersecurity Engineer
+- Software Quality Assurance Engineer
+- Production Release Engineer
+
+ภารกิจของคุณคือ ตรวจสอบ วิเคราะห์ แก้ไข และปรับปรุง Source Code ของ Sam_Att V2 Standalone ให้พร้อมติดตั้งและใช้งานจริงในโรงพยาบาลสามชุก โดยเน้นความเสถียร ความปลอดภัย ความง่ายในการติดตั้ง การบำรุงรักษา และการขยายระบบในอนาคต
+
+Repository:
+
+https://github.com/jk9krnvb6g-ai/Sam_Att-V2-Standalone
+
+ให้ตรวจสอบ Source Code ล่าสุดจาก Repository จริงก่อนเริ่มดำเนินการทุกครั้ง
+
+ห้ามอ้างอิงจากการคาดเดาโครงสร้าง Source Code หรือสร้างระบบใหม่ทดแทนระบบเดิมโดยไม่จำเป็น
+
+---
+
+## 2. PRIMARY OBJECTIVES
+
+เป้าหมายหลักของ Phase 2 ได้แก่
+
+1. ทำให้ Sam_Att V2 พร้อมติดตั้งบน Windows Server 2025
+2. ทำงานแบบ Independent Standalone Application
+3. รองรับ One-Click Installation
+4. ทำงานเป็น Windows Service โดยใช้ WinSW
+5. รองรับ HTTPS โดยตรงผ่าน Node.js
+6. เชื่อมต่อฐานข้อมูล MySQL เดิมอย่างปลอดภัย
+7. รองรับ ScannerReader และเครื่องสแกนเดิม
+8. รองรับ Automated Deployment
+9. รองรับ Application Backup และ Rollback
+10. รองรับ Health Check และ Monitoring
+11. ไม่กระทบ Application อื่นบน Server
+12. ไม่เปลี่ยนแปลง Business Logic และ UX/UI เดิมโดยไม่จำเป็น
+13. สามารถนำแนวทางไปใช้กับ Application อื่นของโรงพยาบาลในอนาคต
+
+---
+
+## 3. VERIFIED SERVER ENVIRONMENT
+
+ข้อมูลต่อไปนี้มาจากการตรวจสอบ Server จริงด้วย PowerShell
+
+### Operating System
+
+- Microsoft Windows Server 2025 Standard Evaluation
+- Current Edition: ServerStandardEval
+- OS Version: 10.0.26100
+- Architecture: 64-bit
+- Evaluation Expiration: 27 May 2027
+- PowerShell: 5.1
+- Administrator Privilege: Available
+
+Windows Server Evaluation สามารถใช้สำหรับการติดตั้งและทดสอบระบบในระยะนี้ได้
+
+ห้ามดำเนินการ Activate Windows, เปลี่ยน Edition หรือ Restart Server โดยอัตโนมัติ
+
+### Hardware
+
+- CPU: Intel Xeon Silver 4314 @ 2.40 GHz
+- CPU Cores: 16
+- Logical Processors: 16
+- RAM: 32 GB
+
+### Storage
+
+Drive C:
+
+- Total: 199.33 GB
+- Free: 174.44 GB
+
+Drive D:
+
+- Total: 311.69 GB
+- Free: 310.96 GB
+- File System: NTFS
+
+กำหนดให้ Drive D เป็นพื้นที่หลักสำหรับ Application, Configuration, Logs, Backup และ Deployment
+
+### Network
+
+- New Application Server: 10.2.0.23
+- Subnet Prefix: /24
+- Old Application Server: 10.2.0.13
+- Database Server: 10.1.0.201
+- Database Port: 3306
+
+ผลตรวจสอบเครือข่าย:
+
+- Database TCP Connection: PASS
+- GitHub TCP 443: PASS
+- NPM Registry TCP 443: PASS
+
+หมายเหตุ: TCP Connection ผ่าน ไม่ได้หมายความว่า Database Authentication หรือ Database Schema ผ่านแล้ว
+
+### Installed Software
+
+- Node.js: v26.13.1
+- NPM: 11.20.0
+- Git: 2.56.1.windows.1
+- Visual C++ Redistributable 2015–2022 x86: Installed
+- Visual C++ Redistributable 2015–2022 x64: Installed
+- Visual C++ Version: 14.44.35211
+- Modern .NET Runtime: Not detected in PATH
+- WinSW: Not detected
+- IIS: Installed and Running
+- W3SVC: Running
+- WAS: Running
+- Windows Firewall: Enabled
+
+### Port Availability
+
+จากผลตรวจสอบยังไม่พบ TCP Listener ในช่วง Port 4101–4199
+
+ต้องตรวจสอบ Port Availability และ Port Reservation ซ้ำก่อนติดตั้งจริง
+
+### Existing Directories
+
+มี Directory ต่อไปนี้แล้ว
+
+- D:\WebApps
+- D:\WebApps\Sam_Att
+- D:\WebApps\Procurement
+- D:\Backups
+- D:\Installers
+- D:\Deployments
+
+ยังไม่มี Directory ย่อยของ Sam_Att ตามมาตรฐานใหม่
+
+ให้ Installer สร้าง Directory ที่ขาดโดยอัตโนมัติ โดยไม่ลบหรือเขียนทับข้อมูลเดิมโดยไม่ได้รับอนุญาต
+
+---
+
+## 4. MANDATORY ARCHITECTURE
+
+ใช้สถาปัตยกรรม Independent Standalone Application
+
+### Application Stack
+
+- React
+- Vite
+- TypeScript
+- Node.js
+- Express
+- MySQL
+- WinSW
+- HTTPS
+
+ให้ตรวจสอบ Technology Stack จริงจาก Repository และรักษา Stack เดิมที่ยังใช้งานได้
+
+ห้ามเปลี่ยน Framework หรือเขียนระบบใหม่โดยไม่มีเหตุผลที่จำเป็น
+
+### Architecture Rules
+
+แต่ละ Application ต้องมี
+
+- Independent Application Process
+- Independent HTTPS Port
+- Independent Windows Service
+- Independent Configuration
+- Independent Logs
+- Independent Backup
+- Independent Deployment
+- Independent Health Check
+- Independent Rollback
+
+Application หนึ่งเกิดปัญหาต้องไม่ทำให้ Application อื่นหยุดทำงาน
+
+### Prohibited Mandatory Dependencies
+
+ห้ามกำหนดให้ระบบต้องพึ่งพา
+
+- IIS Reverse Proxy
+- Central API Gateway
+- PM2
+- Docker
+- Kubernetes
+- XAMPP
+- Central Node.js Process Manager
+- Shared Application Process
+
+IIS ที่ติดตั้งอยู่เดิมต้องสามารถทำงานต่อได้ตามปกติ
+
+ห้ามปิด ถอนการติดตั้ง หรือแก้ไข IIS โดยอัตโนมัติ
+
+---
+
+## 5. APPLICATION PORT STANDARD
+
+กำหนดมาตรฐาน Port ดังนี้
+
+| Application | Port | Windows Service |
+|---|---:|---|
+| Sam_Att V2 | 4101 | SamAttV2Standalone |
+| Procurement | 4102 | ProcurementStandalone |
+| Future Applications | 4103–4198 | Independent Service |
+| Application Monitor | 4199 | SamchukAppMonitor |
+
+Phase 2 นี้ให้ดำเนินการเฉพาะ Sam_Att V2
+
+ห้ามติดตั้ง Procurement หรือ Application Monitor ใน Phase นี้
+
+### Sam_Att Production URL
+
+Frontend:
+
+https://10.2.0.23:4101/Sam_Att/
+
+API Base URL:
+
+https://10.2.0.23:4101/api/Sam_Att/
+
+ให้ Frontend และ Backend ทำงานผ่าน HTTPS Port เดียวกัน
+
+ตรวจสอบให้ React Router, Vite Base Path, Static Assets, API Routes และ SPA Fallback ทำงานถูกต้อง
+
+การ Refresh หน้าเว็บหรือเปิด Deep Link ต้องไม่เกิด 404
+
+API Route ต้องไม่ถูก SPA Fallback ดักและส่ง HTML กลับมาแทน JSON
+
+---
+
+## 6. STANDARD DIRECTORY STRUCTURE
+
+กำหนดโครงสร้าง Directory ดังนี้
+
+```text
+D:\
+├── WebApps\
+│   ├── Sam_Att\
+│   │   ├── App\
+│   │   ├── Config\
+│   │   ├── Logs\
+│   │   ├── Service\
+│   │   └── Certs\
+│   └── Procurement\
+│
+├── Backups\
+│   └── Sam_Att\
+│
+├── Installers\
+│
+└── Deployments\
+    └── Sam_Att\
+```
+
+### Directory Responsibilities
+
+App:
+
+- Application Source Code
+- Production Build
+- Application Dependencies
+- ScannerReader
+- Application Runtime Files
+
+Config:
+
+- Production Environment Configuration
+- Application Settings
+- Configuration ที่ต้องคงอยู่เมื่อ Update
+
+Logs:
+
+- Application Logs
+- Error Logs
+- Scanner Logs
+- Windows Service Logs
+- Deployment Logs
+
+Service:
+
+- WinSW Executable
+- WinSW XML Configuration
+- Service Management Scripts
+
+Certs:
+
+- HTTPS Certificate
+- Private Key
+- Certificate Chain
+
+Backups:
+
+- Application Snapshots
+- Configuration Backup ที่ได้รับการป้องกัน
+- Release Metadata
+- Rollback Information
+
+Deployments:
+
+- Staging Area
+- Release Packages
+- Deployment State
+- Deployment Temporary Files
+
+### Path Rules
+
+- ห้าม Hardcode C:\inetpub\wwwroot\Sam_Att เป็น Production Path
+- ห้ามใช้ Directory ของ IIS เป็น Application Root
+- ห้ามเขียน Log ลง Source Code Directory โดยไม่จำเป็น
+- ห้ามเก็บ Production Secrets ใน Git Repository
+- ห้ามให้ Deployment เขียนทับ Config, Certs หรือ Persistent Data
+- รองรับการกำหนด Application Root ผ่าน Configuration
+- Default Production Root ต้องเป็น D:\WebApps\Sam_Att
+
+---
+
+## 7. PHASE 2.1 — COMPLETE SOURCE CODE AUDIT
+
+ก่อนแก้ไข Source Code ให้ตรวจสอบ Repository ล่าสุดทั้งหมด
+
+ตรวจสอบและบันทึก
+
+- Current Branch
+- Latest Commit Hash
+- Commit Date
+- Application Version
+- Git Working Tree Status
+- Repository Structure
+- Dependencies
+- Runtime Requirements
+- Environment Variables
+- Build Process
+- Production Startup Process
+- Database Initialization
+- Migration Process
+- Scanner Integration
+- Existing Windows Service Configuration
+- Deployment Scripts
+- Backup Scripts
+- Update Center
+- GitHub Actions
+- Security Configuration
+
+ให้ตรวจสอบไฟล์จริงที่เกี่ยวข้อง เช่น
+
+- package.json
+- package-lock.json
+- .nvmrc
+- server.ts
+- backend/src/server.ts
+- vite.config.ts
+- .env.example
+- Database Adapter
+- Database Migration Modules
+- ScannerReader
+- ScannerSyncCli.runtimeconfig.json
+- scripts/winsw-sam-att.xml
+- deployment/Deploy_Sam_Att.ps1
+- Existing Installer Scripts
+- Existing Health Check Scripts
+- Existing GitHub Update Modules
+- Existing GitHub Workflows
+
+ชื่อไฟล์ข้างต้นเป็นรายการอ้างอิงเบื้องต้น ให้ยืนยัน Path และชื่อไฟล์จริงจาก Repository
+
+### Audit Output
+
+จัดทำรายงาน
+
+- PASS
+- WARNING
+- FAIL
+- NOT TESTED
+- BLOCKED
+
+ระบุ File Path, Function, ปัญหา, ความเสี่ยง และแนวทางแก้ไข
+
+ห้ามรายงาน PASS หากยังไม่ได้ตรวจสอบหรือทดสอบจริง
+
+หลัง Audit ให้ดำเนินการแก้ไขต่อในขอบเขตที่กำหนด ไม่ใช่เพียงสร้างรายงานหรือเสนอแผนงาน
+
+---
+
+## 8. PHASE 2.2 — NODE.JS AND RUNTIME COMPATIBILITY
+
+Server ปัจจุบันติดตั้ง Node.js v26.13.1
+
+จากข้อมูลการตรวจสอบ Repository ก่อนหน้านี้พบว่ามีการอ้างอิง Node.js 22 ใน .nvmrc แต่ต้องตรวจสอบอีกครั้งจาก Source Code ล่าสุด
+
+ให้ดำเนินการดังนี้
+
+1. ตรวจสอบ engines ใน package.json
+2. ตรวจสอบ .nvmrc
+3. ตรวจสอบ Dependencies ทั้งหมด
+4. ตรวจสอบ Native Modules
+5. ตรวจสอบ TypeScript Runtime
+6. ตรวจสอบ tsx และ Production Dependencies
+7. ตรวจสอบ Windows Compatibility
+8. ตรวจสอบ Node.js 22 LTS
+9. ตรวจสอบ Node.js 26 หากรองรับจริง
+10. กำหนด Supported Production Runtime ที่ผ่านการทดสอบ
+
+ห้ามสรุปว่า Node.js 26 รองรับ Production เพียงเพราะ Version สูงกว่า Minimum Requirement
+
+ห้ามถอน Node.js เดิมหรือเปลี่ยน Global Runtime โดยอัตโนมัติ
+
+หากต้องใช้ Node.js Version เฉพาะ ให้พิจารณา Application-specific Runtime ที่ไม่กระทบ Application อื่น
+
+### Production Build Requirements
+
+ตรวจสอบว่า Production Startup ไม่ล้มเหลวเนื่องจาก Dependency ที่อยู่ใน devDependencies
+
+หาก Production ต้องใช้ tsx ให้จัดการ Dependency ให้ถูกต้อง หรือสร้าง Production Build ที่สามารถรันด้วย Node.js ได้โดยตรง
+
+ห้ามใช้ npm run dev เป็น Production Service
+
+ใช้ npm ci สำหรับการติดตั้ง Dependency ที่ทำซ้ำได้
+
+ห้ามใช้ npm audit fix --force โดยอัตโนมัติ
+
+ห้าม Upgrade Dependencies ทั้งหมดโดยไม่จำเป็น
+
+---
+
+## 9. PHASE 2.3 — DATABASE PRODUCTION SAFETY
+
+ส่วนนี้มีความสำคัญสูงสุด
+
+ระบบต้องเชื่อมต่อ MySQL Database เดิมที่
+
+- Host: 10.1.0.201
+- Port: 3306
+
+ให้ตรวจสอบ Database Name จาก Configuration จริง
+
+ห้ามคาดเดา Database Name, Username หรือ Password
+
+### Production Startup Rules
+
+Production Startup ต้องไม่ดำเนินการต่อไปนี้โดยอัตโนมัติ
+
+- CREATE DATABASE
+- DROP DATABASE
+- CREATE TABLE
+- DROP TABLE
+- ALTER TABLE
+- TRUNCATE TABLE
+- DELETE Existing Data
+- Import SQL Dump
+- Reset Database
+- Seed Demo Data
+- Insert Default System Catalog
+- Automatic Database Migration
+- Automatic Database Restore
+- SQLite Fallback
+
+ต้องตรวจสอบทุก Startup Function และทุก Database Adapter ว่ามีการเขียนข้อมูลหรือเปลี่ยน Schema โดยอัตโนมัติหรือไม่
+
+ตรวจสอบเป็นพิเศษ
+
+- runMigrations
+- ensureBaselineSystemCatalog
+- Database Initialization
+- Default User Creation
+- Default Role Creation
+- Default Permission Creation
+- Demo Seed
+- SQLite Fallback
+- Scanner Scheduler Startup
+- Background Jobs
+
+ให้ยืนยันว่า Startup Schema Verification เป็น Read-only จริง
+
+หมายเหตุ: Read-only Startup หมายถึงการไม่เปลี่ยน Schema หรือสร้างข้อมูลเริ่มต้นโดยอัตโนมัติ ไม่ใช่การปิดกั้น Business Operations ที่ระบบต้องบันทึกข้อมูลตามปกติหลังผ่านการตรวจสอบแล้ว
+
+### Database Preflight
+
+ก่อนเริ่ม Application ให้ตรวจสอบ
+
+- Database Network Connectivity
+- Database Authentication
+- Database Name
+- Database Server Version
+- Required Tables
+- Required Columns
+- Required Indexes
+- Schema Compatibility
+- Database Permissions
+- Character Set
+- Time Zone Compatibility
+
+หาก Database ไม่พร้อม
+
+- หยุดการติดตั้งหรือ Startup อย่างปลอดภัย
+- แสดง Error ที่เข้าใจง่าย
+- บันทึก Error โดยไม่เปิดเผย Password
+- ห้ามเปลี่ยนไปใช้ SQLite
+- ห้ามสร้างฐานข้อมูลใหม่
+- ห้าม Migration อัตโนมัติ
+
+### Migration Policy
+
+Migration ต้องแยกจาก Installation และ Deployment ปกติ
+
+หากพบว่าจำเป็นต้อง Migration ให้จัดทำ
+
+- Migration Plan
+- SQL Changes
+- Impact Analysis
+- Backup Requirements
+- Rollback Considerations
+
+รอการอนุมัติจากผู้ดูแลระบบก่อนดำเนินการจริง
+
+ห้ามใช้ Production Database ใน Automated Tests
+
+---
+
+## 10. PHASE 2.4 — SCANNER READER COMPATIBILITY
+
+ตรวจสอบ ScannerReader ที่มีอยู่ทั้งหมด
+
+รวมถึง
+
+- ScannerSyncCli.exe
+- ScannerSyncCli.dll
+- ScannerSyncCli.runtimeconfig.json
+- Native Vendor DLLs
+- Scanner Configuration
+- Scanner Scheduler
+- Scanner Logs
+- Scanner Error Handling
+
+ให้ตรวจสอบว่า ScannerReader เป็น
+
+- Self-contained Application หรือ
+- Framework-dependent Application
+
+ตรวจสอบ .NET Version และ Architecture ที่ต้องการจริง
+
+หากต้องติดตั้ง .NET Runtime ให้ Installer ตรวจสอบ Version ก่อน และเสนอการติดตั้งเฉพาะ Runtime ที่จำเป็นจากแหล่งทางการ
+
+ห้ามติดตั้ง .NET SDK หากต้องการเพียง Runtime
+
+ห้ามเปลี่ยน Scanner Protocol หรือ Vendor SDK โดยไม่จำเป็น
+
+### Scanner Safety
+
+ต้องป้องกัน
+
+- Duplicate Scanner Scheduler
+- Duplicate Attendance Records
+- Multiple Concurrent Sync Jobs
+- Infinite Retry
+- Hanging Scanner Process
+- Unbounded Log Growth
+
+ระหว่างย้ายระบบจาก 10.2.0.13 ไป 10.2.0.23 ให้ Scanner Scheduler ของ Server ใหม่อยู่ในสถานะ Disabled หรือ Standby จนกว่าจะได้รับอนุมัติ Cutover
+
+ห้ามหยุด Server เก่าโดยอัตโนมัติ
+
+ห้ามเปิด Scanner Scheduler ทั้งสอง Server พร้อมกันโดยไม่มีการยืนยันความปลอดภัย
+
+ให้ตรวจสอบการป้องกัน Duplicate Attendance Records จาก Source Code และ Database Constraints จริง
+
+---
+
+## 11. PHASE 2.5 — HTTPS AND SECURITY
+
+Application ต้องรองรับ HTTPS โดยตรงผ่าน Node.js และ Express
+
+Production Port: 4101
+
+### Certificate Requirements
+
+- รองรับ Certificate และ Private Key จาก Configured Path
+- รองรับ PEM Certificate
+- รองรับ Certificate Chain
+- รองรับ IP SAN: 10.2.0.23
+- รองรับ Internal DNS Name หากมีการกำหนด
+- ตรวจสอบ Certificate Expiration
+- ตรวจสอบ Certificate และ Private Key ว่าตรงกัน
+- ตรวจสอบ Certificate File Permissions
+
+Production Startup ต้องไม่สร้าง Self-signed Certificate ที่ไม่ถูกต้องโดยอัตโนมัติ
+
+หากไม่มี Certificate ที่ถูกต้อง ให้แจ้ง Error และหยุดอย่างปลอดภัย
+
+สามารถมี Certificate Preparation Script แยกต่างหากสำหรับผู้ดูแลระบบ
+
+หากใช้ Internal CA ให้จัดทำวิธีนำ CA Certificate ไปติดตั้งบน Client อย่างถูกต้อง
+
+ห้ามปิด Certificate Verification แบบถาวร
+
+ห้ามใช้ NODE_TLS_REJECT_UNAUTHORIZED=0 ใน Production
+
+### Application Security
+
+ตรวจสอบและปรับปรุงตามความจำเป็น
+
+- Authentication
+- Authorization
+- RBAC
+- Session Security
+- Secure Cookies
+- HttpOnly Cookies
+- SameSite Policy
+- CSRF Protection ตามรูปแบบ Authentication
+- CORS Allowlist
+- Security Headers
+- Rate Limiting
+- Request Body Limits
+- SQL Injection Prevention
+- Input Validation
+- Error Handling
+- Sensitive Data Redaction
+- Audit Logging
+- Password Hashing
+- Default Password Handling
+- Force Password Change
+- Production Debug Disable
+
+ห้ามเปิดเผย
+
+- Database Password
+- API Keys
+- Session Tokens
+- JWT Secrets
+- Private Keys
+- Personal Data ที่ไม่จำเป็น
+- ข้อมูลการลงเวลาของบุคลากรใน Diagnostic Logs โดยไม่จำเป็น
+
+ให้สอดคล้องกับแนวทาง PDPA และนโยบายความปลอดภัยของโรงพยาบาล
+
+ห้ามอ้างว่า PDPA Compliant โดยสมบูรณ์หากยังไม่ได้รับการประเมินจริง
+
+---
+
+## 12. PHASE 2.6 — WINDOWS SERVICE WITH WINSW
+
+กำหนด Windows Service
+
+- Service ID: SamAttV2Standalone
+- Display Name: Sam_Att V2 Standalone
+- Startup Type: Automatic Delayed Start
+- Application Port: 4101
+- Working Directory: D:\WebApps\Sam_Att\App
+
+WinSW Directory:
+
+D:\WebApps\Sam_Att\Service
+
+ให้ตรวจสอบ WinSW Version ที่รองรับ Configuration จริง
+
+ดาวน์โหลดจาก Official Release เท่านั้น
+
+ตรวจสอบ Integrity ของ Release Package ตามข้อมูลที่เชื่อถือได้
+
+### Service Requirements
+
+- Start Service
+- Stop Service
+- Restart Service
+- Service Status
+- Automatic Startup
+- Failure Recovery
+- Graceful Shutdown
+- Controlled Stop Timeout
+- Log Rotation
+- Exit Code Handling
+- Environment Configuration
+- Least Privilege Service Account
+
+ให้ตรวจสอบสิทธิ์ของ Service Account ต่อ
+
+- Application Directory
+- Configuration Directory
+- Logs Directory
+- Certificate Private Key
+- ScannerReader
+- Database Network
+
+หลีกเลี่ยงการใช้ LocalSystem หากไม่จำเป็น
+
+Service ต้องทำงานได้โดยไม่ต้องมีผู้ใช้ Login เข้า Windows
+
+ห้ามใช้ Scheduled Task เป็น Service Manager หลักแทน WinSW
+
+ห้ามใช้คำสั่งต่อไปนี้ในการ Deployment ปกติ
+
+- taskkill /F /IM node.exe
+- Stop-Process -Name node -Force
+- iisreset
+- Restart-Computer
+- shutdown /r
+
+หากต้องหยุด Application ให้หยุดเฉพาะ Service ของ Sam_Att เท่านั้น
+
+---
+
+## 13. PHASE 2.7 — ONE-CLICK INSTALLER
+
+ให้สร้างหรือปรับปรุงชุด Installer ที่มีอยู่ โดยหลีกเลี่ยงการสร้าง Script ซ้ำซ้อน
+
+ไฟล์เป้าหมายที่ต้องมีหรือมีความสามารถเทียบเท่า
+
+- Install_Sam_Att.bat
+- Install_Sam_Att.ps1
+- Preflight_Sam_Att.ps1
+- Deploy_Sam_Att.ps1
+- HealthCheck_Sam_Att.ps1
+- Backup_Sam_Att.ps1
+- Rollback_Sam_Att.ps1
+- Uninstall_Sam_Att.ps1
+
+ให้รองรับ Windows PowerShell 5.1
+
+หากต้องใช้ PowerShell 7 ให้ระบุเหตุผลและตรวจสอบ Prerequisite อย่างชัดเจน
+
+### Installer Workflow
+
+Step 01 — Administrator Check
+
+Step 02 — Server Environment Check
+
+Step 03 — Existing Installation Detection
+
+Step 04 — Directory Preparation
+
+Step 05 — Runtime Verification
+
+Step 06 — Scanner Runtime Verification
+
+Step 07 — WinSW Verification
+
+Step 08 — Application Source Preparation
+
+Step 09 — Production Configuration Preparation
+
+Step 10 — Database Read-only Preflight
+
+Step 11 — HTTPS Certificate Verification
+
+Step 12 — Dependency Installation
+
+Step 13 — Type Check, Lint and Test
+
+Step 14 — Production Build
+
+Step 15 — Application Backup หากมีระบบเดิม
+
+Step 16 — Windows Service Registration
+
+Step 17 — Firewall Rule Configuration
+
+Step 18 — Start Application Service
+
+Step 19 — Health Check
+
+Step 20 — Installation Summary
+
+### Installer Behavior
+
+Installer ต้องมี
+
+- Clear Progress Display
+- PASS/WARNING/FAIL Status
+- Installation Log
+- Error Handling
+- Exit Codes
+- Retry Guidance
+- Dry Run หรือ WhatIf Mode
+- Idempotent Installation
+- Existing Installation Detection
+- Safe Re-run
+- Installation Lock
+- Failure Recovery
+
+หาก Installer พบว่าระบบติดตั้งแล้ว ต้องไม่เขียนทับระบบเดิมโดยอัตโนมัติ
+
+ให้แยกโหมด
+
+- Preflight
+- Fresh Install
+- Repair
+- Upgrade
+- Uninstall
+
+### Configuration Wizard
+
+สำหรับการติดตั้งครั้งแรก ให้รองรับการกำหนด
+
+- Server IP
+- Application Port
+- Database Host
+- Database Port
+- Database Name
+- Database Username
+- Database Password
+- Certificate Path
+- Private Key Path
+- Scanner Configuration
+- Backup Directory
+
+Database Password ต้องรับข้อมูลแบบ Secure Input และไม่แสดงใน Console หรือ Log
+
+Production Configuration ต้องอยู่นอก Git Working Tree
+
+ห้ามใช้ Default Password ที่ไม่ปลอดภัย
+
+---
+
+## 14. PHASE 2.8 — FIREWALL MANAGEMENT
+
+ให้ Installer ตรวจสอบ Windows Firewall ก่อนสร้าง Rule
+
+กำหนด Rule เฉพาะ Sam_Att
+
+- Rule Name: Sam_Att V2 HTTPS 4101
+- Direction: Inbound
+- Protocol: TCP
+- Local Port: 4101
+- Action: Allow
+
+ให้รองรับการกำหนด RemoteAddress ตามเครือข่ายที่โรงพยาบาลอนุญาต
+
+ห้ามคาดเดาว่าเครือข่ายโรงพยาบาลมีเพียง 10.2.0.0/24
+
+ให้ผู้ดูแลระบบยืนยัน Allowed Network Scope
+
+ห้าม
+
+- Disable Windows Firewall
+- เปิด Port 4101–4199 ทั้งหมด
+- เปิดทุก Inbound Connection
+- ลบ Firewall Rules ของ Application อื่น
+- เปลี่ยน Default Firewall Policy
+
+Firewall Script ต้องสามารถรันซ้ำได้โดยไม่สร้าง Rule ซ้ำ
+
+---
+
+## 15. PHASE 2.9 — AUTOMATED DEPLOYMENT
+
+ปรับปรุง Deployment Script เดิมให้รองรับ Windows Service และ Directory Structure ใหม่
+
+### Deployment Workflow
+
+1. Acquire Deployment Lock
+2. Verify Administrator Privilege
+3. Verify Existing Application
+4. Verify Service Status
+5. Verify Available Disk Space
+6. Verify Runtime
+7. Fetch Git Repository
+8. Resolve Approved Commit or Release
+9. Prepare Staging Directory
+10. Install Dependencies in Staging
+11. Run Type Check
+12. Run Lint
+13. Run Automated Tests
+14. Build Production Application
+15. Verify Build Artifacts
+16. Verify Database Schema แบบ Read-only
+17. Create Application Backup
+18. Stop SamAttV2Standalone Service Only
+19. Deploy Approved Build
+20. Preserve Configuration and Certificates
+21. Start SamAttV2Standalone Service
+22. Run Health Checks
+23. Verify Application Version
+24. Commit Deployment State
+25. Release Deployment Lock
+
+หาก Deployment ล้มเหลวหลังหยุด Service ให้เข้าสู่ Application Rollback ตามเงื่อนไขที่กำหนด
+
+### Deployment Rules
+
+- ห้าม Build ทับ Application ที่กำลังทำงาน
+- ห้าม Git Pull ทับ Production Working Directory โดยไม่มีการควบคุม
+- ห้าม Deploy Commit ที่ไม่ทราบ Hash
+- ห้าม Deploy เมื่อ Automated Test ล้มเหลว
+- ห้ามข้าม Test โดยอัตโนมัติ
+- ห้ามแก้ไข Database Schema
+- ห้ามเปลี่ยน Production Configuration โดยไม่แจ้ง
+- ห้าม Restart Application อื่น
+- ห้าม Restart Windows Server
+
+ให้ลด Downtime โดย Build และ Test ใน Staging ก่อนหยุด Service
+
+### Existing Update Center
+
+หาก Repository มี GitHub Update Center อยู่แล้ว ให้ตรวจสอบและปรับปรุงให้ทำงานร่วมกับ Deployment Engine เดียวกัน
+
+ห้ามสร้าง Update Engine หลายชุดที่ทำงานขัดแย้งกัน
+
+ต้องมีการควบคุมสิทธิ์ การอนุมัติ Release การตรวจสอบ Integrity และ Audit Log
+
+ห้ามให้ Web Application สามารถรัน Arbitrary PowerShell หรือคำสั่ง Administrator จาก User Input
+
+หากจำเป็นต้องมี Privileged Deployment Agent ให้แยกขอบเขตสิทธิ์ออกจาก Web Application อย่างชัดเจน
+
+---
+
+## 16. PHASE 2.10 — APPLICATION BACKUP AND ROLLBACK
+
+กำหนด Backup Root
+
+D:\Backups\Sam_Att
+
+### Backup Requirements
+
+Backup ต้องสามารถจัดเก็บ
+
+- Application Version
+- Git Commit Hash
+- Production Build
+- Required Runtime Files
+- Dependency Lockfile
+- Service Configuration
+- Protected Application Configuration
+- Release Metadata
+- Deployment Timestamp
+- Backup Integrity Information
+
+Configuration Backup ที่มี Secrets ต้องจำกัดสิทธิ์และได้รับการป้องกันอย่างเหมาะสม
+
+ห้ามนำ Database Password หรือ Private Key ไปเก็บใน Backup ที่ผู้ใช้ทั่วไปสามารถเข้าถึงได้
+
+### Retention Policy
+
+กำหนดค่าเริ่มต้นที่ปรับเปลี่ยนได้
+
+- เก็บ Application Release ล่าสุดอย่างน้อย 5 ชุด
+- เก็บ Backup ตามระยะเวลา 30 วัน
+- รักษา Last Known Good Release
+- ห้ามลบ Backup ที่จำเป็นสำหรับ Active Rollback
+- ตรวจสอบ Disk Space ก่อน Backup
+
+### Automatic Application Rollback
+
+หากเกิดเหตุการณ์ต่อไปนี้หลัง Deployment
+
+- Service Start Failed
+- Application Startup Failed
+- HTTPS Health Check Failed
+- Database Readiness Failed
+- Frontend Load Failed
+- Required Build Artifacts Missing
+
+ให้ดำเนินการ
+
+1. Stop Sam_Att Service
+2. Restore Previous Known Good Application
+3. Preserve Production Configuration
+4. Restore Compatible Service Configuration หากจำเป็น
+5. Start Sam_Att Service
+6. Verify Health Check
+7. Record Rollback Result
+
+หาก Rollback ล้มเหลว ให้หยุดการดำเนินการและแจ้งผู้ดูแลระบบ
+
+### Database Backup Policy
+
+Database Backup เป็นงานแยกจาก Application Backup
+
+ห้ามทำ Database Restore อัตโนมัติ
+
+ห้ามนำ SQL Dump เก่ามาเขียนทับ Production Database
+
+ห้ามลบหรือแก้ไข Attendance Records เพื่อแก้ปัญหา Deployment
+
+---
+
+## 17. PHASE 2.11 — HEALTH CHECK AND MONITORING
+
+ให้ตรวจสอบหรือพัฒนา Health Check Endpoint ภายใต้ API Base Path
+
+ตัวอย่าง Endpoint
+
+- /api/Sam_Att/health
+- /api/Sam_Att/health/live
+- /api/Sam_Att/health/ready
+
+ให้รักษา Compatibility กับ Health Endpoint เดิม
+
+### Liveness
+
+ตรวจสอบ
+
+- Application Process
+- HTTP/HTTPS Response
+- Event Loop Responsiveness ตามความเหมาะสม
+
+### Readiness
+
+ตรวจสอบ
+
+- Application Initialization
+- Database Connectivity
+- Database Schema Compatibility
+- Required Configuration
+- Critical Application Dependencies
+
+### Scanner Status
+
+ให้รายงานแยกจาก Core Application Readiness ตามความสำคัญของ Scanner ต่อการใช้งานระบบ
+
+หาก Scanner อยู่ใน Standby ตามแผน Migration ต้องไม่รายงานเป็นความผิดพลาดที่ทำให้ Application หลักใช้งานไม่ได้โดยไม่มีเหตุผล
+
+### Health Check Response
+
+ควรมีข้อมูลที่จำเป็น เช่น
+
+- Status
+- Application Name
+- Application Version
+- Commit Hash
+- Uptime
+- Timestamp
+- Database Status
+- Scanner Status
+
+ห้ามเปิดเผย Database Credentials, Internal Stack Trace หรือ Sensitive Configuration
+
+Detailed Diagnostics ต้องจำกัดสิทธิ์
+
+### Health Check Script
+
+ต้องตรวจสอบ
+
+- Windows Service Status
+- TCP Port 4101
+- HTTPS Certificate Validation
+- Frontend URL
+- API Health Endpoint
+- Database Readiness
+- Expected Application Version
+
+ห้ามใช้การข้าม Certificate Validation เป็น Default Production Health Check
+
+ต้องรองรับ Timeout และ Retry ที่เหมาะสม
+
+---
+
+## 18. PHASE 2.12 — LOGGING AND ERROR HANDLING
+
+ให้ Application จัดเก็บ Log แยกตามประเภท
+
+- Application Log
+- Error Log
+- Scanner Log
+- Service Log
+- Installation Log
+- Deployment Log
+- Rollback Log
+- Security Audit Log
+
+กำหนด Log Rotation และ Retention ที่ปรับเปลี่ยนได้
+
+ต้องป้องกัน Log เต็ม Drive D
+
+ห้ามบันทึก
+
+- Password
+- Private Key
+- Session Token
+- Authorization Header
+- ข้อมูลส่วนบุคคลที่ไม่จำเป็น
+- Full Production Database Connection String
+
+ให้รองรับ Error Message ที่ผู้ดูแลระบบสามารถเข้าใจและแก้ไขได้
+
+ใช้ Timestamp ที่ชัดเจนและมี Time Zone
+
+ตรวจสอบการทำงานร่วมกับ Asia/Bangkok โดยไม่ทำให้ข้อมูลวันและเวลาเดิมเปลี่ยนแปลงผิดพลาด
+
+---
+
+## 19. PHASE 2.13 — TESTING AND QUALITY ASSURANCE
+
+ต้องดำเนินการทดสอบจริงเท่าที่ Environment รองรับ
+
+### Source Code Testing
+
+- npm ci
+- TypeScript Type Check
+- Lint
+- Unit Tests
+- Integration Tests
+- Production Build
+
+### Application Testing
+
+- Login
+- Logout
+- Authentication
+- Authorization
+- Existing User Roles
+- Existing Attendance Functions
+- Existing Reports
+- Existing Scanner Integration
+- Existing Settings
+- Frontend Routing
+- API Routing
+- Deep Link Refresh
+- Static Assets
+
+### Database Safety Testing
+
+- Correct Database Configuration
+- Incorrect Database Password
+- Database Unavailable
+- Missing Required Table
+- Missing Required Column
+- Schema Mismatch
+- No Automatic Migration
+- No Automatic Seed
+- No SQLite Fallback
+
+ใช้ Test Database หรือ Mock Database เท่านั้น
+
+ห้ามทดสอบ Failure Scenario โดยทำลาย Production Database
+
+### Windows Compatibility Testing
+
+- Windows Server 2025
+- Windows PowerShell 5.1
+- Paths containing spaces
+- WinSW Configuration
+- Windows Service Startup
+- Windows Service Shutdown
+- Graceful Shutdown
+- Port Conflict
+- Missing Runtime
+- Missing Certificate
+- Invalid Certificate
+- Insufficient Disk Space
+- Access Denied
+
+### Deployment Testing
+
+- Fresh Install
+- Re-run Installer
+- Existing Installation Detection
+- Successful Upgrade
+- Failed Build
+- Failed Service Startup
+- Failed Health Check
+- Automatic Application Rollback
+- Configuration Preservation
+- Certificate Preservation
+- Other Services Unaffected
+
+### Test Reporting Rules
+
+ต้องแยกผลการทดสอบเป็น
+
+- PASS
+- FAIL
+- NOT TESTED
+- BLOCKED
+
+ห้ามสร้างผลการทดสอบปลอม
+
+ห้ามอ้างว่าทดสอบ Windows Server จริงแล้ว หาก Environment ปัจจุบันเป็น Linux หรือ Browser Sandbox
+
+หากไม่สามารถทดสอบ Windows Service จริงได้ ให้จัดทำ Windows Test Script และ Manual Acceptance Checklist สำหรับผู้ดูแลระบบ
+
+---
+
+## 20. PHASE 2.14 — GITHUB AND CI/CD
+
+ตรวจสอบ GitHub Actions เดิม
+
+ปรับปรุงให้รองรับตามความเหมาะสม
+
+- Dependency Installation
+- Type Check
+- Lint
+- Automated Tests
+- Production Build
+- Windows Compatibility Checks
+- PowerShell Script Validation
+- Release Artifact Generation
+- Artifact Integrity Verification
+
+ควรมี Windows Runner สำหรับตรวจสอบ Windows-specific Scripts
+
+หากต้องใช้ Self-hosted Runner ให้จัดทำข้อเสนอแยกต่างหาก ห้ามติดตั้งบน Production Server โดยอัตโนมัติ
+
+### Git Rules
+
+- ตรวจสอบ Latest Commit ก่อนเริ่ม
+- รักษา Existing Changes
+- ห้ามลบ Existing User Changes
+- ห้าม Commit Secrets
+- ห้าม Force Push
+- ห้าม Rewrite Git History
+- ห้าม Merge เข้า Main โดยไม่ได้รับอนุมัติ
+- ห้าม Auto Deploy เข้า Production
+
+ให้สร้าง Branch สำหรับ Phase 2 หาก Environment รองรับ
+
+ตัวอย่าง
+
+feature/phase2-production-readiness
+
+จัดทำ Commit ที่มีความหมายและตรวจสอบย้อนหลังได้
+
+หาก Environment ไม่สามารถสร้าง Branch หรือ Commit ได้ ให้ส่งมอบ Source Code Changes และ Diff ที่ชัดเจนแทน
+
+---
+
+## 21. DOCUMENTATION REQUIREMENTS
+
+สร้างหรือปรับปรุงเอกสารต่อไปนี้ โดยใช้ชื่อเดิมหากมีเอกสารที่ทำหน้าที่เทียบเท่าอยู่แล้ว
+
+- README.md
+- INSTALLATION_WINDOWS_SERVER.md
+- SERVER_REQUIREMENTS.md
+- PRODUCTION_CONFIGURATION.md
+- DATABASE_SAFETY.md
+- SCANNER_CONFIGURATION.md
+- HTTPS_SETUP.md
+- DEPLOYMENT_GUIDE.md
+- BACKUP_ROLLBACK.md
+- TROUBLESHOOTING.md
+- PRODUCTION_CHECKLIST.md
+- MIGRATION_CUTOVER.md
+- PHASE2_AUDIT_REPORT.md
+- PHASE2_TEST_REPORT.md
+- CHANGELOG.md
+
+เอกสารสำหรับผู้ดูแลระบบควรอธิบายเป็นภาษาไทย และคงคำสั่งหรือ Technical Terminology ภาษาอังกฤษตามความเหมาะสม
+
+ต้องมีคำสั่ง PowerShell ที่สามารถ Copy และ Paste ได้
+
+---
+
+## 22. STRICT PROHIBITIONS
+
+ห้ามดำเนินการต่อไปนี้โดยเด็ดขาด เว้นแต่ได้รับการอนุมัติโดยตรง
+
+1. เขียนระบบใหม่ทั้งหมด
+2. เปลี่ยน UX/UI โดยไม่จำเป็น
+3. เปลี่ยน Business Logic เดิม
+4. ลบ Existing Features
+5. เปลี่ยน Database Schema อัตโนมัติ
+6. Reset Production Database
+7. Seed Demo Data ใน Production
+8. Import SQL Dump อัตโนมัติ
+9. Restore Production Database อัตโนมัติ
+10. ใช้ SQLite Fallback ใน Production
+11. ปิด Windows Firewall
+12. ปิดหรือถอน IIS
+13. หยุด Application อื่น
+14. Kill Node.js ทุก Process
+15. Restart Windows Server
+16. ถอน Global Node.js
+17. เปลี่ยน Windows Edition
+18. Activate Windows
+19. เปิด Port ทั้งหมดโดยไม่จำเป็น
+20. เปิดเผย Production Secrets
+21. Merge เข้า Main โดยไม่ได้รับอนุมัติ
+22. Deploy เข้า Production โดยไม่ได้รับอนุมัติ
+23. สร้างผลการทดสอบปลอม
+24. ระบุว่าระบบพร้อมใช้งานจริงทั้งที่ยังไม่ได้ทดสอบ
+25. หยุด Server เก่า 10.2.0.13 โดยอัตโนมัติ
+26. เปิด Scanner Scheduler บน Server ใหม่ก่อนอนุมัติ Cutover
+
+---
+
+## 23. EXECUTION ORDER
+
+ให้ดำเนินงานตามลำดับภายใน Master Prompt นี้
+
+### Stage A — Audit
+
+ตรวจสอบ Repository ล่าสุดและระบุปัญหาจริง
+
+### Stage B — Critical Safety Fixes
+
+แก้ไข Database Startup Safety, Production Configuration, HTTPS และ Runtime Compatibility
+
+### Stage C — Windows Standalone
+
+แก้ไข Directory Structure, WinSW, Service Account และ Graceful Shutdown
+
+### Stage D — Installation and Deployment
+
+สร้างหรือปรับปรุง Installer, Preflight, Deployment และ Firewall Management
+
+### Stage E — Backup and Recovery
+
+ปรับปรุง Application Backup, Rollback และ Deployment Recovery
+
+### Stage F — Testing
+
+รัน Automated Tests และตรวจสอบ Windows Compatibility เท่าที่ทำได้
+
+### Stage G — Documentation
+
+จัดทำเอกสารติดตั้ง คู่มือผู้ดูแลระบบ และรายงานผล
+
+### Stage H — Final Review
+
+ตรวจสอบ Source Code Changes ทั้งหมดอีกครั้ง
+
+ห้ามหยุดหลัง Stage A เพียงเพราะได้จัดทำ Audit Report แล้ว
+
+ให้ดำเนินการแก้ไข Source Code ต่อจริงในทุก Stage ที่ Environment รองรับ
+
+หากพบ Blocker ให้บันทึก Blocker และดำเนินงานส่วนอื่นที่ไม่ขึ้นกับ Blocker ต่อไป
+
+หากข้อจำกัดของ Context Window ทำให้ไม่สามารถดำเนินงานทั้งหมดในครั้งเดียว ให้บันทึกสถานะลงใน PHASE2_PROGRESS.md พร้อมระบุ Stage ล่าสุด งานที่เสร็จ และงานที่เหลือ เพื่อให้สามารถดำเนินการต่อได้โดยไม่ทำงานซ้ำ
+
+---
+
+## 24. FINAL DELIVERABLES
+
+เมื่อดำเนินงานเสร็จ ให้ส่งมอบ
+
+### A. Source Code Changes
+
+ระบุ
+
+- Files Added
+- Files Modified
+- Files Removed
+- Reason for Each Change
+- Compatibility Impact
+- Security Impact
+
+### B. Installation Package
+
+ชุดติดตั้งที่มี Entry Point หลัก
+
+Install_Sam_Att.bat
+
+โดยสามารถตรวจสอบ Prerequisites และนำผู้ดูแลระบบเข้าสู่ขั้นตอนติดตั้งได้
+
+### C. Deployment Package
+
+- Deployment Script
+- Backup Script
+- Rollback Script
+- Health Check Script
+- Service Management Configuration
+
+### D. Audit Report
+
+ระบุปัญหาก่อนแก้ไขและผลหลังแก้ไข
+
+### E. Test Report
+
+ระบุผลการทดสอบจริง พร้อม Environment และข้อจำกัด
+
+### F. Server Preparation Instructions
+
+ระบุเฉพาะ Software และ Runtime ที่จำเป็นต้องติดตั้งเพิ่มเติมจริง
+
+ห้ามแนะนำให้ติดตั้ง Software ที่ไม่จำเป็น
+
+### G. Production Installation Instructions
+
+ระบุขั้นตอนตั้งแต่
+
+- Download Repository
+- Prepare Configuration
+- Run Preflight
+- Prepare HTTPS Certificate
+- Install Application
+- Verify Windows Service
+- Verify Frontend
+- Verify API
+- Verify Database
+- Verify Scanner
+- Approve Cutover
+
+### H. Remaining Risks and Blockers
+
+ระบุสิ่งที่ยังไม่ได้ทดสอบหรือยังต้องได้รับการอนุมัติ
+
+---
+
+## 25. DEFINITION OF DONE
+
+Phase 2 จะถือว่า Source Code พร้อมสำหรับเข้าสู่ Server Preparation และ Acceptance Testing เมื่อ
+
+- Source Code Audit Completed
+- Critical Database Safety Issues Resolved
+- Production Startup Verified
+- Runtime Requirements Verified
+- Windows Directory Structure Supported
+- WinSW Configuration Ready
+- HTTPS Configuration Ready
+- One-Click Installer Ready
+- Deployment Script Ready
+- Application Backup Ready
+- Application Rollback Ready
+- Health Check Ready
+- Scanner Runtime Requirements Identified
+- Automated Tests Passed
+- Production Build Passed
+- Documentation Completed
+- Remaining Blockers Documented
+- No Unauthorized Database Changes
+- No Unauthorized Business Logic Changes
+- No Unauthorized UX/UI Changes
+
+Production Ready จะถือว่าสำเร็จเมื่อผ่านการติดตั้งและ Acceptance Testing บน Windows Server จริง รวมถึงการอนุมัติจากผู้ดูแลระบบแล้วเท่านั้น
+
+---
+
+## 26. FINAL RESPONSE FORMAT
+
+เมื่อดำเนินการเสร็จ ให้สรุปผลเป็นภาษาไทยตามรูปแบบนี้
+
+### 1. Repository Information
+
+- Branch
+- Latest Commit
+- Application Version
+
+### 2. Audit Findings
+
+ตารางปัญหาที่ตรวจพบ ระดับความเสี่ยง และสถานะการแก้ไข
+
+### 3. Source Code Changes
+
+ตารางไฟล์ที่เพิ่มหรือแก้ไข พร้อมเหตุผล
+
+### 4. Runtime Requirements
+
+ระบุ Node.js, .NET Runtime, WinSW และ Software ที่ต้องใช้จริง
+
+### 5. Database Safety Verification
+
+ระบุว่า Startup, Installation และ Deployment มีการเขียน Database หรือเปลี่ยน Schema หรือไม่
+
+### 6. Test Results
+
+แสดง PASS, FAIL, NOT TESTED และ BLOCKED ตามผลจริง
+
+### 7. Installation Readiness
+
+ระบุว่าพร้อมเข้าสู่ Phase 3 หรือยัง
+
+### 8. Remaining Blockers
+
+ระบุปัญหาที่ต้องแก้ก่อนติดตั้ง Production
+
+### 9. Next Step
+
+ให้คำสั่งหรือขั้นตอนที่ผู้ดูแลระบบต้องดำเนินการต่อบน Server 10.2.0.23
+
+---
+
+## START EXECUTION NOW
+
+เริ่มจากตรวจสอบ Repository ล่าสุดทันที
+
+ให้ลงมือแก้ไข Source Code จริงตามขอบเขตทั้งหมด ไม่ใช่เพียงอธิบายหรือเสนอแนวทาง
+
+รักษา Existing Features, Existing UX/UI และ Existing Business Logic ให้มากที่สุด
+
+ให้ความสำคัญสูงสุดกับ Production Database Safety, Application Stability, Windows Standalone Architecture และความสามารถในการติดตั้งและกู้คืนระบบ
+
+ห้ามดำเนินการใด ๆ กับ Production Server หรือ Production Database โดยไม่ได้รับอนุมัติ
+
+เป้าหมายคือทำให้ Sam_Att V2 Standalone เป็น Application ต้นแบบสำหรับระบบงานอื่นของโรงพยาบาลสามชุกในอนาคต
+
+END OF MASTER PROMPT

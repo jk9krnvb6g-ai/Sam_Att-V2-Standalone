@@ -122,6 +122,27 @@ export function resetSqliteInstanceForTests(customSqlitePath?: string): void {
   }
 }
 
+export async function closeDatabaseConnections(): Promise<void> {
+  if (mysqlPool) {
+    const poolToClose = mysqlPool;
+    mysqlPool = null;
+    try {
+      await poolToClose.end();
+    } catch {
+      // ignore close error on shutdown
+    }
+  }
+  if (sqliteDb) {
+    const dbToClose = sqliteDb;
+    sqliteDb = null;
+    try {
+      dbToClose.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
 async function getMysqlPool(): Promise<mysql.Pool> {
   const cfg = loadConfig();
   if (isAutomatedTestRuntime() || cfg.nodeEnv === 'test') {
@@ -1228,12 +1249,19 @@ export async function ensureBaselineSystemCatalog(
     cfg.dbEngine === 'mysql' &&
     process.env.SAM_ATT_AUTO_MIGRATE !== 'true' &&
     !isExplicitMigrateCli;
+
+  if (readOnlyMysqlStartup) {
+    console.log(
+      '[Sam_Att DB] Read-only startup policy: Skipping baseline catalog DDL/DML mutations during MySQL server startup.'
+    );
+    return;
+  }
+
   const allowAdditiveStartupDdl =
-    !readOnlyMysqlStartup &&
-    (cfg.nodeEnv !== 'production' ||
-      isExplicitMigrateCli ||
-      process.env.SAM_ATT_AUTO_MIGRATE === 'true' ||
-      cfg.dbEngine === 'sqlite_sandbox');
+    cfg.nodeEnv !== 'production' ||
+    isExplicitMigrateCli ||
+    process.env.SAM_ATT_AUTO_MIGRATE === 'true' ||
+    cfg.dbEngine === 'sqlite_sandbox';
 
   if (allowAdditiveStartupDdl) {
     // 0. Safe additive schema upgrades for dev/test or explicit CLI migrate (skip existing columns first to avoid Duplicate column logs)
@@ -2254,3 +2282,191 @@ export async function inspectDatabaseIntegrityReadOnly() {
       : 'ไม่พบข้อมูลบุคลากรจำลองหรือข้อความภาษาไทยเพี้ยนในฐานข้อมูลปัจจุบัน',
   };
 }
+
+export interface ProductionDatabasePreflightReport {
+  ok: boolean;
+  checkedAt: string;
+  readOnlyMode: true;
+  engine: string;
+  host: string;
+  port: number;
+  expectedDatabase: string;
+  connectedDatabase: string | null;
+  serverVersion: string | null;
+  characterSet: string | null;
+  collation: string | null;
+  timezone: string | null;
+  requiredTablesExpected: string[];
+  existingTablesCount: number;
+  missingTables: string[];
+  missingColumns: string[];
+  tableRowCounts: Record<string, number>;
+  pendingMigrations: string[];
+  errors: string[];
+}
+
+export const REQUIRED_PRODUCTION_TABLES = [
+  'users',
+  'personnel',
+  'personnel_type_rules',
+  'shifts',
+  'shift_assignments',
+  'scanner_devices',
+  'sync_schedules',
+  'sync_runs',
+  'raw_scans',
+  'raw_scan_mappings',
+  'fingerprint_mappings',
+  'attendance',
+  'attendance_notes',
+  'hr_review_history',
+  'deployment_history',
+  'audit_logs',
+] as const;
+
+export const REQUIRED_PRODUCTION_COLUMNS: Array<{ table: string; column: string }> = [
+  { table: 'users', column: 'username' },
+  { table: 'users', column: 'password_hash' },
+  { table: 'users', column: 'role' },
+  { table: 'personnel', column: 'person_id' },
+  { table: 'personnel', column: 'fingle_id' },
+  { table: 'personnel', column: 'personnel_type_code' },
+  { table: 'raw_scans', column: 'event_dedup_key' },
+  { table: 'raw_scans', column: 'machine_no' },
+  { table: 'raw_scans', column: 'enroll_number' },
+  { table: 'raw_scans', column: 'scan_date_time' },
+  { table: 'raw_scan_mappings', column: 'raw_scan_id' },
+  { table: 'raw_scan_mappings', column: 'matched_person_id' },
+  { table: 'attendance', column: 'person_id' },
+  { table: 'attendance', column: 'work_date' },
+  { table: 'attendance', column: 'status' },
+];
+
+/**
+ * ตรวจสอบความพร้อมของฐานข้อมูล Production แบบ Read-Only 100% (Phase 2.3 — Database Production Safety)
+ * - ใช้เฉพาะคำสั่ง SELECT เท่านั้น ห้ามรัน CREATE, ALTER, DROP, TRUNCATE, INSERT, UPDATE หรือ DELETE เด็ดขาด
+ * - ตรวจสอบ Network, Authentication, ชื่อฐานข้อมูล, เวอร์ชัน MySQL, Character Set/Collation, Timezone,
+ *   ตารางหลักที่จำเป็น, คอลัมน์สำคัญ และจำนวนข้อมูลเบื้องต้น
+ */
+export async function runProductionDatabasePreflightReadOnly(): Promise<ProductionDatabasePreflightReport> {
+  const cfg = loadConfig();
+  const errors: string[] = [];
+  const missingTables: string[] = [];
+  const missingColumns: string[] = [];
+  const tableRowCounts: Record<string, number> = {};
+  let connectedDatabase: string | null = null;
+  let serverVersion: string | null = null;
+  let characterSet: string | null = null;
+  let collation: string | null = null;
+  let timezone: string | null = null;
+  let existingTablesCount = 0;
+  let pendingMigrations: string[] = [];
+
+  try {
+    // 1. Connectivity & Auth Check
+    const pingRows = await dbQuery<{ ok: number }>('SELECT 1 AS ok');
+    if (!pingRows || Number(pingRows[0]?.ok) !== 1) {
+      errors.push('DB_PING_FAILED: คำสั่ง SELECT 1 ไม่ส่งค่ากลับตามปกติ');
+    }
+
+    // 2. Engine Metadata Check
+    if (cfg.dbEngine === 'mysql') {
+      const metaRows = await dbQuery<{
+        db_name: string | null;
+        ver: string | null;
+        charset: string | null;
+        collation: string | null;
+        tz: string | null;
+      }>(
+        'SELECT DATABASE() AS db_name, VERSION() AS ver, @@character_set_database AS charset, @@collation_database AS collation, @@time_zone AS tz'
+      );
+      if (metaRows.length > 0) {
+        connectedDatabase = metaRows[0].db_name ? String(metaRows[0].db_name) : null;
+        serverVersion = metaRows[0].ver ? String(metaRows[0].ver) : null;
+        characterSet = metaRows[0].charset ? String(metaRows[0].charset) : null;
+        collation = metaRows[0].collation ? String(metaRows[0].collation) : null;
+        timezone = metaRows[0].tz ? String(metaRows[0].tz) : null;
+      }
+      if (connectedDatabase && connectedDatabase !== cfg.samAttDb.database) {
+        errors.push(
+          `DB_NAME_MISMATCH: เชื่อมต่อกับฐานข้อมูล '${connectedDatabase}' แต่คาดหวัง '${cfg.samAttDb.database}'`
+        );
+      }
+    } else {
+      connectedDatabase = cfg.samAttDb.database;
+      const verRows = await dbQuery<{ ver: string }>('SELECT sqlite_version() AS ver');
+      serverVersion = verRows[0]?.ver ? `SQLite ${verRows[0].ver}` : 'SQLite';
+      characterSet = 'utf8';
+      collation = 'BINARY';
+      timezone = '+07:00';
+    }
+
+    // 3. Required Tables Check
+    const existingTables = await listExistingTableNames();
+    existingTablesCount = existingTables.size;
+    for (const reqTbl of REQUIRED_PRODUCTION_TABLES) {
+      if (!existingTables.has(reqTbl.toLowerCase())) {
+        missingTables.push(reqTbl);
+      }
+    }
+    if (missingTables.length > 0) {
+      errors.push(`MISSING_REQUIRED_TABLES: ไม่พบตารางหลักที่จำเป็น (${missingTables.join(', ')})`);
+    }
+
+    // 4. Required Columns Check
+    const colMetaCache = new Map<string, Map<string, LiveColumnMetadata>>();
+    for (const reqCol of REQUIRED_PRODUCTION_COLUMNS) {
+      if (!existingTables.has(reqCol.table.toLowerCase())) {
+        continue;
+      }
+      if (!colMetaCache.has(reqCol.table)) {
+        colMetaCache.set(reqCol.table, await getTableColumnsMetadata(reqCol.table));
+      }
+      const cols = colMetaCache.get(reqCol.table)!;
+      if (!cols.has(reqCol.column.toLowerCase())) {
+        missingColumns.push(`${reqCol.table}.${reqCol.column}`);
+      }
+    }
+    if (missingColumns.length > 0) {
+      errors.push(`MISSING_REQUIRED_COLUMNS: ไม่พบคอลัมน์สำคัญ (${missingColumns.join(', ')})`);
+    }
+
+    // 5. Read-Only Query Test on Key Tables
+    for (const probeTable of ['users', 'personnel', 'shifts', 'scanner_devices', 'raw_scans', 'attendance']) {
+      if (existingTables.has(probeTable)) {
+        const cntRows = await dbQuery<{ cnt: number }>(`SELECT COUNT(*) AS cnt FROM ${probeTable}`);
+        tableRowCounts[probeTable] = Number(cntRows[0]?.cnt || 0);
+      }
+    }
+
+    // 6. Pending Migrations Inspection (Read-Only)
+    const migInspection = await inspectMigrationsDetailedReadOnly();
+    pendingMigrations = migInspection.pendingFiles;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    errors.push(`DB_PREFLIGHT_CONNECTION_ERROR: ${msg}`);
+  }
+
+  return {
+    ok: errors.length === 0,
+    checkedAt: new Date().toISOString(),
+    readOnlyMode: true,
+    engine: cfg.dbEngine,
+    host: cfg.samAttDb.host,
+    port: cfg.samAttDb.port,
+    expectedDatabase: cfg.samAttDb.database,
+    connectedDatabase,
+    serverVersion,
+    characterSet,
+    collation,
+    timezone,
+    requiredTablesExpected: [...REQUIRED_PRODUCTION_TABLES],
+    existingTablesCount,
+    missingTables,
+    missingColumns,
+    tableRowCounts,
+    pendingMigrations,
+    errors,
+  };
+}
+

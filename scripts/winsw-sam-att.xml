@@ -1,26 +1,34 @@
 <!--
   ============================================================================
   Sam_Att V2 Standalone — WinSW (Windows Service Wrapper) Configuration
-  File: scripts/winsw-sam-att.xml
+  File: scripts/winsw-sam-att.xml (Deployed to D:\WebApps\Sam_Att\Service\SamAttV2Standalone.xml)
   ============================================================================
-  แก้ไขปัญหา P0 ข้อ 06:
-  ใช้ WinSW เป็น Windows Service Wrapper มาตรฐานแทนการเรียก sc.exe ชี้ไปยัง node.exe โดยตรง
-  กำหนด Working Directory, Environment Variables, Service Account, Restart Policy และ Rolling Logs
-  โดยแยกอิสระจากระบบจัดซื้อจัดจ้าง (Procurement) และ Central API Gateway 100%
+  Phase 2.6 Standard (Windows Server 2025 Standard Evaluation — 10.2.0.23):
+  - Service ID       : SamAttV2Standalone
+  - Display Name     : Sam_Att V2 Standalone
+  - Startup Type     : Automatic (Delayed Start)
+  - Working Directory: D:\WebApps\Sam_Att\App
+  - External Config  : D:\WebApps\Sam_Att\Config\.env
+  - Certs Directory  : D:\WebApps\Sam_Att\Certs
+  - Logs Directory   : D:\WebApps\Sam_Att\Logs
+  - Backups Directory: D:\Backups\Sam_Att
+  - Deployments Dir  : D:\Deployments\Sam_Att
+  - Isolation Policy : Strictly independent from IIS, Procurement, and other services.
+                       Never uses taskkill /F /IM node.exe or iisreset.
 -->
 <service>
   <id>SamAttV2Standalone</id>
-  <name>Sam_Att V2 Standalone HTTPS Server (4101)</name>
-  <description>ระบบบริหารเวลาปฏิบัติงานบุคลากร โรงพยาบาลสามชุก (Sam_Att V2 Standalone Single-Port HTTPS 4101)</description>
+  <name>Sam_Att V2 Standalone</name>
+  <description>Sam_Att V2 Standalone Hospital Attendance System</description>
 
-  <!-- พาธ Working Directory ของแอปพลิเคชัน -->
-  <workingdirectory>C:\inetpub\wwwroot\Sam_Att</workingdirectory>
+  <!-- Working Directory of the Application -->
+  <workingdirectory>D:\WebApps\Sam_Att\App</workingdirectory>
 
-  <!-- รันผ่าน Node.js -->
+  <!-- Node.js Runtime Executable & Arguments -->
   <executable>C:\Program Files\nodejs\node.exe</executable>
-  <arguments>--import tsx C:\inetpub\wwwroot\Sam_Att\server.ts</arguments>
+  <arguments>--import tsx D:\WebApps\Sam_Att\App\server.ts</arguments>
 
-  <!-- กำหนด Environment Variables สำหรับ Production -->
+  <!-- Production Environment Variables -->
   <env name="NODE_ENV" value="production" />
   <env name="PORT" value="4101" />
   <env name="SAM_ATT_HTTPS_PORT" value="4101" />
@@ -28,32 +36,42 @@
   <env name="API_BASE_PATH" value="/api/Sam_Att" />
   <env name="SAM_ATT_DATA_MODE" value="REAL" />
   <env name="SAM_ATT_DB_ENGINE" value="mysql" />
-  <env name="TLS_CERT_PATH" value="C:\inetpub\wwwroot\Sam_Att\certs\server.crt" />
-  <env name="TLS_KEY_PATH" value="C:\inetpub\wwwroot\Sam_Att\certs\server.key" />
-  <env name="SAM_ATT_BACKUP_DIR" value="C:\inetpub\wwwroot\Sam_Att\backups" />
-  <env name="SCANNER_READER_EXE_PATH" value="C:\inetpub\wwwroot\Sam_Att\ScannerReader\ScannerSyncCli.exe" />
+  <env name="SAM_ATT_ROOT" value="D:\WebApps\Sam_Att" />
+  <env name="SAM_ATT_APP_DIR" value="D:\WebApps\Sam_Att\App" />
+  <env name="SAM_ATT_CONFIG_DIR" value="D:\WebApps\Sam_Att\Config" />
+  <env name="SAM_ATT_ENV_PATH" value="D:\WebApps\Sam_Att\Config\.env" />
+  <env name="SAM_ATT_LOGS_DIR" value="D:\WebApps\Sam_Att\Logs" />
+  <env name="SAM_ATT_SERVICE_DIR" value="D:\WebApps\Sam_Att\Service" />
+  <env name="SAM_ATT_CERTS_DIR" value="D:\WebApps\Sam_Att\Certs" />
+  <env name="TLS_CERT_PATH" value="D:\WebApps\Sam_Att\Certs\server.crt" />
+  <env name="TLS_KEY_PATH" value="D:\WebApps\Sam_Att\Certs\server.key" />
+  <env name="SAM_ATT_BACKUP_DIR" value="D:\Backups\Sam_Att" />
+  <env name="SAM_ATT_DEPLOYMENTS_DIR" value="D:\Deployments\Sam_Att" />
+  <env name="SCANNER_READER_EXE_PATH" value="D:\WebApps\Sam_Att\App\ScannerReader\ScannerSyncCli.exe" />
+  <!-- Cutover Safety: Keep scheduler in Standby (false) on 10.2.0.23 until Cutover from 10.2.0.13 is approved -->
+  <env name="SCANNER_AUTO_SCHEDULER_ENABLED" value="false" />
 
-  <!-- กำหนดการเริ่มทำงานอัตโนมัติเมื่อเปิดเครื่อง (Automatic Startup on Boot) -->
+  <!-- Automatic Delayed Startup on Boot -->
   <startmode>Automatic</startmode>
   <delayedAutoStart>true</delayedAutoStart>
 
-  <!-- บัญชี Service Account มาตรฐานที่มีสิทธิ์จำกัดเฉพาะโฟลเดอร์ C:\inetpub\wwwroot\Sam_Att -->
+  <!-- Least-Privilege Dedicated Service Account (NT AUTHORITY\NetworkService) -->
   <serviceaccount>
     <domain>NT AUTHORITY</domain>
     <user>NetworkService</user>
   </serviceaccount>
 
-  <!-- นโยบายการกู้คืนอัตโนมัติเมื่อโปรเซสล่ม (Restart Policy) -->
+  <!-- Automatic Failure Recovery Policy -->
   <onfailure action="restart" delay="10 sec" />
   <onfailure action="restart" delay="30 sec" />
   <onfailure action="restart" delay="60 sec" />
   <resetfailure>1 hour</resetfailure>
 
-  <!-- การปิดโปรเซสอย่างปลอดภัย (Graceful Shutdown) -->
-  <stoptimeout>15 sec</stoptimeout>
+  <!-- Graceful Shutdown Timeout -->
+  <stoptimeout>20 sec</stoptimeout>
 
-  <!-- กำหนดพาธจัดเก็บไฟล์ Log แบบหมุนเวียน (Rolling Logs) -->
-  <logpath>C:\inetpub\wwwroot\Sam_Att\logs</logpath>
+  <!-- Rolling Service Logs in D:\WebApps\Sam_Att\Logs -->
+  <logpath>D:\WebApps\Sam_Att\Logs</logpath>
   <log mode="roll-by-size-time">
     <sizeThreshold>10240</sizeThreshold>
     <pattern>yyyyMMdd</pattern>

@@ -14,12 +14,17 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { generateCryptographicSecret } from '../utils/crypto.ts';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT_DIR = path.resolve(MODULE_DIR, '..', '..', '..');
+
+export const DEFAULT_PRODUCTION_ROOT = 'D:\\WebApps\\Sam_Att';
+export const DEFAULT_PRODUCTION_BACKUP_DIR = 'D:\\Backups\\Sam_Att';
+export const DEFAULT_PRODUCTION_DEPLOYMENTS_DIR = 'D:\\Deployments\\Sam_Att';
 
 export function isAutomatedTestRuntime(): boolean {
   return (
@@ -41,6 +46,15 @@ export function resolveDotEnvFilePath(): string {
       }
     }
     return resolved;
+  }
+
+  // Standard Production External Config path (D:\WebApps\Sam_Att\Config\.env) outside Git working tree
+  if (!isAutomatedTestRuntime()) {
+    const prodRoot = process.env.SAM_ATT_ROOT?.trim() || DEFAULT_PRODUCTION_ROOT;
+    const externalConfigEnv = path.join(prodRoot, 'Config', '.env');
+    if (fs.existsSync(externalConfigEnv)) {
+      return externalConfigEnv;
+    }
   }
 
   const cwdEnv = path.resolve(process.cwd(), '.env');
@@ -90,6 +104,16 @@ export interface AppConfig {
   apiBasePath: string;
   tlsCertPath: string;
   tlsKeyPath: string;
+  paths: {
+    samAttRoot: string;
+    appDir: string;
+    configDir: string;
+    logsDir: string;
+    serviceDir: string;
+    certsDir: string;
+    backupDir: string;
+    deploymentsDir: string;
+  };
   dbEngine: DbEngineMode;
   samAttDb: {
     host: string;
@@ -389,12 +413,26 @@ export function loadConfig(): AppConfig {
     dataMode === 'DEMO' ? 'sam_att_v2_demo_sandbox.sqlite' : 'sam_att_v2_real_runtime.sqlite'
   );
 
-  // พาธใบรับรอง TLS: รองรับ C:\inetpub\wwwroot\Sam_Att\certs (ซึ่งอยู่ใน .gitignore ไม่ถูก Commit ขึ้น Git) หรือ C:\Sam_Att\certs
+  // โครงสร้างโฟลเดอร์มาตรฐานบน Windows Server Production (Drive D: D:\WebApps\Sam_Att)
+  const samAttRoot = process.env.SAM_ATT_ROOT?.trim() || DEFAULT_PRODUCTION_ROOT;
+  const joinRootPath = /^[A-Za-z]:\\/.test(samAttRoot) ? path.win32.join : path.join;
+  const appDir = process.env.SAM_ATT_APP_DIR?.trim() || joinRootPath(samAttRoot, 'App');
+  const configDir = process.env.SAM_ATT_CONFIG_DIR?.trim() || joinRootPath(samAttRoot, 'Config');
+  const logsDir = process.env.SAM_ATT_LOGS_DIR?.trim() || joinRootPath(samAttRoot, 'Logs');
+  const serviceDir = process.env.SAM_ATT_SERVICE_DIR?.trim() || joinRootPath(samAttRoot, 'Service');
+  const certsDir = process.env.SAM_ATT_CERTS_DIR?.trim() || joinRootPath(samAttRoot, 'Certs');
+  const backupDir = process.env.SAM_ATT_BACKUP_DIR?.trim() || DEFAULT_PRODUCTION_BACKUP_DIR;
+  const deploymentsDir =
+    process.env.SAM_ATT_DEPLOYMENTS_DIR?.trim() || DEFAULT_PRODUCTION_DEPLOYMENTS_DIR;
+
+  // พาธใบรับรอง TLS มาตรฐาน: D:\WebApps\Sam_Att\Certs (พร้อมรองรับพาธเดิมหากมีอยู่จริงบนดิสก์)
   const defaultCertDir =
     nodeEnv === 'production'
-      ? fs.existsSync('C:\\inetpub\\wwwroot\\Sam_Att\\certs')
-        ? 'C:\\inetpub\\wwwroot\\Sam_Att\\certs'
-        : 'C:\\Sam_Att\\certs'
+      ? fs.existsSync(certsDir)
+        ? certsDir
+        : fs.existsSync('C:\\inetpub\\wwwroot\\Sam_Att\\certs')
+          ? 'C:\\inetpub\\wwwroot\\Sam_Att\\certs'
+          : certsDir
       : path.join(os.tmpdir(), 'sam_att_v2_dev_certs');
 
   const samAttHost = process.env.SAM_ATT_DB_HOST || '127.0.0.1';
@@ -427,6 +465,16 @@ export function loadConfig(): AppConfig {
     tlsKeyPath: process.env.TLS_KEY_PATH
       ? path.resolve(process.cwd(), process.env.TLS_KEY_PATH)
       : path.join(defaultCertDir, 'server.key'),
+    paths: {
+      samAttRoot,
+      appDir,
+      configDir,
+      logsDir,
+      serviceDir,
+      certsDir,
+      backupDir,
+      deploymentsDir,
+    },
     dbEngine,
     samAttDb: {
       host: samAttHost,
@@ -469,6 +517,8 @@ export function loadConfig(): AppConfig {
         candidatePaths.push(
           path.resolve(process.cwd(), 'ScannerReader', 'ScannerSyncCli.exe'),
           path.resolve(process.cwd(), 'ScannerReader', 'ScannerReader.exe'),
+          path.join(appDir, 'ScannerReader', 'ScannerSyncCli.exe'),
+          'D:\\WebApps\\Sam_Att\\App\\ScannerReader\\ScannerSyncCli.exe',
           'C:\\inetpub\\wwwroot\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe',
           'C:\\Sam_Att\\ScannerReader\\ScannerSyncCli.exe',
           'C:\\Sam_Att\\bin\\ScannerReader.exe'
@@ -501,9 +551,19 @@ export function loadConfig(): AppConfig {
         SCANNER_MAX_BUFFER_HARD_CAP_BYTES
       );
 
+      // Phase 2.4 Safety Rule: ในโหมด Production ค่าเริ่มต้นของ SCANNER_AUTO_SCHEDULER_ENABLED คือ false (Standby Mode)
+      // เพื่อป้องกันการซิงก์ซ้ำซ้อนกับเซิร์ฟเวอร์เดิม (10.2.0.13) จนกว่าจะได้รับอนุมัติ Cutover และเปิด SCANNER_AUTO_SCHEDULER_ENABLED=true
+      const rawAutoScheduler = process.env.SCANNER_AUTO_SCHEDULER_ENABLED?.trim().toLowerCase();
+      const autoSchedulerEnabled =
+        rawAutoScheduler === 'true'
+          ? true
+          : rawAutoScheduler === 'false'
+            ? false
+            : nodeEnv !== 'production';
+
       return {
         syncEnabled,
-        autoSchedulerEnabled: process.env.SCANNER_AUTO_SCHEDULER_ENABLED !== 'false',
+        autoSchedulerEnabled,
         readerExePath: resolvedReaderExePath,
         timeoutMs,
         maxBufferBytes,
@@ -552,6 +612,79 @@ export function loadConfig(): AppConfig {
       };
     })(),
   };
+}
+
+/**
+ * ตรวจสอบความถูกต้องของคู่ไฟล์ใบรับรอง X.509 Certificate และ Private Key (PEM)
+ * - ตรวจสอบว่าไฟล์มีอยู่จริง อ่านได้ ไม่ว่างเปล่า
+ * - ตรวจสอบว่าใบรับรองยังไม่หมดอายุ (NotAfter > Now)
+ * - ตรวจสอบว่า Private Key จับคู่ตรงกับ Public Key ของใบรับรอง (x509.checkPrivateKey)
+ */
+export function validateTlsCertificatePair(
+  certPath: string,
+  keyPath: string
+): {
+  valid: boolean;
+  errors: string[];
+  subject?: string;
+  issuer?: string;
+  validFrom?: string;
+  validTo?: string;
+  subjectAltName?: string;
+} {
+  const errors: string[] = [];
+  if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
+    errors.push(`MISSING_TLS_CERTIFICATE: ไม่พบไฟล์ใบรับรอง TLS ที่กำหนด (${certPath} หรือ ${keyPath})`);
+    return { valid: false, errors };
+  }
+
+  let certPem = '';
+  let keyPem = '';
+  try {
+    certPem = fs.readFileSync(certPath, 'utf8');
+    keyPem = fs.readFileSync(keyPath, 'utf8');
+  } catch (err: unknown) {
+    errors.push(
+      `TLS_FILE_UNREADABLE: ไม่สามารถอ่านไฟล์ใบรับรองหรือ Private Key ได้ (${err instanceof Error ? err.message : String(err)})`
+    );
+    return { valid: false, errors };
+  }
+
+  if (!certPem.includes('-----BEGIN CERTIFICATE-----')) {
+    errors.push(`INVALID_TLS_CERT_FORMAT: ไฟล์ใบรับรอง (${certPath}) ไม่ใช่รูปแบบ PEM X.509 Certificate`);
+  }
+  if (!/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/.test(keyPem)) {
+    errors.push(`INVALID_TLS_KEY_FORMAT: ไฟล์คีย์ส่วนตัว (${keyPath}) ไม่ใช่รูปแบบ PEM Private Key`);
+  }
+  if (errors.length > 0) {
+    return { valid: false, errors };
+  }
+
+  try {
+    const x509 = new crypto.X509Certificate(certPem);
+    const privKey = crypto.createPrivateKey(keyPem);
+    if (!x509.checkPrivateKey(privKey)) {
+      errors.push('TLS_KEY_MISMATCH: Private Key ไม่ตรงกับ Public Key ของใบรับรอง X.509 Certificate');
+    }
+    const validToMs = Date.parse(x509.validTo);
+    if (Number.isFinite(validToMs) && validToMs <= Date.now()) {
+      errors.push(`TLS_CERT_EXPIRED: ใบรับรอง TLS หมดอายุแล้วเมื่อ ${x509.validTo}`);
+    }
+    return {
+      valid: errors.length === 0,
+      errors,
+      subject: x509.subject,
+      issuer: x509.issuer,
+      validFrom: x509.validFrom,
+      validTo: x509.validTo,
+      subjectAltName: x509.subjectAltName,
+    };
+  } catch (err: unknown) {
+    errors.push(
+      `INVALID_TLS_CRYPTO_PAIR: ใบรับรองหรือ Private Key เสียหาย (${err instanceof Error ? err.message : String(err)})`
+    );
+    return { valid: false, errors };
+  }
 }
 
 /**
@@ -617,10 +750,9 @@ export function validateProductionConfig(cfg: AppConfig = loadConfig()): {
         'DUPLICATE_SECRETS: ค่า SCANNER_INGEST_SHARED_TOKEN ต้องแยกจาก JWT_SECRET ห้ามใช้ค่าเดียวกัน'
       );
     }
-    if (!fs.existsSync(cfg.tlsCertPath) || !fs.existsSync(cfg.tlsKeyPath)) {
-      violations.push(
-        `MISSING_TLS_CERTIFICATE: ไม่พบไฟล์ใบรับรอง TLS ที่กำหนด (${cfg.tlsCertPath} หรือ ${cfg.tlsKeyPath})`
-      );
+    const tlsCheck = validateTlsCertificatePair(cfg.tlsCertPath, cfg.tlsKeyPath);
+    if (!tlsCheck.valid) {
+      violations.push(...tlsCheck.errors);
     }
   }
 

@@ -54,6 +54,8 @@ if ([string]::IsNullOrWhiteSpace($AppDir)) {
   }
   if ((Split-Path -Leaf $ScriptDir) -ieq "deployment") {
     $AppDir = Split-Path -Parent $ScriptDir
+  } elseif (Test-Path "D:\WebApps\Sam_Att\App\package.json") {
+    $AppDir = "D:\WebApps\Sam_Att\App"
   } elseif (Test-Path "C:\inetpub\wwwroot\Sam_Att\package.json") {
     $AppDir = "C:\inetpub\wwwroot\Sam_Att"
   } else {
@@ -61,7 +63,7 @@ if ([string]::IsNullOrWhiteSpace($AppDir)) {
   }
 }
 $AppDir = [System.IO.Path]::GetFullPath($AppDir)
-$LogsDir = Join-Path $AppDir "logs"
+$LogsDir = if (Test-Path "D:\WebApps\Sam_Att\Logs") { "D:\WebApps\Sam_Att\Logs" } else { Join-Path $AppDir "logs" }
 
 if (-not [string]::IsNullOrWhiteSpace($RollbackRootDir)) {
   $SnapshotRootDir = [System.IO.Path]::GetFullPath($RollbackRootDir)
@@ -69,6 +71,8 @@ if (-not [string]::IsNullOrWhiteSpace($RollbackRootDir)) {
   $SnapshotRootDir = [System.IO.Path]::GetFullPath($BackupRootDir)
 } elseif (-not [string]::IsNullOrWhiteSpace($env:SAM_ATT_DEPLOY_SNAPSHOT_DIR)) {
   $SnapshotRootDir = [System.IO.Path]::GetFullPath($env:SAM_ATT_DEPLOY_SNAPSHOT_DIR)
+} elseif (Test-Path "D:\Backups\Sam_Att") {
+  $SnapshotRootDir = "D:\Backups\Sam_Att"
 } else {
   $SnapshotRootDir = "C:\SamAttDeploySnapshots"
 }
@@ -1319,6 +1323,11 @@ try {
 
     # 1.4 Verify .env & MySQL connection settings (read-only; NEVER expose password or overwrite .env)
     $DotEnvPath = Join-Path $AppDir ".env"
+    if (-not (Test-Path $DotEnvPath) -and -not [string]::IsNullOrWhiteSpace($env:SAM_ATT_ENV_PATH) -and (Test-Path $env:SAM_ATT_ENV_PATH)) {
+      $DotEnvPath = $env:SAM_ATT_ENV_PATH
+    } elseif (-not (Test-Path $DotEnvPath) -and (Test-Path "D:\WebApps\Sam_Att\Config\.env")) {
+      $DotEnvPath = "D:\WebApps\Sam_Att\Config\.env"
+    }
     if ($null -ne $MockConfig -and $null -ne $MockConfig.PSObject.Properties["customEnvFile"]) {
       $DotEnvPath = [string]$MockConfig.customEnvFile
     }
@@ -1700,7 +1709,7 @@ try {
     Write-DeployLog -Message "Git pull --ff-only succeeded: $($State.CommitBefore) -> $($State.CommitAfter)"
 
     # Verify .env was never modified or overwritten
-    $EnvHashNow = Get-FileSha256Safe -FilePath (Join-Path $AppDir ".env")
+    $EnvHashNow = Get-FileSha256Safe -FilePath $DotEnvPath
     if (-not [string]::IsNullOrWhiteSpace($State.EnvHashBefore) -and ($null -eq $MockConfig -or -not $MockConfig.PSObject.Properties["customEnvFile"])) {
       if ($EnvHashNow -ne $State.EnvHashBefore) {
         throw "SECURITY_ENV_MUTATED_VIOLATION: Production .env checksum changed unexpectedly during Step 4"
