@@ -129,7 +129,7 @@ function createZipArchive(entries: Array<{ name: string; content: Buffer }>): Bu
   return Buffer.concat([...localFileParts, centralDirBuf, eocd]);
 }
 
-function readZipArchiveEntries(zipBuffer: Buffer): Map<string, Buffer> {
+export function readZipArchiveEntries(zipBuffer: Buffer): Map<string, Buffer> {
   const entries = new Map<string, Buffer>();
   if (zipBuffer.length < 22 || zipBuffer.readUInt32LE(0) !== 0x04034b50) {
     throw new Error('INVALID_XLSX_ZIP_FORMAT: ไฟล์ที่อัปโหลดไม่ใช่ไฟล์ Excel (.xlsx) ที่ถูกต้อง');
@@ -430,3 +430,239 @@ export function extractScheduleRecordsFromXlsxBuffer(fileBuffer: Buffer): Parsed
 
   return parsed;
 }
+
+export interface ExcelWorkbookSheetSpec {
+  name: string;
+  title?: string;
+  subtitle?: string;
+  headers: string[];
+  rows: Array<Array<string | number | boolean | null | undefined>>;
+  columnWidths?: number[];
+  autoFilter?: boolean;
+}
+
+export function sanitizeExcelText(raw: unknown): string {
+  const str = String(raw ?? '');
+  if (!str) return '';
+  if (/^[=+\-@\t\r]/.test(str)) {
+    return `'${str}`;
+  }
+  return str;
+}
+
+function sanitizeSheetTabName(raw: string, usedNames: Set<string>, index: number): string {
+  const cleaned = String(raw || `Sheet${index}`)
+    .replace(/[:\\/?*\[\]]/g, ' ')
+    .trim()
+    .slice(0, 31) || `Sheet${index}`;
+  let candidate = cleaned;
+  let suffix = 2;
+  while (usedNames.has(candidate.toLowerCase())) {
+    const tag = `_${suffix}`;
+    candidate = `${cleaned.slice(0, Math.max(1, 31 - tag.length))}${tag}`;
+    suffix++;
+  }
+  usedNames.add(candidate.toLowerCase());
+  return candidate;
+}
+
+function buildExcelStylesXml(): string {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="4">
+    <font><sz val="11"/><name val="Tahoma"/><family val="2"/></font>
+    <font><b/><sz val="14"/><color rgb="FF4E3978"/><name val="Tahoma"/></font>
+    <font><sz val="10"/><color rgb="FF4A4160"/><name val="Tahoma"/></font>
+    <font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Tahoma"/></font>
+  </fonts>
+  <fills count="4">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FF4E3978"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFF8F7FC"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="2">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+    <border>
+      <left style="thin"><color rgb="FFD8D0E5"/></left>
+      <right style="thin"><color rgb="FFD8D0E5"/></right>
+      <top style="thin"><color rgb="FFD8D0E5"/></top>
+      <bottom style="thin"><color rgb="FFD8D0E5"/></bottom>
+      <diagonal/>
+    </border>
+  </borders>
+  <cellStyleXfs count="1">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+  </cellStyleXfs>
+  <cellXfs count="7">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment vertical="center"/></xf>
+    <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1" applyAlignment="1"><alignment vertical="center"/></xf>
+    <xf numFmtId="0" fontId="3" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center" wrapText="1"/></xf>
+    <xf numFmtId="3" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment horizontal="right" vertical="center"/></xf>
+    <xf numFmtId="4" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment horizontal="right" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center" wrapText="1"/></xf>
+  </cellXfs>
+</styleSheet>`;
+}
+
+export function buildWorkbookBuffer(sheets: ExcelWorkbookSheetSpec[]): Buffer {
+  const safeSheets =
+    sheets.length > 0
+      ? sheets
+      : [{ name: 'Report', headers: ['ไม่มีข้อมูล'], rows: [] }];
+
+  const usedNames = new Set<string>();
+  const zipEntries: Array<{ name: string; content: Buffer }> = [];
+  const contentTypeOverrides: string[] = [
+    `<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>`,
+    `<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>`,
+  ];
+  const workbookSheetTags: string[] = [];
+  const workbookRelTags: string[] = [
+    `<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>`,
+  ];
+
+  safeSheets.forEach((spec, idx) => {
+    const sheetIndex = idx + 1;
+    const sheetName = sanitizeSheetTabName(spec.name, usedNames, sheetIndex);
+    const relId = `rId${sheetIndex + 1}`;
+    const colCount = Math.max(1, spec.headers.length);
+    const colWidths = spec.headers.map((h, cIdx) => {
+      if (spec.columnWidths && spec.columnWidths[cIdx]) {
+        return spec.columnWidths[cIdx];
+      }
+      let maxLen = String(h || '').length + 4;
+      const sampleRows = spec.rows.slice(0, 200);
+      for (const row of sampleRows) {
+        const len = String(row[cIdx] ?? '').length + 3;
+        if (len > maxLen) maxLen = len;
+      }
+      return Math.min(46, Math.max(13, maxLen));
+    });
+
+    const colsXml = `<cols>${colWidths
+      .map(
+        (w, cIdx) =>
+          `<col min="${cIdx + 1}" max="${cIdx + 1}" width="${w}" customWidth="1"/>`
+      )
+      .join('')}</cols>`;
+
+    const rowXmlParts: string[] = [];
+    let currentRowNum = 1;
+
+    if (spec.title) {
+      rowXmlParts.push(
+        `<row r="${currentRowNum}" ht="24" customHeight="1"><c r="A${currentRowNum}" s="1" t="inlineStr"><is><t>${escapeXml(
+          sanitizeExcelText(spec.title)
+        )}</t></is></c></row>`
+      );
+      currentRowNum++;
+    }
+    if (spec.subtitle) {
+      rowXmlParts.push(
+        `<row r="${currentRowNum}" ht="18" customHeight="1"><c r="A${currentRowNum}" s="2" t="inlineStr"><is><t>${escapeXml(
+          sanitizeExcelText(spec.subtitle)
+        )}</t></is></c></row>`
+      );
+      currentRowNum++;
+    }
+
+    const headerRowNum = currentRowNum;
+    const headerCells = spec.headers.map((header, cIdx) => {
+      const colRef = `${colIndexToLetters(cIdx)}${headerRowNum}`;
+      return `<c r="${colRef}" s="3" t="inlineStr"><is><t>${escapeXml(
+        sanitizeExcelText(header)
+      )}</t></is></c>`;
+    });
+    rowXmlParts.push(`<row r="${headerRowNum}" ht="24" customHeight="1">${headerCells.join('')}</row>`);
+    currentRowNum++;
+
+    for (const dataRow of spec.rows) {
+      const cells: string[] = [];
+      for (let cIdx = 0; cIdx < colCount; cIdx++) {
+        const colRef = `${colIndexToLetters(cIdx)}${currentRowNum}`;
+        const rawVal = dataRow[cIdx];
+        if (typeof rawVal === 'number' && Number.isFinite(rawVal)) {
+          const styleId = Number.isInteger(rawVal) ? 4 : 5;
+          cells.push(`<c r="${colRef}" s="${styleId}" t="n"><v>${rawVal}</v></c>`);
+        } else {
+          const safeStr = sanitizeExcelText(
+            typeof rawVal === 'boolean' ? (rawVal ? 'ใช่' : 'ไม่ใช่') : rawVal ?? ''
+          );
+          cells.push(`<c r="${colRef}" s="6" t="inlineStr"><is><t>${escapeXml(safeStr)}</t></is></c>`);
+        }
+      }
+      rowXmlParts.push(`<row r="${currentRowNum}">${cells.join('')}</row>`);
+      currentRowNum++;
+    }
+
+    const lastColLetter = colIndexToLetters(colCount - 1);
+    const lastRowNum = Math.max(headerRowNum, currentRowNum - 1);
+    const autoFilterXml =
+      spec.autoFilter !== false
+        ? `<autoFilter ref="A${headerRowNum}:${lastColLetter}${lastRowNum}"/>`
+        : '';
+
+    const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetViews>
+    <sheetView workbookViewId="0">
+      <pane ySplit="${headerRowNum}" topLeftCell="A${headerRowNum + 1}" activePane="bottomLeft" state="frozen"/>
+    </sheetView>
+  </sheetViews>
+  <sheetFormatPr defaultRowHeight="19"/>
+  ${colsXml}
+  <sheetData>${rowXmlParts.join('')}</sheetData>
+  ${autoFilterXml}
+</worksheet>`;
+
+    zipEntries.push({
+      name: `xl/worksheets/sheet${sheetIndex}.xml`,
+      content: Buffer.from(sheetXml, 'utf8'),
+    });
+    contentTypeOverrides.push(
+      `<Override PartName="/xl/worksheets/sheet${sheetIndex}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`
+    );
+    workbookSheetTags.push(
+      `<sheet name="${escapeXml(sheetName)}" sheetId="${sheetIndex}" r:id="${relId}"/>`
+    );
+    workbookRelTags.push(
+      `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${sheetIndex}.xml"/>`
+    );
+  });
+
+  const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-officedocument.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  ${contentTypeOverrides.join('\n  ')}
+</Types>`;
+
+  const rootRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`;
+
+  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    ${workbookSheetTags.join('\n    ')}
+  </sheets>
+</workbook>`;
+
+  const workbookRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  ${workbookRelTags.join('\n  ')}
+</Relationships>`;
+
+  return createZipArchive([
+    { name: '[Content_Types].xml', content: Buffer.from(contentTypesXml, 'utf8') },
+    { name: '_rels/.rels', content: Buffer.from(rootRelsXml, 'utf8') },
+    { name: 'xl/workbook.xml', content: Buffer.from(workbookXml, 'utf8') },
+    { name: 'xl/_rels/workbook.xml.rels', content: Buffer.from(workbookRelsXml, 'utf8') },
+    { name: 'xl/styles.xml', content: Buffer.from(buildExcelStylesXml(), 'utf8') },
+    ...zipEntries,
+  ]);
+}
+

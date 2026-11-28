@@ -35,6 +35,12 @@ import {
   normalizeExcelWorkDate,
   type ParsedScheduleExcelRow,
 } from '../../utils/xlsx.ts';
+import { findClosedPeriodsInDates, isPeriodClosed } from '../periods/lock.ts';
+import {
+  holidayRowToPublicHolidayAdapter,
+  loadHospitalHolidaysForRange,
+  resolveHolidayForPersonDate,
+} from '../holidays/service.ts';
 
 export const shiftsRouter = Router();
 
@@ -3896,157 +3902,7 @@ shiftsRouter.delete(
   }
 );
 
-// ============================================================================
-// 2.3 วันหยุดราชการ (Public Holidays — ลำดับที่ 2: Default Shift ไม่สร้างเวรทับวันหยุด)
-// ============================================================================
-
-shiftsRouter.get('/holidays', requireAuth, async (req, res, next) => {
-  try {
-    const dateFrom = req.query.dateFrom ? normalizeWorkDateString(req.query.dateFrom) : null;
-    const dateTo = req.query.dateTo ? normalizeWorkDateString(req.query.dateTo) : null;
-    const conditions = ['is_active = 1'];
-    const params: unknown[] = [];
-    if (dateFrom && /^\d{4}-\d{2}-\d{2}$/.test(dateFrom)) {
-      conditions.push('holiday_date >= ?');
-      params.push(dateFrom);
-    }
-    if (dateTo && /^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
-      conditions.push('holiday_date <= ?');
-      params.push(dateTo);
-    }
-    let items: PublicHolidayRow[] = [];
-    try {
-      const rows = await dbQuery<PublicHolidayRow>(
-        `SELECT id, holiday_date, holiday_name, holiday_type, is_active, created_by, created_at
-         FROM public_holidays
-         WHERE ${conditions.join(' AND ')}
-         ORDER BY holiday_date ASC`,
-        params
-      );
-      items = rows.map((r) => ({
-        ...r,
-        holiday_date: normalizeWorkDateString(r.holiday_date),
-      }));
-    } catch {
-      items = [];
-    }
-    res.json({ items });
-  } catch (err) {
-    next(err);
-  }
-});
-
-shiftsRouter.post(
-  '/holidays',
-  requireAuth,
-  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
-  async (req, res, next) => {
-    try {
-      const holidayDate = normalizeWorkDateString(req.body?.holidayDate);
-      const holidayName = String(req.body?.holidayName || '').trim();
-      const holidayType = String(req.body?.holidayType || 'PUBLIC_HOLIDAY').trim().toUpperCase();
-
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(holidayDate) || !holidayName) {
-        res.status(400).json({
-          error: 'VALIDATION_ERROR',
-          message: 'กรุณาระบุวันที่วันหยุด (YYYY-MM-DD) และชื่อวันหยุดราชการให้ครบถ้วน',
-          requestId: req.requestId,
-        });
-        return;
-      }
-
-      const existing = await dbQuery<PublicHolidayRow>(
-        'SELECT * FROM public_holidays WHERE holiday_date = ? LIMIT 1',
-        [holidayDate]
-      );
-
-      let holidayId: number;
-      if (existing.length > 0) {
-        holidayId = Number(existing[0].id);
-        await dbExecute(
-          `UPDATE public_holidays
-           SET holiday_name = ?, holiday_type = ?, is_active = 1, updated_at = CURRENT_TIMESTAMP
-           WHERE id = ?`,
-          [holidayName, holidayType, holidayId]
-        );
-      } else {
-        const ins = await dbExecute(
-          `INSERT INTO public_holidays (holiday_date, holiday_name, holiday_type, is_active, created_by)
-           VALUES (?, ?, ?, 1, ?)`,
-          [holidayDate, holidayName, holidayType, req.user!.username]
-        );
-        holidayId = Number(ins.insertId);
-      }
-
-      await writeAuditLog({
-        requestId: req.requestId,
-        actorUsername: req.user!.username,
-        actorRole: req.user!.role,
-        ipAddress: req.ip || '127.0.0.1',
-        action: 'PUBLIC_HOLIDAY_SAVED',
-        targetType: 'PUBLIC_HOLIDAY',
-        targetId: String(holidayId),
-        result: 'SUCCESS',
-        detail: { holidayDate, holidayName, holidayType },
-      });
-
-      res.status(201).json({
-        id: holidayId,
-        holidayDate,
-        holidayName,
-        holidayType,
-        isActive: 1,
-        requestId: req.requestId,
-      });
-    } catch (err) {
-      next(err);
-    }
-  }
-);
-
-shiftsRouter.delete(
-  '/holidays/:id',
-  requireAuth,
-  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
-  async (req, res, next) => {
-    try {
-      const id = Number(req.params.id);
-      const existing = await dbQuery<PublicHolidayRow>(
-        'SELECT * FROM public_holidays WHERE id = ? LIMIT 1',
-        [id]
-      );
-      if (existing.length === 0) {
-        res.status(404).json({
-          error: 'HOLIDAY_NOT_FOUND',
-          message: 'ไม่พบข้อมูลวันหยุดราชการที่ต้องการลบ',
-          requestId: req.requestId,
-        });
-        return;
-      }
-      await dbExecute(
-        'UPDATE public_holidays SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-        [id]
-      );
-      await writeAuditLog({
-        requestId: req.requestId,
-        actorUsername: req.user!.username,
-        actorRole: req.user!.role,
-        ipAddress: req.ip || '127.0.0.1',
-        action: 'PUBLIC_HOLIDAY_DEACTIVATED',
-        targetType: 'PUBLIC_HOLIDAY',
-        targetId: String(id),
-        result: 'SUCCESS',
-        detail: {
-          holidayDate: normalizeWorkDateString(existing[0].holiday_date),
-          holidayName: existing[0].holiday_name,
-        },
-      });
-      res.json({ status: 'DEACTIVATED', id, requestId: req.requestId });
-    } catch (err) {
-      next(err);
-    }
-  }
-);
+// (ย้ายเส้นทาง /holidays* ทั้งหมดไปที่ backend/src/modules/holidays/routes.ts เพื่อรองรับ scoped hospital_holidays และ B1)
 
 // ============================================================================
 // 3. รายการตารางเวรและสถานะรายวัน (Shift Assignments & Daily Overrides)
@@ -4136,14 +3992,27 @@ shiftsRouter.get(
         'SELECT * FROM shift_import_logs ORDER BY id DESC LIMIT 20'
       );
 
-      const publicHolidayMap = await loadActivePublicHolidaysMap(dateFrom, dateTo);
-      const publicHolidays = Array.from(publicHolidayMap.values());
+      const hospitalHolidays = await loadHospitalHolidaysForRange(dateFrom, dateTo);
+      const publicHolidays = hospitalHolidays.map((h) => ({
+        id: h.id,
+        holiday_date: h.holiday_date,
+        holiday_name: h.holiday_name,
+        holiday_type: h.category,
+        scope_type: h.scope_type,
+        department_name: h.department_name,
+        person_id: h.person_id,
+        override_policy: h.override_policy,
+        is_active: h.is_active,
+        created_by: h.created_by,
+        created_at: h.created_at,
+      }));
 
       res.json({
         items,
         dailyOverrides,
         personnelTypeRules,
         publicHolidays,
+        hospitalHolidays,
         cancellationLogs,
         importLogs,
       });
@@ -4215,7 +4084,7 @@ shiftsRouter.get(
       const prevDate = addDaysToDateString(workDate, -1);
       const nextDate = addDaysToDateString(workDate, 1);
 
-      const [availableTemplates, nearbyAssignments, overrides, allTypeRules, holidayMap] =
+      const [availableTemplates, nearbyAssignments, overrides, allTypeRules, hospitalHolidays] =
         await Promise.all([
           dbQuery<ShiftRow>('SELECT * FROM shifts WHERE is_active = 1 ORDER BY start_time ASC, id ASC'),
           dbQuery<ExistingAssignmentRow>(
@@ -4237,7 +4106,7 @@ shiftsRouter.get(
             [personId, workDate, nextDate]
           ),
           loadPersonnelTypeRulesWithDefaultShifts(),
-          loadActivePublicHolidaysMap(workDate, nextDate),
+          loadHospitalHolidaysForRange(workDate, nextDate),
         ]);
 
       const normalizedNearby = nearbyAssignments.map((a) => ({
@@ -4279,6 +4148,21 @@ shiftsRouter.get(
         hasFullDayLeaveToday = false;
       }
 
+      const todayScopedHoliday = resolveHolidayForPersonDate({
+        workDate,
+        personId,
+        departmentName: personRows[0].department_name,
+        holidays: hospitalHolidays,
+      });
+      const nextScopedHoliday = resolveHolidayForPersonDate({
+        workDate: nextDate,
+        personId,
+        departmentName: personRows[0].department_name,
+        holidays: hospitalHolidays,
+      });
+      const todayPublicHoliday = holidayRowToPublicHolidayAdapter(todayScopedHoliday);
+      const nextDayPublicHoliday = holidayRowToPublicHolidayAdapter(nextScopedHoliday);
+
       // คำนวณสถานะปัจจุบันก่อน เพื่อดึง selectedTemplateIds ที่ตรงกับกะที่มีผลจริง 100%
       const initialEval = evaluateDailyCellSync({
         workDate,
@@ -4290,8 +4174,8 @@ shiftsRouter.get(
         defaultRule,
         nextDayDefaultRule: defaultRule,
         nextDayOverride,
-        publicHoliday: holidayMap.get(workDate) || null,
-        nextDayPublicHoliday: holidayMap.get(nextDate) || null,
+        publicHoliday: todayPublicHoliday,
+        nextDayPublicHoliday,
         personalHoliday: hasFullDayLeaveToday,
       });
 
@@ -4306,8 +4190,6 @@ shiftsRouter.get(
 
       const clearedAll =
         todayOverride?.override_state === 'CLEARED_ALL_SHIFTS' && sameDayActive.length === 0;
-
-      const todayPublicHoliday = holidayMap.get(workDate) || null;
 
       res.json({
         status: 'OK',
@@ -4545,6 +4427,17 @@ shiftsRouter.post(
         res.status(400).json({
           error: 'VALIDATION_ERROR',
           message: 'กรุณาระบุรหัสบุคลากรและวันที่ (YYYY-MM-DD) ให้ถูกต้อง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
+      const periodLock = await isPeriodClosed(workDate);
+      if (periodLock.closed) {
+        res.status(409).json({
+          error: 'PERIOD_CLOSED',
+          message: `ไม่สามารถแก้ไขตารางเวรในงวดเดือน ${periodLock.periodYm} ได้เนื่องจากปิดรอบบัญชีเวลาแล้ว`,
+          periodYm: periodLock.periodYm,
           requestId: req.requestId,
         });
         return;
@@ -5110,13 +5003,25 @@ shiftsRouter.post(
         return;
       }
 
+      const periodLock = await isPeriodClosed(workDate);
+      if (periodLock.closed) {
+        res.status(409).json({
+          error: 'PERIOD_CLOSED',
+          message: `ไม่สามารถแก้ไขตารางเวรในงวดเดือน ${periodLock.periodYm} ได้เนื่องจากปิดรอบบัญชีเวลาแล้ว`,
+          periodYm: periodLock.periodYm,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
       const personRows = await dbQuery<{
         person_id: string;
         full_name: string;
+        department_name: string;
         personnel_type_code: string;
         personnel_type_name: string;
       }>(
-        'SELECT person_id, full_name, personnel_type_code, personnel_type_name FROM personnel WHERE person_id = ? LIMIT 1',
+        'SELECT person_id, full_name, department_name, personnel_type_code, personnel_type_name FROM personnel WHERE person_id = ? LIMIT 1',
         [personId]
       );
       if (personRows.length === 0) {
@@ -5532,7 +5437,7 @@ shiftsRouter.post(
         },
       });
 
-      const [updatedAssignments, updatedOverrides, allTypeRules, publicHolidayMap] = await Promise.all([
+      const [updatedAssignments, updatedOverrides, allTypeRules, hospitalHolidays] = await Promise.all([
         dbQuery<ExistingAssignmentRow>(
           `SELECT id, person_id, shift_id, work_date,
                   snapshot_shift_code, snapshot_shift_name,
@@ -5549,13 +5454,20 @@ shiftsRouter.post(
           [personId, workDate]
         ),
         loadPersonnelTypeRulesWithDefaultShifts(),
-        loadActivePublicHolidaysMap(workDate, workDate),
+        loadHospitalHolidaysForRange(workDate, workDate),
       ]);
 
       const rulesByCode = new Map<string, PersonnelTypeRuleRow>();
       for (const r of allTypeRules) {
         rulesByCode.set(String(r.personnel_type_code || '').trim().toUpperCase(), r);
       }
+
+      const scopedHoliday = resolveHolidayForPersonDate({
+        workDate,
+        personId,
+        departmentName: personRows[0].department_name,
+        holidays: hospitalHolidays,
+      });
 
       const resolvedSchedule = resolveEffectiveDailyScheduleForPersonDate({
         person: personRows[0],
@@ -5567,7 +5479,7 @@ shiftsRouter.post(
         })),
         dailyOverride: updatedOverrides[0] || null,
         rulesByCode,
-        publicHoliday: publicHolidayMap.get(workDate) || null,
+        publicHoliday: holidayRowToPublicHolidayAdapter(scopedHoliday),
       });
 
       const effectiveSchedule = {
@@ -6235,6 +6147,19 @@ shiftsRouter.post(
         req.body?.conflictStrategy === 'ABORT_ON_ERROR' ? 'ABORT_ON_ERROR' : 'SKIP_INVALID';
       const importMode = req.body?.mode === 'REPLACE_DATE' ? 'REPLACE_DATE' : 'ADD_SHIFT';
 
+      const closedMonths = await findClosedPeriodsInDates(
+        parsedPayload.parsedRows.map((r) => r.workDate)
+      );
+      if (closedMonths.length > 0) {
+        res.status(409).json({
+          error: 'PERIOD_CLOSED',
+          message: `ไม่สามารถนำเข้าตารางเวรในงวดเดือนที่ปิดรอบบัญชีแล้วได้ (${closedMonths.join(', ')})`,
+          closedPeriods: closedMonths,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
       const allShifts = await dbQuery<ShiftRow>('SELECT * FROM shifts WHERE is_active = 1');
       const shiftById = new Map<number, ShiftRow>();
       for (const s of allShifts) {
@@ -6656,6 +6581,17 @@ shiftsRouter.post(
         return;
       }
 
+      const closedMonths = await findClosedPeriodsInDates(workDates);
+      if (closedMonths.length > 0) {
+        res.status(409).json({
+          error: 'PERIOD_CLOSED',
+          message: `ไม่สามารถจัดการตารางเวรแบบกลุ่มในงวดเดือนที่ปิดรอบบัญชีแล้วได้ (${closedMonths.join(', ')})`,
+          closedPeriods: closedMonths,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
       let selectedShifts: ShiftRow[] = [];
       if (operationMode !== 'CLEAR_ALL_SHIFTS') {
         const placeholders = shiftIds.map(() => '?').join(', ');
@@ -6998,6 +6934,17 @@ shiftsRouter.post(
         return;
       }
 
+      const periodLock = await isPeriodClosed(workDate);
+      if (periodLock.closed) {
+        res.status(409).json({
+          error: 'PERIOD_CLOSED',
+          message: `ไม่สามารถเพิ่มตารางเวรในงวดเดือน ${periodLock.periodYm} ได้เนื่องจากปิดรอบบัญชีเวลาแล้ว`,
+          periodYm: periodLock.periodYm,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
       const validPersons = await dbQuery<{ person_id: string }>(
         'SELECT person_id FROM personnel WHERE person_id = ? LIMIT 1',
         [personId]
@@ -7140,6 +7087,18 @@ shiftsRouter.delete(
       const row = rows[0];
       const personId = String(row.person_id).trim();
       const normalizedWorkDate = normalizeWorkDateString(row.work_date);
+
+      const periodLock = await isPeriodClosed(normalizedWorkDate);
+      if (periodLock.closed) {
+        res.status(409).json({
+          error: 'PERIOD_CLOSED',
+          message: `ไม่สามารถยกเลิกตารางเวรในงวดเดือน ${periodLock.periodYm} ได้เนื่องจากปิดรอบบัญชีเวลาแล้ว`,
+          periodYm: periodLock.periodYm,
+          requestId: req.requestId,
+        });
+        return;
+      }
+
       await dbExecute(
         "UPDATE shift_assignments SET status = 'CANCELLED', updated_at = CURRENT_TIMESTAMP WHERE id = ?",
         [assignmentId]

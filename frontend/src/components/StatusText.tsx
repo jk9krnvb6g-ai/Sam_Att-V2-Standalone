@@ -19,6 +19,10 @@ import {
   ShieldCheck,
   UserCheck,
   User,
+  PlayCircle,
+  Briefcase,
+  FileCheck2,
+  Hourglass,
 } from 'lucide-react';
 
 export function AttendanceStatusText({
@@ -51,6 +55,30 @@ export function AttendanceStatusText({
       badgeClass: 'bg-[#EEF8F4] text-[#198568] border-[#198568]/20',
       iconColor: 'text-[#198568]',
     },
+    NOT_STARTED: {
+      thaiLabel: 'ยังไม่ถึงเวลาเข้างาน',
+      icon: Hourglass,
+      badgeClass: 'bg-[#F8F7FC] text-[#777287] border-[#E8E4EF]',
+      iconColor: 'text-[#777287]',
+    },
+    AWAITING_CHECKIN: {
+      thaiLabel: 'รอสแกนเข้างาน',
+      icon: Clock,
+      badgeClass: 'bg-[#EFF4FB] text-[#5879BC] border-[#5879BC]/25',
+      iconColor: 'text-[#5879BC]',
+    },
+    IN_PROGRESS: {
+      thaiLabel: 'กำลังปฏิบัติงาน',
+      icon: PlayCircle,
+      badgeClass: 'bg-[#EEF8F4] text-[#198568] border-[#198568]/25',
+      iconColor: 'text-[#198568]',
+    },
+    LATE_IN_PROGRESS: {
+      thaiLabel: 'เข้าสาย (กำลังปฏิบัติงาน)',
+      icon: PlayCircle,
+      badgeClass: 'bg-[#FEF7EA] text-[#B87516] border-[#B87516]/25',
+      iconColor: 'text-[#B87516]',
+    },
     LATE: {
       thaiLabel: 'มาสาย',
       icon: Clock,
@@ -74,6 +102,30 @@ export function AttendanceStatusText({
       icon: AlertTriangle,
       badgeClass: 'bg-[#FEF7EA] text-[#B87516] border-[#B87516]/25',
       iconColor: 'text-[#B87516]',
+    },
+    OFF_DAY: {
+      thaiLabel: 'วันหยุด / นอกวันทำการ',
+      icon: CalendarOff,
+      badgeClass: 'bg-[#F1ECFA] text-[#4E3978] border-[#8066B5]/25',
+      iconColor: 'text-[#4E3978]',
+    },
+    APPROVED_LEAVE: {
+      thaiLabel: 'ลางานที่อนุมัติแล้ว',
+      icon: FileCheck2,
+      badgeClass: 'bg-[#EFF4FB] text-[#5879BC] border-[#5879BC]/25',
+      iconColor: 'text-[#5879BC]',
+    },
+    OFFICIAL_DUTY: {
+      thaiLabel: 'ไปราชการ',
+      icon: Briefcase,
+      badgeClass: 'bg-[#EFF4FB] text-[#5879BC] border-[#5879BC]/25',
+      iconColor: 'text-[#5879BC]',
+    },
+    NO_SHIFT: {
+      thaiLabel: 'ไม่มีตารางเวร',
+      icon: CalendarOff,
+      badgeClass: 'bg-[#F8F7FC] text-[#777287] border-[#E8E4EF]',
+      iconColor: 'text-[#777287]',
     },
     NO_SCHEDULE: {
       thaiLabel: 'ไม่มีตารางเวร',

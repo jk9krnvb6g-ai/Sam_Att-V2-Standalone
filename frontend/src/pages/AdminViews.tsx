@@ -25,6 +25,14 @@ import {
   Lock,
   Loader2,
   RotateCcw,
+  Pencil,
+  KeyRound,
+  UserCheck,
+  UserX,
+  Copy,
+  Check,
+  Users,
+  Download,
 } from 'lucide-react';
 import { apiRequest, ApiClientError, type UserRole } from '../services/api.ts';
 import { ErrorBanner, RoleLabel } from '../components/StatusText.tsx';
@@ -75,7 +83,25 @@ const AUDIT_ACTION_THAI_LABELS: Record<string, string> = {
   DEPLOYMENT_BAT_EXECUTED: 'ดำเนินการอัปเดตระบบ Sam_Att',
   DEPLOYMENT_VERSION_CHECKED: 'ตรวจสอบเวอร์ชันจาก GitHub',
   DEPLOYMENT_BLOCKED_MIGRATION_APPROVAL_REQUIRED: 'ระงับการอัปเดต (รออนุมัติ Database Migration)',
+  USERS_BULK_CREATED: 'สร้างบัญชีผู้ใช้งานแบบกลุ่ม',
+  USERS_BULK_CREATE_BLOCKED: 'ระงับการสร้างบัญชี ADMIN แบบกลุ่ม',
+  ATTENDANCE_BULK_REVIEWED: 'ตรวจสอบและรับรองผล HR แบบกลุ่ม',
+  ATTENDANCE_PERIOD_CLOSED: 'ปิดรอบบัญชีเวลาประจำเดือน',
+  ATTENDANCE_PERIOD_REOPENED: 'เปิดรอบบัญชีเวลาประจำเดือนใหม่',
+  ATTENDANCE_PERIOD_STATUS_UPDATED: 'ปรับสถานะรอบบัญชีเวลาประจำเดือน',
+  HOSPITAL_HOLIDAY_CREATED: 'เพิ่มวันหยุดโรงพยาบาล',
+  HOSPITAL_HOLIDAY_UPDATED: 'แก้ไขวันหยุดโรงพยาบาล',
+  HOSPITAL_HOLIDAY_DELETED: 'ยกเลิกวันหยุดโรงพยาบาล',
+  COMPLETENESS_BATCH_PROCESSED: 'ประมวลผลความครบถ้วนของข้อมูลเวลา',
 };
+
+function sanitizeCsvCell(val: unknown): string {
+  const raw = String(val ?? '');
+  const trimmedStart = raw.replace(/^[\s]+/, '');
+  const safe =
+    /^[=+\-@\t\r]/.test(raw) || /^[=+\-@]/.test(trimmedStart) ? `'${raw}` : raw;
+  return `"${safe.replace(/"/g, '""')}"`;
+}
 
 function getAuditActionThaiLabel(action: string): string {
   if (!action) return 'กิจกรรมระบบ';
@@ -153,6 +179,55 @@ function AdminUsersAndAuditViews({
   const [newDisplayName, setNewDisplayName] = useState('');
   const [newRole, setNewRole] = useState<UserRole>('GENERAL_USER');
   const [newPersonId, setNewPersonId] = useState('');
+
+  // Edit User / Status Toggle / Password Reset state
+  const [editUserTarget, setEditUserTarget] = useState<any | null>(null);
+  const [editDisplayName, setEditDisplayName] = useState('');
+  const [editRole, setEditRole] = useState<UserRole>('GENERAL_USER');
+  const [editPersonId, setEditPersonId] = useState('');
+  const [editIsActive, setEditIsActive] = useState(true);
+  const [editUserError, setEditUserError] = useState<string | null>(null);
+  const [savingEditUser, setSavingEditUser] = useState(false);
+
+  const [statusToggleTarget, setStatusToggleTarget] = useState<any | null>(null);
+  const [togglingStatus, setTogglingStatus] = useState(false);
+
+  const [resetConfirmTarget, setResetConfirmTarget] = useState<any | null>(null);
+  const [resettingPassword, setResettingPassword] = useState(false);
+  const [tempPasswordResult, setTempPasswordResult] = useState<{
+    username: string;
+    displayName: string;
+    temporaryPassword: string;
+  } | null>(null);
+  const [copiedTempPwd, setCopiedTempPwd] = useState(false);
+  const [copiedAuditJson, setCopiedAuditJson] = useState(false);
+
+  // B5: Bulk User Creation state
+  const [bulkModalOpen, setBulkModalOpen] = useState(false);
+  const [bulkLoadingCandidates, setBulkLoadingCandidates] = useState(false);
+  const [bulkCandidates, setBulkCandidates] = useState<any[]>([]);
+  const [bulkCandidateSummary, setBulkCandidateSummary] = useState<{
+    totalActivePersonnel: number;
+    alreadyLinkedCount: number;
+    availableCandidateCount: number;
+  } | null>(null);
+  const [bulkSelectedPersonIds, setBulkSelectedPersonIds] = useState<Set<string>>(new Set());
+  const [bulkUsernameEdits, setBulkUsernameEdits] = useState<Record<string, string>>({});
+  const [bulkDepartmentFilter, setBulkDepartmentFilter] = useState('');
+  const [bulkPersonnelTypeFilter, setBulkPersonnelTypeFilter] = useState('');
+  const [bulkSearch, setBulkSearch] = useState('');
+  const [bulkDefaultRole, setBulkDefaultRole] = useState<'GENERAL_USER' | 'RESPONSIBLE_STAFF'>(
+    'GENERAL_USER'
+  );
+  const [bulkCreating, setBulkCreating] = useState(false);
+  const [bulkResult, setBulkResult] = useState<{
+    totalRequested: number;
+    createdCount: number;
+    failedCount: number;
+    created: any[];
+    failed: any[];
+  } | null>(null);
+  const [bulkError, setBulkError] = useState<string | null>(null);
 
   // Audit logs state
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
@@ -297,6 +372,96 @@ function AdminUsersAndAuditViews({
       }
     } finally {
       setCreatingUser(false);
+    }
+  }
+
+  function openEditUserModal(u: any) {
+    setEditUserTarget(u);
+    setEditDisplayName(String(u.display_name || ''));
+    setEditRole((u.role || 'GENERAL_USER') as UserRole);
+    setEditPersonId(String(u.approved_person_id || ''));
+    setEditIsActive(Number(u.is_active) === 1);
+    setEditUserError(null);
+  }
+
+  async function handleSaveEditUser(e: React.FormEvent) {
+    e.preventDefault();
+    if (!editUserTarget) return;
+    setEditUserError(null);
+    setSavingEditUser(true);
+    try {
+      await apiRequest(`/users/${editUserTarget.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          displayName: editDisplayName.trim(),
+          role: editRole,
+          approvedPersonId: editPersonId || null,
+          isActive: editIsActive,
+        }),
+      });
+      setEditUserTarget(null);
+      toast.success('บันทึกการแก้ไขบัญชีผู้ใช้งานแล้ว', `อัปเดตข้อมูลของ ${editDisplayName.trim()} เรียบร้อย`);
+      await loadData();
+    } catch (err) {
+      const msg = err instanceof ApiClientError ? err.message : 'ไม่สามารถบันทึกการแก้ไขบัญชีได้';
+      setEditUserError(msg);
+      toast.error('แก้ไขบัญชีไม่สำเร็จ', msg, err instanceof ApiClientError ? err.requestId : undefined);
+    } finally {
+      setSavingEditUser(false);
+    }
+  }
+
+  async function handleConfirmToggleUserStatus() {
+    if (!statusToggleTarget) return;
+    setTogglingStatus(true);
+    const nextIsActive = Number(statusToggleTarget.is_active) !== 1;
+    try {
+      await apiRequest(`/users/${statusToggleTarget.id}/status`, {
+        method: 'PATCH',
+        body: JSON.stringify({ isActive: nextIsActive }),
+      });
+      toast.success(
+        nextIsActive ? 'เปิดใช้งานบัญชีแล้ว' : 'ระงับการใช้งานบัญชีแล้ว',
+        `บัญชี ${statusToggleTarget.username}`
+      );
+      setStatusToggleTarget(null);
+      await loadData();
+    } catch (err) {
+      const msg = err instanceof ApiClientError ? err.message : 'ไม่สามารถเปลี่ยนสถานะบัญชีได้';
+      toast.error('เปลี่ยนสถานะบัญชีไม่สำเร็จ', msg, err instanceof ApiClientError ? err.requestId : undefined);
+    } finally {
+      setTogglingStatus(false);
+    }
+  }
+
+  async function handleConfirmResetPassword() {
+    if (!resetConfirmTarget) return;
+    setResettingPassword(true);
+    try {
+      const res = await apiRequest<{
+        username: string;
+        displayName: string;
+        temporaryPassword: string;
+      }>(`/users/${resetConfirmTarget.id}/reset-password`, {
+        method: 'POST',
+      });
+      setResetConfirmTarget(null);
+      setCopiedTempPwd(false);
+      setTempPasswordResult({
+        username: res.username,
+        displayName: res.displayName,
+        temporaryPassword: res.temporaryPassword,
+      });
+      toast.success(
+        'รีเซ็ตรหัสผ่านเรียบร้อยแล้ว',
+        `สร้างรหัสผ่านชั่วคราวให้ ${res.username} และบังคับเปลี่ยนเมื่อเข้าสู่ระบบครั้งถัดไป`
+      );
+      await loadData();
+    } catch (err) {
+      const msg = err instanceof ApiClientError ? err.message : 'ไม่สามารถรีเซ็ตรหัสผ่านได้';
+      toast.error('รีเซ็ตรหัสผ่านไม่สำเร็จ', msg, err instanceof ApiClientError ? err.requestId : undefined);
+    } finally {
+      setResettingPassword(false);
     }
   }
 
@@ -640,6 +805,38 @@ function AdminUsersAndAuditViews({
               <button
                 type="button"
                 onClick={() => {
+                  setBulkError(null);
+                  setBulkResult(null);
+                  setBulkSelectedPersonIds(new Set());
+                  setBulkUsernameEdits({});
+                  setBulkDepartmentFilter('');
+                  setBulkPersonnelTypeFilter('');
+                  setBulkSearch('');
+                  setBulkDefaultRole('GENERAL_USER');
+                  setBulkModalOpen(true);
+                  setBulkLoadingCandidates(true);
+                  apiRequest('/users/bulk-candidates')
+                    .then((res) => {
+                      setBulkCandidates(res.items || []);
+                      setBulkCandidateSummary(res.summary || null);
+                    })
+                    .catch((err) => {
+                      setBulkError(
+                        err instanceof ApiClientError
+                          ? err.message
+                          : 'ไม่สามารถโหลดรายชื่อบุคลากรที่ยังไม่มีบัญชีได้'
+                      );
+                    })
+                    .finally(() => setBulkLoadingCandidates(false));
+                }}
+                className="ent-btn-secondary"
+              >
+                <Users className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+                <span>สร้างบัญชีผู้ใช้แบบกลุ่ม</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
                   setCreateUserError(null);
                   setCreateUserModalOpen(true);
                 }}
@@ -773,10 +970,45 @@ function AdminUsersAndAuditViews({
                         </div>
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-[#777287]">สถานะบัญชี</span>
-                          <StatusBadge tone={Number(u.is_active) === 1 ? 'success' : 'danger'}>
-                            {Number(u.is_active) === 1 ? 'ใช้งานปกติ' : 'ระงับการใช้งาน'}
-                          </StatusBadge>
+                          <div className="flex items-center gap-1.5">
+                            <StatusBadge tone={Number(u.is_active) === 1 ? 'success' : 'danger'}>
+                              {Number(u.is_active) === 1 ? 'ใช้งานปกติ' : 'ระงับการใช้งาน'}
+                            </StatusBadge>
+                            {Number(u.must_change_password || 0) === 1 && (
+                              <StatusBadge tone="warning" label="ต้องเปลี่ยนรหัส" compact />
+                            )}
+                          </div>
                         </div>
+                      </div>
+                      <div className="pt-2 border-t border-[#F1ECFA] grid grid-cols-3 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => openEditUserModal(u)}
+                          className="ent-btn-secondary h-8 px-2 text-[12px] justify-center"
+                        >
+                          <Pencil className="w-3.5 h-3.5" aria-hidden="true" />
+                          <span>แก้ไข</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setResetConfirmTarget(u)}
+                          className="ent-btn-secondary h-8 px-2 text-[12px] justify-center"
+                        >
+                          <KeyRound className="w-3.5 h-3.5" aria-hidden="true" />
+                          <span>รีเซ็ตรหัส</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setStatusToggleTarget(u)}
+                          className="ent-btn-secondary h-8 px-2 text-[12px] justify-center"
+                        >
+                          {Number(u.is_active) === 1 ? (
+                            <UserX className="w-3.5 h-3.5 text-[#C74455]" aria-hidden="true" />
+                          ) : (
+                            <UserCheck className="w-3.5 h-3.5 text-[#198568]" aria-hidden="true" />
+                          )}
+                          <span>{Number(u.is_active) === 1 ? 'ระงับ' : 'เปิดใช้'}</span>
+                        </button>
                       </div>
                     </div>
                   ))
@@ -823,11 +1055,12 @@ function AdminUsersAndAuditViews({
                         sortDir={userSortDir}
                         onSort={handleUserSort}
                       />
+                      <th className="text-right">จัดการบัญชี</th>
                     </tr>
                   </thead>
                   <tbody>
                     {pagedUsers.length === 0 ? (
-                      <TableEmptyState colSpan={6} title="ไม่พบบัญชีผู้ใช้งานตามเงื่อนไขที่ค้นหา" />
+                      <TableEmptyState colSpan={7} title="ไม่พบบัญชีผู้ใช้งานตามเงื่อนไขที่ค้นหา" />
                     ) : (
                       pagedUsers.map((u) => (
                         <tr key={u.id}>
@@ -851,12 +1084,52 @@ function AdminUsersAndAuditViews({
                             )}
                           </td>
                           <td>
-                            <StatusBadge tone={Number(u.is_active) === 1 ? 'success' : 'danger'}>
-                              {Number(u.is_active) === 1 ? 'ใช้งานปกติ' : 'ระงับการใช้งาน'}
-                            </StatusBadge>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <StatusBadge tone={Number(u.is_active) === 1 ? 'success' : 'danger'}>
+                                {Number(u.is_active) === 1 ? 'ใช้งานปกติ' : 'ระงับการใช้งาน'}
+                              </StatusBadge>
+                              {Number(u.must_change_password || 0) === 1 && (
+                                <StatusBadge tone="warning" label="ต้องเปลี่ยนรหัส" compact />
+                              )}
+                            </div>
                           </td>
                           <td className="font-mono tabular-nums text-[#777287]">
                             {u.last_login_at ? formatThaiDateTime(u.last_login_at) : '—'}
+                          </td>
+                          <td className="text-right">
+                            <div className="inline-flex items-center justify-end gap-1.5 whitespace-nowrap">
+                              <button
+                                type="button"
+                                onClick={() => openEditUserModal(u)}
+                                className="ent-btn-secondary h-8 px-2.5 text-[12px]"
+                                title="แก้ไขสิทธิ์และข้อมูลบัญชี"
+                              >
+                                <Pencil className="w-3.5 h-3.5 text-[#8066B5]" aria-hidden="true" />
+                                <span>แก้ไข</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setResetConfirmTarget(u)}
+                                className="ent-btn-secondary h-8 px-2.5 text-[12px]"
+                                title="รีเซ็ตรหัสผ่านชั่วคราว"
+                              >
+                                <KeyRound className="w-3.5 h-3.5 text-[#B87516]" aria-hidden="true" />
+                                <span>รีเซ็ตรหัส</span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setStatusToggleTarget(u)}
+                                className="ent-btn-secondary h-8 px-2.5 text-[12px]"
+                                title={Number(u.is_active) === 1 ? 'ระงับการใช้งาน' : 'เปิดใช้งานบัญชี'}
+                              >
+                                {Number(u.is_active) === 1 ? (
+                                  <UserX className="w-3.5 h-3.5 text-[#C74455]" aria-hidden="true" />
+                                ) : (
+                                  <UserCheck className="w-3.5 h-3.5 text-[#198568]" aria-hidden="true" />
+                                )}
+                                <span>{Number(u.is_active) === 1 ? 'ระงับ' : 'เปิดใช้'}</span>
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))
@@ -1012,6 +1285,666 @@ function AdminUsersAndAuditViews({
               </button>
             </div>
           </form>
+        </SharedModal>
+
+        {/* Edit User Modal */}
+        <SharedModal
+          open={Boolean(editUserTarget)}
+          onClose={() => !savingEditUser && setEditUserTarget(null)}
+          kickerText="แก้ไขบัญชีผู้ใช้งานและสิทธิ์การเข้าถึง"
+          title={editUserTarget ? `แก้ไขบัญชี ${editUserTarget.username}` : 'แก้ไขบัญชี'}
+          subtitle="ปรับระดับสิทธิ์ ชื่อที่แสดง การเชื่อมโยงรหัสบุคลากร และสถานะการใช้งาน (ป้องกันการลดสิทธิ์ผู้ดูแลระบบคนสุดท้าย)"
+          maxWidthClass="max-w-xl"
+        >
+          <form onSubmit={handleSaveEditUser} className="space-y-4">
+            {editUserError && (
+              <div
+                role="alert"
+                className="p-3.5 rounded-xl bg-[#FDF2F4] border border-[#E5B8BF] text-[#8E2837] text-[13.5px] font-medium"
+              >
+                {editUserError}
+              </div>
+            )}
+            <div>
+              <label className="ent-label">
+                ชื่อ-นามสกุลที่แสดงในระบบ <RequiredMark />
+              </label>
+              <input
+                type="text"
+                required
+                disabled={savingEditUser}
+                value={editDisplayName}
+                onChange={(e) => setEditDisplayName(e.target.value)}
+                className="ent-input w-full"
+              />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="ent-label">
+                  ระดับสิทธิ์การใช้งาน <RequiredMark />
+                </label>
+                <select
+                  disabled={savingEditUser}
+                  value={editRole}
+                  onChange={(e) => setEditRole(e.target.value as UserRole)}
+                  className="ent-input w-full"
+                >
+                  <option value="GENERAL_USER">บุคลากรทั่วไป (ดูเฉพาะตนเอง)</option>
+                  <option value="RESPONSIBLE_STAFF">เจ้าหน้าที่งานบุคคล (HR)</option>
+                  <option value="ADMIN">ผู้ดูแลระบบ (ADMIN)</option>
+                </select>
+              </div>
+              <div>
+                <label className="ent-label">เชื่อมโยงชื่อบุคลากร (HOSOffice)</label>
+                <select
+                  disabled={savingEditUser}
+                  value={editPersonId}
+                  onChange={(e) => setEditPersonId(e.target.value)}
+                  className="ent-input w-full"
+                >
+                  <option value="">-- ยังไม่เชื่อมโยง --</option>
+                  {personnel.map((p) => (
+                    <option key={p.person_id} value={p.person_id}>
+                      {p.full_name} ({p.person_id})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <label className="flex items-center gap-2.5 p-3 rounded-xl border border-[#E8E4EF] bg-[#F8F7FC] cursor-pointer">
+              <input
+                type="checkbox"
+                disabled={savingEditUser}
+                checked={editIsActive}
+                onChange={(e) => setEditIsActive(e.target.checked)}
+                className="w-4 h-4 accent-[#8066B5]"
+              />
+              <span className="text-[13.5px] font-medium text-[#292638]">
+                เปิดใช้งานบัญชีผู้ใช้นี้ (Is Active)
+              </span>
+            </label>
+            <div className="flex flex-col-reverse sm:flex-row justify-end gap-2.5 pt-3 border-t border-[#E8E4EF]">
+              <button
+                type="button"
+                disabled={savingEditUser}
+                onClick={() => setEditUserTarget(null)}
+                className="ent-btn-secondary w-full sm:w-auto"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="submit"
+                disabled={savingEditUser}
+                className="ent-btn-primary w-full sm:w-auto"
+              >
+                {savingEditUser ? (
+                  <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4" aria-hidden="true" />
+                )}
+                <span>{savingEditUser ? 'กำลังบันทึก...' : 'บันทึกการเปลี่ยนแปลง'}</span>
+              </button>
+            </div>
+          </form>
+        </SharedModal>
+
+        {/* Status Toggle Confirm Dialog */}
+        <ConfirmDialog
+          open={Boolean(statusToggleTarget)}
+          onCancel={() => !togglingStatus && setStatusToggleTarget(null)}
+          onConfirm={handleConfirmToggleUserStatus}
+          title={
+            Number(statusToggleTarget?.is_active) === 1
+              ? 'ยืนยันการระงับการใช้งานบัญชี'
+              : 'ยืนยันการเปิดใช้งานบัญชี'
+          }
+          description={
+            statusToggleTarget
+              ? `ต้องการ${Number(statusToggleTarget.is_active) === 1 ? 'ระงับการใช้งาน' : 'เปิดใช้งาน'}บัญชี "${statusToggleTarget.username}" (${statusToggleTarget.display_name}) ใช่หรือไม่?`
+              : ''
+          }
+          confirmLabel={
+            Number(statusToggleTarget?.is_active) === 1 ? 'ระงับการใช้งาน' : 'เปิดใช้งานบัญชี'
+          }
+          variant={Number(statusToggleTarget?.is_active) === 1 ? 'danger' : 'primary'}
+          loading={togglingStatus}
+        />
+
+        {/* Reset Password Confirm Dialog */}
+        <ConfirmDialog
+          open={Boolean(resetConfirmTarget)}
+          onCancel={() => !resettingPassword && setResetConfirmTarget(null)}
+          onConfirm={handleConfirmResetPassword}
+          title="ยืนยันการรีเซ็ตรหัสผ่านชั่วคราว"
+          description={
+            resetConfirmTarget
+              ? `ระบบจะสร้างรหัสผ่านชั่วคราวแบบสุ่มใหม่ให้บัญชี "${resetConfirmTarget.username}" และบังคับให้เปลี่ยนรหัสผ่านทันทีเมื่อเข้าสู่ระบบครั้งถัดไป`
+              : ''
+          }
+          confirmLabel={resettingPassword ? 'กำลังสร้างรหัสผ่านชั่วคราว...' : 'สร้างรหัสผ่านชั่วคราวใหม่'}
+          variant="primary"
+          loading={resettingPassword}
+        />
+
+        {/* One-Time Temporary Password Modal */}
+        <SharedModal
+          open={Boolean(tempPasswordResult)}
+          onClose={() => setTempPasswordResult(null)}
+          kickerText="แสดงเพียงครั้งเดียว (One-Time Temporary Password)"
+          title="รหัสผ่านชั่วคราวใหม่พร้อมใช้งาน"
+          subtitle="กรุณาคัดลอกและส่งต่อให้เจ้าของบัญชีอย่างปลอดภัย ระบบไม่ได้บันทึกรหัสผ่านนี้ในรูปแบบข้อความธรรมดา"
+          maxWidthClass="max-w-md"
+        >
+          {tempPasswordResult && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-xl bg-[#F8F7FC] border border-[#E8E4EF] space-y-2 text-[13.5px]">
+                <div className="flex justify-between gap-2">
+                  <span className="text-[#777287]">ชื่อบัญชี (Username)</span>
+                  <span className="font-mono font-bold text-[#292638]">{tempPasswordResult.username}</span>
+                </div>
+                <div className="flex justify-between gap-2">
+                  <span className="text-[#777287]">ชื่อที่แสดง</span>
+                  <span className="font-semibold text-[#292638]">{tempPasswordResult.displayName}</span>
+                </div>
+              </div>
+              <div className="p-4 rounded-xl bg-[#F1ECFA] border border-[#8066B5]/35 flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-[12px] text-[#4E3978] font-semibold">รหัสผ่านชั่วคราว (ใช้เข้าสู่ระบบครั้งแรก)</div>
+                  <div className="font-mono text-[18px] font-bold text-[#292638] tracking-wide mt-0.5 select-all">
+                    {tempPasswordResult.temporaryPassword}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(tempPasswordResult.temporaryPassword);
+                    setCopiedTempPwd(true);
+                  }}
+                  className="ent-btn-secondary h-9 px-3 shrink-0"
+                >
+                  {copiedTempPwd ? (
+                    <Check className="w-4 h-4 text-[#198568]" aria-hidden="true" />
+                  ) : (
+                    <Copy className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+                  )}
+                  <span>{copiedTempPwd ? 'คัดลอกแล้ว' : 'คัดลอก'}</span>
+                </button>
+              </div>
+              <div className="flex justify-end pt-2 border-t border-[#E8E4EF]">
+                <button
+                  type="button"
+                  onClick={() => setTempPasswordResult(null)}
+                  className="ent-btn-primary"
+                >
+                  ปิดหน้าต่าง
+                </button>
+              </div>
+            </div>
+          )}
+        </SharedModal>
+
+        {/* B5: Bulk User Creation Modal */}
+        <SharedModal
+          open={bulkModalOpen}
+          onClose={() => !bulkCreating && setBulkModalOpen(false)}
+          kickerText="สร้างบัญชีผู้ใช้งานแบบกลุ่ม (Bulk Account Provisioning)"
+          title="สร้างบัญชีผู้ใช้จากทะเบียนบุคลากรที่ยังไม่มีบัญชี"
+          subtitle="ระบบสร้างรหัสผ่านชั่วคราวแบบสุ่มปลอดภัย (CSPRNG) และบังคับให้เปลี่ยนรหัสผ่านเมื่อเข้าสู่ระบบครั้งแรก"
+          maxWidthClass="max-w-5xl"
+        >
+          {(() => {
+            const deptOptions = Array.from(
+              new Set(bulkCandidates.map((c) => String(c.departmentName || '')).filter(Boolean))
+            ).sort((a, b) => a.localeCompare(b, 'th'));
+            const ptOptions = Array.from(
+              new Map(
+                bulkCandidates
+                  .filter((c) => c.personnelTypeCode)
+                  .map((c) => [String(c.personnelTypeCode), String(c.personnelTypeName || c.personnelTypeCode)])
+              ).entries()
+            ).sort((a, b) => a[1].localeCompare(b[1], 'th'));
+
+            const q = bulkSearch.trim().toLowerCase();
+            const filteredCandidates = bulkCandidates.filter((c) => {
+              if (bulkDepartmentFilter && c.departmentName !== bulkDepartmentFilter) return false;
+              if (bulkPersonnelTypeFilter && c.personnelTypeCode !== bulkPersonnelTypeFilter) return false;
+              if (q) {
+                return (
+                  String(c.personId || '').toLowerCase().includes(q) ||
+                  String(c.fullName || '').toLowerCase().includes(q) ||
+                  String(c.departmentName || '').toLowerCase().includes(q) ||
+                  String(bulkUsernameEdits[c.personId] ?? c.suggestedUsername ?? '')
+                    .toLowerCase()
+                    .includes(q)
+                );
+              }
+              return true;
+            });
+
+            const allFilteredSelected =
+              filteredCandidates.length > 0 &&
+              filteredCandidates.slice(0, 500).every((c) => bulkSelectedPersonIds.has(c.personId));
+
+            function handleDownloadBulkTempPasswordsCsv() {
+              if (!bulkResult || !bulkResult.created?.length) return;
+              const headers = [
+                'รหัสบุคลากร (Person ID)',
+                'ชื่อบัญชี (Username)',
+                'ชื่อ-นามสกุล',
+                'หน่วยงาน',
+                'ระดับสิทธิ์',
+                'รหัสผ่านชั่วคราว (ใช้ครั้งแรก)',
+              ];
+              const rows = bulkResult.created.map((acc) =>
+                [
+                  sanitizeCsvCell(acc.personId),
+                  sanitizeCsvCell(acc.username),
+                  sanitizeCsvCell(acc.displayName),
+                  sanitizeCsvCell(acc.departmentName),
+                  sanitizeCsvCell(acc.role),
+                  sanitizeCsvCell(acc.temporaryPassword),
+                ].join(',')
+              );
+              const csvContent = `\uFEFF${headers.map(sanitizeCsvCell).join(',')}\n${rows.join('\n')}`;
+              const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `sam_att_bulk_temp_passwords_${new Date().toISOString().slice(0, 10)}.csv`;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              URL.revokeObjectURL(url);
+            }
+
+            async function handleSubmitBulkCreate() {
+              const selectedList = bulkCandidates.filter((c) =>
+                bulkSelectedPersonIds.has(c.personId)
+              );
+              if (selectedList.length === 0) {
+                setBulkError('กรุณาเลือกบุคลากรอย่างน้อย 1 รายการ');
+                return;
+              }
+              if (selectedList.length > 500) {
+                setBulkError('รองรับการสร้างบัญชีแบบกลุ่มสูงสุด 500 รายการต่อครั้ง');
+                return;
+              }
+              setBulkCreating(true);
+              setBulkError(null);
+              try {
+                const res = await apiRequest('/users/bulk-create', {
+                  method: 'POST',
+                  body: JSON.stringify({
+                    defaultRole: bulkDefaultRole,
+                    candidates: selectedList.map((c) => ({
+                      personId: c.personId,
+                      username: (bulkUsernameEdits[c.personId] ?? c.suggestedUsername).trim(),
+                      displayName: c.fullName,
+                      role: bulkDefaultRole,
+                    })),
+                  }),
+                });
+                setBulkResult(res);
+                toast.showSuccess(
+                  `สร้างบัญชีผู้ใช้งานสำเร็จ ${res.createdCount} บัญชี`,
+                  res.failedCount > 0 ? `ไม่สำเร็จ ${res.failedCount} รายการ` : undefined
+                );
+                const [freshCandidates, freshUsers] = await Promise.all([
+                  apiRequest('/users/bulk-candidates'),
+                  apiRequest('/users'),
+                ]);
+                setBulkCandidates(freshCandidates.items || []);
+                setBulkCandidateSummary(freshCandidates.summary || null);
+                setUsers(freshUsers.items || []);
+                const createdSet = new Set<string>(
+                  (res.created || []).map((c: any) => String(c.personId))
+                );
+                setBulkSelectedPersonIds((prev) => {
+                  const next = new Set(prev);
+                  createdSet.forEach((pid) => next.delete(pid));
+                  return next;
+                });
+              } catch (err) {
+                const msg =
+                  err instanceof ApiClientError
+                    ? err.message
+                    : 'ไม่สามารถสร้างบัญชีผู้ใช้งานแบบกลุ่มได้';
+                setBulkError(msg);
+                toast.showError('สร้างบัญชีแบบกลุ่มไม่สำเร็จ', msg);
+              } finally {
+                setBulkCreating(false);
+              }
+            }
+
+            return (
+              <div className="space-y-4">
+                {bulkError && (
+                  <div
+                    role="alert"
+                    className="p-3.5 rounded-xl bg-[#FDF2F4] border border-[#E5B8BF] text-[#8E2837] text-[13px] font-medium"
+                  >
+                    {bulkError}
+                  </div>
+                )}
+
+                <div className="p-3.5 rounded-xl bg-[#F1ECFA]/70 border border-[#D8D1E6] text-[12.5px] text-[#4E3978] flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    เพื่อความปลอดภัย ไม่อนุญาตให้สร้างสิทธิ์ผู้ดูแลระบบ (ADMIN) แบบกลุ่ม — สร้างได้เฉพาะ{' '}
+                    <strong>GENERAL_USER</strong> และ <strong>RESPONSIBLE_STAFF</strong> (สูงสุด 500 บัญชี/ครั้ง)
+                  </span>
+                  {bulkCandidateSummary && (
+                    <span className="font-mono font-semibold tabular-nums">
+                      ยังไม่มีบัญชี {bulkCandidateSummary.availableCandidateCount} /{' '}
+                      {bulkCandidateSummary.totalActivePersonnel} คน
+                    </span>
+                  )}
+                </div>
+
+                {bulkResult ? (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="p-3.5 rounded-xl bg-[#EEF8F4] border border-[#198568]/20">
+                        <div className="text-[12px] font-semibold text-[#198568]">
+                          สร้างบัญชีสำเร็จ (ต้องเปลี่ยนรหัสผ่านครั้งแรก)
+                        </div>
+                        <div className="text-[22px] font-bold font-mono tabular-nums text-[#198568]">
+                          {bulkResult.createdCount} บัญชี
+                        </div>
+                      </div>
+                      <div className="p-3.5 rounded-xl bg-[#FEF7EA] border border-[#B87516]/25">
+                        <div className="text-[12px] font-semibold text-[#B87516]">
+                          ไม่สำเร็จ / ข้าม
+                        </div>
+                        <div className="text-[22px] font-bold font-mono tabular-nums text-[#B87516]">
+                          {bulkResult.failedCount} รายการ
+                        </div>
+                      </div>
+                    </div>
+
+                    {bulkResult.created.length > 0 && (
+                      <div className="space-y-2.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-[13.5px] font-bold text-[#292638]">
+                            รหัสผ่านชั่วคราว (แสดงเพียงครั้งเดียว — ระบบไม่ได้บันทึกใน Audit Log)
+                          </div>
+                          <button
+                            type="button"
+                            onClick={handleDownloadBulkTempPasswordsCsv}
+                            className="ent-btn-primary h-9 px-3.5 text-[13px]"
+                          >
+                            <Download className="w-4 h-4" aria-hidden="true" />
+                            <span>ดาวน์โหลด CSV รหัสผ่านชั่วคราว</span>
+                          </button>
+                        </div>
+                        <div className="overflow-x-auto max-h-60 border border-[#E8E4EF] rounded-xl">
+                          <table className="his-table text-[13px]">
+                            <thead>
+                              <tr>
+                                <th>Username</th>
+                                <th>ชื่อ-สกุล · หน่วยงาน</th>
+                                <th>สิทธิ์</th>
+                                <th>รหัสผ่านชั่วคราว</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {bulkResult.created.map((acc) => (
+                                <tr key={acc.id}>
+                                  <td className="font-mono font-bold text-[#292638]">{acc.username}</td>
+                                  <td>
+                                    <div className="font-semibold text-[#292638]">{acc.displayName}</div>
+                                    <div className="text-[12px] text-[#777287]">{acc.departmentName}</div>
+                                  </td>
+                                  <td>
+                                    <RoleLabel role={acc.role} />
+                                  </td>
+                                  <td className="font-mono font-bold text-[#4E3978] select-all">
+                                    {acc.temporaryPassword}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {bulkResult.failed.length > 0 && (
+                      <div className="p-3.5 rounded-xl bg-[#FDF2F4] border border-[#E5B8BF] space-y-2 text-[13px]">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold text-[#8E2837]">
+                            รายการที่ไม่สำเร็จ ({bulkResult.failed.length} รายการ)
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const retryIds = new Set(
+                                bulkResult.failed
+                                  .map((f: any) => String(f.personId || ''))
+                                  .filter(Boolean)
+                              );
+                              setBulkSelectedPersonIds(retryIds);
+                              setBulkResult(null);
+                            }}
+                            className="ent-btn-secondary h-8 px-3 text-[12.5px]"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+                            <span>ลองใหม่เฉพาะรายการที่ล้มเหลว</span>
+                          </button>
+                        </div>
+                        <div className="max-h-32 overflow-y-auto space-y-1 text-[#8E2837]">
+                          {bulkResult.failed.map((f: any, idx: number) => (
+                            <div key={`${f.personId}-${idx}`}>
+                              <span className="font-mono font-semibold">{f.personId || '—'}</span> (
+                              {f.username || '—'}): {f.message}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                      <input
+                        type="text"
+                        aria-label="ค้นหาบุคลากรในรายการสร้างบัญชีแบบกลุ่ม"
+                        value={bulkSearch}
+                        onChange={(e) => setBulkSearch(e.target.value)}
+                        placeholder="ค้นหาชื่อ รหัส หรือ Username..."
+                        className="ent-input w-full"
+                      />
+                      <select
+                        aria-label="กรองตามหน่วยงาน"
+                        value={bulkDepartmentFilter}
+                        onChange={(e) => setBulkDepartmentFilter(e.target.value)}
+                        className="ent-input w-full"
+                      >
+                        <option value="">ทุกหน่วยงาน ({deptOptions.length})</option>
+                        {deptOptions.map((d) => (
+                          <option key={d} value={d}>
+                            {d}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        aria-label="กรองตามประเภทบุคลากร"
+                        value={bulkPersonnelTypeFilter}
+                        onChange={(e) => setBulkPersonnelTypeFilter(e.target.value)}
+                        className="ent-input w-full"
+                      >
+                        <option value="">ทุกประเภทบุคลากร</option>
+                        {ptOptions.map(([code, name]) => (
+                          <option key={code} value={code}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        aria-label="กำหนดสิทธิ์เริ่มต้นสำหรับบัญชีที่เลือก"
+                        value={bulkDefaultRole}
+                        onChange={(e) =>
+                          setBulkDefaultRole(
+                            e.target.value as 'GENERAL_USER' | 'RESPONSIBLE_STAFF'
+                          )
+                        }
+                        className="ent-input w-full font-semibold"
+                      >
+                        <option value="GENERAL_USER">สิทธิ์: บุคลากรทั่วไป (GENERAL_USER)</option>
+                        <option value="RESPONSIBLE_STAFF">สิทธิ์: เจ้าหน้าที่ HR (RESPONSIBLE_STAFF)</option>
+                      </select>
+                    </div>
+
+                    {bulkLoadingCandidates ? (
+                      <TableLoadingSkeleton rows={5} cols={4} />
+                    ) : (
+                      <div className="overflow-x-auto max-h-80 border border-[#E8E4EF] rounded-xl">
+                        <table className="his-table text-[13px]">
+                          <thead>
+                            <tr>
+                              <th className="w-10 text-center">
+                                <input
+                                  type="checkbox"
+                                  aria-label="เลือกทั้งหมดที่แสดง"
+                                  checked={allFilteredSelected}
+                                  onChange={() => {
+                                    const slice = filteredCandidates.slice(0, 500);
+                                    setBulkSelectedPersonIds((prev) => {
+                                      const next = new Set(prev);
+                                      if (allFilteredSelected) {
+                                        slice.forEach((c) => next.delete(c.personId));
+                                      } else {
+                                        slice.forEach((c) => next.add(c.personId));
+                                      }
+                                      return next;
+                                    });
+                                  }}
+                                  className="w-4 h-4 accent-[#8066B5] cursor-pointer"
+                                />
+                              </th>
+                              <th>รหัส · ชื่อ-นามสกุล</th>
+                              <th>หน่วยงาน · ประเภท</th>
+                              <th>ชื่อบัญชีผู้ใช้ (แก้ไขได้)</th>
+                              <th>สถานะ</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filteredCandidates.length === 0 ? (
+                              <TableEmptyState
+                                colSpan={5}
+                                title="ไม่พบบุคลากรที่ยังไม่มีบัญชีผู้ใช้ตามตัวกรองที่เลือก"
+                              />
+                            ) : (
+                              filteredCandidates.slice(0, 500).map((c) => {
+                                const selected = bulkSelectedPersonIds.has(c.personId);
+                                const editedUsername =
+                                  bulkUsernameEdits[c.personId] ?? c.suggestedUsername;
+                                const showConflict =
+                                  c.usernameExists &&
+                                  editedUsername.trim().toLowerCase() ===
+                                    String(c.suggestedUsername).toLowerCase();
+                                return (
+                                  <tr
+                                    key={c.personId}
+                                    className={selected ? 'bg-[#F1ECFA]/40' : undefined}
+                                  >
+                                    <td className="text-center">
+                                      <input
+                                        type="checkbox"
+                                        aria-label={`เลือก ${c.fullName}`}
+                                        checked={selected}
+                                        onChange={() => {
+                                          setBulkSelectedPersonIds((prev) => {
+                                            const next = new Set(prev);
+                                            if (next.has(c.personId)) next.delete(c.personId);
+                                            else next.add(c.personId);
+                                            return next;
+                                          });
+                                        }}
+                                        className="w-4 h-4 accent-[#8066B5] cursor-pointer"
+                                      />
+                                    </td>
+                                    <td>
+                                      <div className="font-semibold text-[#292638]">{c.fullName}</div>
+                                      <div className="font-mono text-[12px] text-[#777287]">
+                                        {c.personId} · สแกน {c.fingleId || '—'}
+                                      </div>
+                                    </td>
+                                    <td>
+                                      <div className="text-[#292638]">{c.departmentName}</div>
+                                      <div className="text-[12px] text-[#777287]">
+                                        {c.personnelTypeName}
+                                      </div>
+                                    </td>
+                                    <td>
+                                      <input
+                                        type="text"
+                                        aria-label={`Username สำหรับ ${c.fullName}`}
+                                        value={editedUsername}
+                                        onChange={(e) =>
+                                          setBulkUsernameEdits((prev) => ({
+                                            ...prev,
+                                            [c.personId]: e.target.value,
+                                          }))
+                                        }
+                                        className="ent-input h-8 text-[12.5px] font-mono w-44"
+                                      />
+                                    </td>
+                                    <td>
+                                      {showConflict ? (
+                                        <StatusBadge tone="warning" label="Username ซ้ำ (แก้ก่อนสร้าง)" compact />
+                                      ) : (
+                                        <StatusBadge tone="success" label="พร้อมสร้าง" compact />
+                                      )}
+                                    </td>
+                                  </tr>
+                                );
+                              })
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </>
+                )}
+
+                <div className="flex flex-col-reverse sm:flex-row justify-between items-center gap-2.5 pt-3 border-t border-[#E8E4EF]">
+                  <span className="text-[12.5px] text-[#777287] tabular-nums">
+                    เลือกแล้ว <strong className="text-[#4E3978]">{bulkSelectedPersonIds.size}</strong>{' '}
+                    รายการ (สูงสุด 500 รายการต่อครั้ง)
+                  </span>
+                  <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center gap-2.5 w-full sm:w-auto">
+                    <button
+                      type="button"
+                      disabled={bulkCreating}
+                      onClick={() => setBulkModalOpen(false)}
+                      className="ent-btn-secondary w-full sm:w-auto"
+                    >
+                      ปิดหน้าต่าง
+                    </button>
+                    {!bulkResult && (
+                      <button
+                        type="button"
+                        disabled={bulkCreating || bulkSelectedPersonIds.size === 0}
+                        onClick={handleSubmitBulkCreate}
+                        className="ent-btn-primary w-full sm:w-auto disabled:opacity-50"
+                      >
+                        {bulkCreating ? (
+                          <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+                        ) : (
+                          <Users className="w-4 h-4" aria-hidden="true" />
+                        )}
+                        <span>
+                          {bulkCreating
+                            ? 'กำลังสร้างบัญชี...'
+                            : `ยืนยันสร้างบัญชี (${bulkSelectedPersonIds.size} บัญชี)`}
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </SharedModal>
       </div>
     );
@@ -1196,8 +2129,22 @@ function AdminUsersAndAuditViews({
                             {formatThaiDateTime(log.created_at)}
                           </div>
                         </div>
-                        <StatusBadge tone={log.result === 'SUCCESS' ? 'success' : 'danger'}>
-                          {log.result === 'SUCCESS' ? 'สำเร็จ' : log.result}
+                        <StatusBadge
+                          tone={
+                            log.result === 'SUCCESS'
+                              ? 'success'
+                              : log.result === 'BLOCKED' || log.result === 'PARTIAL_SUCCESS'
+                                ? 'warning'
+                                : 'danger'
+                          }
+                        >
+                          {log.result === 'SUCCESS'
+                            ? 'สำเร็จ'
+                            : log.result === 'BLOCKED'
+                              ? 'ถูกระงับ (BLOCKED)'
+                              : log.result === 'DENIED'
+                                ? 'ถูกปฏิเสธ (DENIED)'
+                                : log.result}
                         </StatusBadge>
                       </div>
                       <div className="pt-2 border-t border-[#F1ECFA] text-[13px] space-y-1 font-mono">
@@ -1291,14 +2238,31 @@ function AdminUsersAndAuditViews({
                             {log.target_type}:{log.target_id || '—'}
                           </td>
                           <td>
-                            <StatusBadge tone={log.result === 'SUCCESS' ? 'success' : 'danger'}>
-                              {log.result === 'SUCCESS' ? 'สำเร็จ' : log.result}
+                            <StatusBadge
+                              tone={
+                                log.result === 'SUCCESS'
+                                  ? 'success'
+                                  : log.result === 'BLOCKED' || log.result === 'PARTIAL_SUCCESS'
+                                    ? 'warning'
+                                    : 'danger'
+                              }
+                            >
+                              {log.result === 'SUCCESS'
+                                ? 'สำเร็จ'
+                                : log.result === 'BLOCKED'
+                                  ? 'ถูกระงับ (BLOCKED)'
+                                  : log.result === 'DENIED'
+                                    ? 'ถูกปฏิเสธ (DENIED)'
+                                    : log.result}
                             </StatusBadge>
                           </td>
                           <td className="text-right">
                             <button
                               type="button"
-                              onClick={() => setSelectedAuditLog(log)}
+                              onClick={() => {
+                                setCopiedAuditJson(false);
+                                setSelectedAuditLog(log);
+                              }}
                               className="ent-btn-secondary h-8 px-3 text-[12.5px] whitespace-nowrap"
                             >
                               <PanelRightOpen className="w-3.5 h-3.5 text-[#8066B5]" aria-hidden="true" />
@@ -1332,23 +2296,53 @@ function AdminUsersAndAuditViews({
             selectedAuditLog ? `รายการ #${selectedAuditLog.id} · ${selectedAuditLog.action}` : ''
           }
         >
-          {selectedAuditLog && (
-            <div className="space-y-4 text-[14px]">
-              <div className="p-4 bg-[#F8F7FC] border border-[#E8E4EF] rounded-xl space-y-2 font-mono text-[13px]">
-                <div>รหัสคำขอ (Request ID): {selectedAuditLog.request_id}</div>
-                <div>เวลาที่เกิดเหตุการณ์: {formatThaiDateTime(selectedAuditLog.created_at)}</div>
+          {selectedAuditLog && (() => {
+            const rawJson = selectedAuditLog.detail_json || '{}';
+            let formattedJson = rawJson;
+            try {
+              formattedJson = JSON.stringify(JSON.parse(rawJson), null, 2);
+            } catch {
+              formattedJson = rawJson;
+            }
+            return (
+              <div className="space-y-4 text-[14px]">
+                <div className="p-4 bg-[#F8F7FC] border border-[#E8E4EF] rounded-xl space-y-2 font-mono text-[13px]">
+                  <div>รหัสคำขอ (Request ID): {selectedAuditLog.request_id}</div>
+                  <div>เวลาที่เกิดเหตุการณ์: {formatThaiDateTime(selectedAuditLog.created_at)}</div>
+                  <div>
+                    ผู้ดำเนินการ: {selectedAuditLog.actor_username} ({selectedAuditLog.actor_role})
+                  </div>
+                  <div>
+                    ผลลัพธ์: {selectedAuditLog.result}
+                    {selectedAuditLog.error_code ? ` · ${selectedAuditLog.error_code}` : ''}
+                  </div>
+                </div>
                 <div>
-                  ผู้ดำเนินการ: {selectedAuditLog.actor_username} ({selectedAuditLog.actor_role})
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div className="font-bold text-[#292638]">ข้อมูลรายละเอียด (JSON)</div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void navigator.clipboard?.writeText(formattedJson);
+                        setCopiedAuditJson(true);
+                      }}
+                      className="ent-btn-secondary h-8 px-2.5 text-[12px]"
+                    >
+                      {copiedAuditJson ? (
+                        <Check className="w-3.5 h-3.5 text-[#198568]" aria-hidden="true" />
+                      ) : (
+                        <Copy className="w-3.5 h-3.5 text-[#8066B5]" aria-hidden="true" />
+                      )}
+                      <span>{copiedAuditJson ? 'คัดลอกแล้ว' : 'คัดลอก JSON'}</span>
+                    </button>
+                  </div>
+                  <pre className="p-4 bg-[#292638] text-[#F8F7FC] rounded-xl font-mono text-[12.5px] overflow-x-auto leading-relaxed">
+                    {formattedJson}
+                  </pre>
                 </div>
               </div>
-              <div>
-                <div className="font-bold text-[#292638] mb-2">ข้อมูลรายละเอียด (JSON)</div>
-                <pre className="p-4 bg-[#292638] text-[#F8F7FC] rounded-xl font-mono text-[12.5px] overflow-x-auto">
-                  {selectedAuditLog.detail_json || '{}'}
-                </pre>
-              </div>
-            </div>
-          )}
+            );
+          })()}
         </SlideOverDrawer>
       </div>
     );

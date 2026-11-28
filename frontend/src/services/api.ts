@@ -20,6 +20,7 @@ export interface AuthUser {
   displayName: string;
   role: UserRole;
   approvedPersonId: string | null;
+  mustChangePassword?: boolean;
   personProfile?: {
     person_id: string;
     fingle_id: string | null;
@@ -242,5 +243,133 @@ export async function downloadShiftImportTemplateXlsx(): Promise<void> {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+async function downloadAuthenticatedBlob(
+  endpoint: string,
+  fallbackFilename: string,
+  errorMessage: string
+): Promise<void> {
+  const csrfToken = inMemoryCsrfToken || readCsrfCookie();
+  const headers: Record<string, string> = {
+    'X-Requested-With': 'SamAttV2Client',
+  };
+  if (csrfToken) {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
+  if (inMemorySessionJwt) {
+    headers['Authorization'] = `Bearer ${inMemorySessionJwt}`;
+  }
+
+  const res = await fetch(`${API_BASE}${endpoint}`, {
+    method: 'GET',
+    credentials: 'include',
+    headers,
+  });
+
+  if (!res.ok) {
+    const contentType = res.headers.get('content-type') || '';
+    let errData: any = {};
+    if (contentType.includes('application/json')) {
+      errData = await res.json().catch(() => ({}));
+    }
+    throw new ApiClientError(
+      res.status,
+      errData.error || `HTTP_${res.status}`,
+      errData.message || errorMessage,
+      errData.requestId
+    );
+  }
+
+  const disposition = res.headers.get('content-disposition') || '';
+  const fnMatch = disposition.match(/filename="?([^"]+)"?/i);
+  const filename = fnMatch?.[1] || fallbackFilename;
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export async function downloadReportCenterXlsx(params: {
+  reportType: string;
+  dateFrom: string;
+  dateTo: string;
+  department?: string;
+  personnelType?: string;
+}): Promise<void> {
+  const qs = new URLSearchParams({
+    reportType: params.reportType,
+    dateFrom: params.dateFrom,
+    dateTo: params.dateTo,
+    ...(params.department ? { department: params.department } : {}),
+    ...(params.personnelType ? { personnelType: params.personnelType } : {}),
+  });
+  await downloadAuthenticatedBlob(
+    `/reports/center/export.xlsx?${qs.toString()}`,
+    `sam_att_${params.reportType.toLowerCase()}_${params.dateFrom}_${params.dateTo}.xlsx`,
+    'ไม่สามารถดาวน์โหลดไฟล์รายงาน Excel (.xlsx) ได้'
+  );
+}
+
+export async function downloadReportCenterCsv(params: {
+  reportType: string;
+  dateFrom: string;
+  dateTo: string;
+  department?: string;
+  personnelType?: string;
+}): Promise<void> {
+  const qs = new URLSearchParams({
+    reportType: params.reportType,
+    dateFrom: params.dateFrom,
+    dateTo: params.dateTo,
+    ...(params.department ? { department: params.department } : {}),
+    ...(params.personnelType ? { personnelType: params.personnelType } : {}),
+  });
+  await downloadAuthenticatedBlob(
+    `/reports/center/export.csv?${qs.toString()}`,
+    `sam_att_${params.reportType.toLowerCase()}_${params.dateFrom}_${params.dateTo}.csv`,
+    'ไม่สามารถดาวน์โหลดไฟล์รายงาน CSV ได้'
+  );
+}
+
+export async function downloadLatenessXlsx(params: {
+  dateFrom: string;
+  dateTo: string;
+  department?: string;
+  personnelType?: string;
+}): Promise<void> {
+  const qs = new URLSearchParams({
+    dateFrom: params.dateFrom,
+    dateTo: params.dateTo,
+    ...(params.department ? { department: params.department } : {}),
+    ...(params.personnelType ? { personnelType: params.personnelType } : {}),
+  });
+  await downloadAuthenticatedBlob(
+    `/reports/lateness/export.xlsx?${qs.toString()}`,
+    `sam_att_lateness_${params.dateFrom}_${params.dateTo}.xlsx`,
+    'ไม่สามารถดาวน์โหลดไฟล์ Excel รายงานการมาสายได้'
+  );
+}
+
+export async function downloadHolidaysCsv(params: {
+  year?: string;
+  dateFrom?: string;
+  dateTo?: string;
+}): Promise<void> {
+  const qs = new URLSearchParams();
+  if (params.year) qs.set('year', params.year);
+  if (params.dateFrom) qs.set('dateFrom', params.dateFrom);
+  if (params.dateTo) qs.set('dateTo', params.dateTo);
+  await downloadAuthenticatedBlob(
+    `/holidays/export.csv?${qs.toString()}`,
+    `sam_att_holidays_${params.year || 'all'}.csv`,
+    'ไม่สามารถส่งออกปฏิทินวันหยุด CSV ได้'
+  );
 }
 

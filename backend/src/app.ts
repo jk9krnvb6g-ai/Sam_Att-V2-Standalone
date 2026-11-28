@@ -27,6 +27,10 @@ import { attendanceRouter } from './modules/attendance/routes.ts';
 import { reportsRouter } from './modules/reports/routes.ts';
 import { hosofficeRouter } from './modules/hosoffice/routes.ts';
 import { settingsRouter } from './modules/settings/routes.ts';
+import { holidaysRouter } from './modules/holidays/routes.ts';
+import { periodsRouter } from './modules/periods/routes.ts';
+import { completenessRouter } from './modules/attendance/completeness.ts';
+import { hrWorkCenterRouter } from './modules/hr/workCenter.ts';
 
 export function createExpressApp(options?: { serveStaticBuild?: boolean }): Express {
   const app = express();
@@ -46,7 +50,7 @@ export function createExpressApp(options?: { serveStaticBuild?: boolean }): Expr
     const isApiRoute = req.path.startsWith(cfg.apiBasePath) || req.path.startsWith('/api/');
     const disallowFraming = cfg.nodeEnv === 'production' || isApiRoute;
 
-    if (isApiRoute && !req.path.endsWith('.csv')) {
+    if (isApiRoute && !req.path.endsWith('.csv') && !req.path.endsWith('.xlsx')) {
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
     }
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -116,14 +120,18 @@ export function createExpressApp(options?: { serveStaticBuild?: boolean }): Expr
 
   // ผูก Router ของทุกโมดูลเข้าภายใต้พาธ /api/Sam_Att
   const apiPrefix = cfg.apiBasePath;
-  app.use(apiPrefix, authRouter);       // โมดูลเข้าสู่ระบบและจัดการผู้ใช้
-  app.use(apiPrefix, personnelRouter);  // โมดูลทะเบียนบุคลากรและซิงก์ HOSOffice
-  app.use(apiPrefix, shiftsRouter);     // โมดูลแม่แบบกะทำงานและมอบหมายตารางเวร
-  app.use(apiPrefix, scannersRouter);   // โมดูลเครื่องสแกนและรับข้อมูลสแกนดิบ 6 ฟิลด์
-  app.use(apiPrefix, attendanceRouter); // โมดูลตรวจสอบเวลาปฏิบัติงานและ Reprocess
-  app.use(apiPrefix, reportsRouter);    // โมดูลรายงานสถิติการมาสายและส่งออก CSV
-  app.use(apiPrefix, hosofficeRouter);  // โมดูลจำลองและส่งข้อมูลกลับ HOSOffice
-  app.use(apiPrefix, settingsRouter);   // โมดูลตั้งค่าระบบ บันทึกความปลอดภัย และอัปเดต
+  app.use(apiPrefix, authRouter);         // โมดูลเข้าสู่ระบบและจัดการผู้ใช้
+  app.use(apiPrefix, personnelRouter);    // โมดูลทะเบียนบุคลากรและซิงก์ HOSOffice
+  app.use(apiPrefix, holidaysRouter);     // โมดูลปฏิทินวันหยุดโรงพยาบาลและขอบเขต (B1)
+  app.use(apiPrefix, periodsRouter);      // โมดูลปิดรอบบัญชีเวลาประจำเดือนและล็อกงวด (B8)
+  app.use(apiPrefix, shiftsRouter);       // โมดูลแม่แบบกะทำงานและมอบหมายตารางเวร
+  app.use(apiPrefix, scannersRouter);     // โมดูลเครื่องสแกนและรับข้อมูลสแกนดิบ 6 ฟิลด์
+  app.use(apiPrefix, completenessRouter); // โมดูลตรวจสอบความครบถ้วนข้อมูลย้อนหลัง (B3)
+  app.use(apiPrefix, attendanceRouter);   // โมดูลตรวจสอบเวลาปฏิบัติงานและ Reprocess
+  app.use(apiPrefix, hrWorkCenterRouter); // โมดูลศูนย์ปฏิบัติการ HR รายวัน (B4)
+  app.use(apiPrefix, reportsRouter);      // โมดูลรายงานสถิติ 11 ประเภทและส่งออก .xlsx/.csv
+  app.use(apiPrefix, hosofficeRouter);    // โมดูลจำลองและส่งข้อมูลกลับ HOSOffice
+  app.use(apiPrefix, settingsRouter);     // โมดูลตั้งค่าระบบ บันทึกความปลอดภัย สุขภาพระบบ และอัปเดต
 
   // กรณีเรียก API ที่ไม่มีอยู่ในระบบ ให้ตอบกลับ HTTP 404 แบบ JSON
   app.use(apiPrefix, (req: Request, res: Response) => {

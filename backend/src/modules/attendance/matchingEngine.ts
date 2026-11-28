@@ -19,6 +19,8 @@
 
 export type AttendanceCompletenessStatus =
   | 'COMPLETE'
+  | 'IN_PROGRESS'
+  | 'LATE_IN_PROGRESS'
   | 'NO_SCAN'
   | 'MISSING_CHECKIN'
   | 'MISSING_CHECKOUT'
@@ -27,6 +29,8 @@ export type AttendanceCompletenessStatus =
 export type LegacyAttendanceStatus =
   | 'NORMAL'
   | 'LATE'
+  | 'IN_PROGRESS'
+  | 'LATE_IN_PROGRESS'
   | 'NO_SCAN'
   | 'MISSING_CHECKIN'
   | 'MISSING_CHECKOUT'
@@ -792,8 +796,18 @@ export function matchPersonShiftsGlobally(params: {
       }
 
       if (inScan && !outScan) {
-        // ATT-14 / TC-15: Has IN, missing OUT
+        // ATT-14 / TC-15: Has IN, missing OUT -> IN_PROGRESS / LATE_IN_PROGRESS before evaluatedEndMin, MISSING_CHECKOUT after
         const isPastEnd = nowMin >= sh.evaluatedEndMin;
+        const activeStatus: LegacyAttendanceStatus = isPastEnd
+          ? 'MISSING_CHECKOUT'
+          : isLate
+            ? 'LATE_IN_PROGRESS'
+            : 'IN_PROGRESS';
+        const activeAttStatus: AttendanceCompletenessStatus = isPastEnd
+          ? 'MISSING_CHECKOUT'
+          : isLate
+            ? 'LATE_IN_PROGRESS'
+            : 'IN_PROGRESS';
         outcomes.push({
           personId: sh.input.personId,
           workDate: sh.input.workDate,
@@ -809,8 +823,8 @@ export function matchPersonShiftsGlobally(params: {
           checkOutTime: null,
           checkInRawScanId: inScan.id,
           checkOutRawScanId: null,
-          status: isPastEnd ? 'MISSING_CHECKOUT' : isLate ? 'LATE' : 'NORMAL',
-          attendanceStatus: isPastEnd ? 'MISSING_CHECKOUT' : 'MISSING_CHECKOUT',
+          status: activeStatus,
+          attendanceStatus: activeAttStatus,
           secondaryFlags: isPastEnd && isLate ? 'LATE_AND_MISSING_CHECKOUT' : null,
           isLate,
           lateMinutes,

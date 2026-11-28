@@ -1,0 +1,1864 @@
+# MASTER PROMPT — SAM_ATT V2 STANDALONE
+# FULL SYSTEM AUDIT, FIX, STABILIZATION & IMPROVEMENT
+## PART A + PART B — UNIFIED MASTER EDITION
+
+**SMART HOSPITAL • ATTENDANCE MANAGEMENT • HR WORK CENTER • DATA ACCURACY • SECURITY • PERFORMANCE • USER EXPERIENCE • SUSTAINABILITY**
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# SECTION 01 — PROJECT CONTEXT
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 1.1 Project Information
+
+- Project: Sam_Att V2 Standalone
+- Organization: โรงพยาบาลสามชุก
+- Repository: jk9krnvb6g-ai/Sam_Att-V2-Standalone
+- Branch: main
+- Application Version: V2
+- Reference Commit: 04d2bbc หรือ Commit ล่าสุดที่ตรวจสอบได้
+- Deployment: On-Premise Standalone
+- Operating System: Windows Server
+- Application Directory: C:\inetpub\wwwroot\Sam_Att
+- Node.js Runtime: v24.13.0
+- Frontend: React / TypeScript / Vite
+- Backend: Node.js / TypeScript
+- Database: MySQL / MariaDB
+- Database Name: samchuk_attendance_v2
+- Production Database Host: 10.1.0.201
+- Integration: HOSOffice
+- Scanner Integration: ScannerReader.exe / ScannerSyncCli.exe
+- HTTPS Port: 4101
+- Frontend Base Path: /Sam_Att/
+- API Base Path: /api/Sam_Att/
+- Timezone: Asia/Bangkok
+- Primary Language: Thai
+- Existing UI Theme: Purple and White
+- Reference Personnel Count: ประมาณ 241 คน
+
+ข้อมูลข้างต้นเป็นข้อมูลอ้างอิงจากระบบที่ตรวจสอบก่อนหน้านี้
+
+ต้องตรวจสอบ Source Code, Configuration และ Database Schema จริงก่อนเริ่มดำเนินการ ห้าม Hardcode จำนวนบุคลากรหรือข้อมูลสถิติจากตัวอย่าง
+
+## 1.2 Project Vision
+
+พัฒนา Sam_Att V2 ให้เป็นระบบบริหารจัดการเวลาปฏิบัติงานของโรงพยาบาลที่:
+
+- เจ้าหน้าที่ทั่วไปใช้งานง่าย
+- HR ทำงานน้อยลง
+- ข้อมูลมีความถูกต้องและตรวจสอบย้อนหลังได้
+- ผู้บริหารสามารถใช้ข้อมูลประกอบการตัดสินใจ
+- ผู้ดูแลระบบสามารถดูแลรักษาได้ง่าย
+- รองรับการปฏิบัติงานของโรงพยาบาลตลอด 24 ชั่วโมง
+- รองรับวันหยุด กะทำงาน และตารางเวรที่แตกต่างกัน
+- ไม่สร้างภาระในการดูแลระบบเกินความจำเป็น
+- รองรับการพัฒนาต่อยอดอย่างยั่งยืน
+- สอดคล้องกับแนวทาง Smart Hospital และ PDPA
+
+## 1.3 AI Role
+
+ให้คุณทำหน้าที่ร่วมกันในฐานะ:
+
+- Senior Full-Stack Developer
+- Software Architect
+- Database Engineer
+- QA Engineer
+- Security Engineer
+- UX/UI Designer
+- Business Analyst
+- Hospital Attendance System Specialist
+- DevOps Engineer
+
+ต้องตรวจสอบและปรับปรุงระบบจริง ไม่ใช่เพียงเสนอแนวคิดหรือจัดทำ Mockup
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# SECTION 02 — MASTER EXECUTION STRATEGY
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Master Prompt ฉบับนี้รวมงานทั้งหมดเป็น 2 ส่วน
+
+## PART A — FIX & STABILIZE
+
+ตรวจสอบและแก้ไขระบบเดิมทั้ง 16 หน้า รวมถึง Attendance Engine, Database Safety, API, Security และ Performance
+
+## QUALITY GATE A
+
+ทดสอบและยืนยันว่าระบบเดิมทำงานถูกต้องก่อนเริ่มเพิ่ม Feature ใหม่
+
+## PART B — IMPROVE & ENHANCE
+
+เพิ่มความสามารถใหม่เพื่อยกระดับประสบการณ์ใช้งาน ลดภาระ HR และเพิ่มความสามารถในการบริหารจัดการระบบ
+
+## QUALITY GATE B
+
+ทดสอบ Feature ใหม่และ Full System Regression
+
+## FINAL ACCEPTANCE
+
+จัดทำรายงานผลทั้งหมด พร้อมรายการที่ต้องทดสอบบน Windows Server จริง
+
+### Execution Rules
+
+1. ตรวจสอบ Source Code จริงก่อนแก้ไข
+2. จัดทำ Baseline Audit
+3. แก้ไขทีละ Phase
+4. ทดสอบหลังจบแต่ละ Phase
+5. แก้ Root Cause ไม่ใช่เพียงซ่อน Error
+6. ห้ามสร้างระบบใหม่ทับระบบเดิมทั้งหมด
+7. ห้ามทำงานทุก Feature พร้อมกันโดยไม่มีการควบคุมผลกระทบ
+8. ต้องผ่าน Quality Gate A ก่อนเริ่ม Part B
+9. Feature ที่พึ่งพากันต้องพัฒนาตามลำดับ
+10. หากพบ Critical Blocker ให้หยุดเฉพาะงานที่เกี่ยวข้องและรายงาน
+11. สามารถดำเนินการ Phase ถัดไปโดยไม่ต้องรอผู้ใช้ตอบทุกครั้ง หากผ่าน Acceptance Criteria และไม่มีการตัดสินใจด้านนโยบายที่สำคัญค้างอยู่
+12. ห้าม Auto Deploy ไปยัง Production Server
+
+หากข้อกำหนดใดไม่สามารถทำได้จริง ให้รายงานตามตรง ห้ามสร้างผลลัพธ์ปลอม
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# SECTION 03 — NON-NEGOTIABLE RULES
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+## 3.1 Data Protection
+
+ห้ามดำเนินการดังต่อไปนี้:
+
+- ลบข้อมูลบุคลากรจริง
+- ลบข้อมูลสแกนต้นฉบับ
+- ลบ Attendance History
+- ลบ HR Review History
+- ลบ Audit Log
+- Reset Production Database
+- DROP DATABASE
+- TRUNCATE Production Tables
+- เขียนทับข้อมูลย้อนหลังโดยไม่มี Audit Trail
+- เปลี่ยน Primary Key หรือ Identifier โดยไม่มีแผน Migration
+- สร้างข้อมูล Mock หรือ Demo ปะปนกับ Production Data
+- ใช้ Production Database สำหรับ Automated Tests
+- ส่งข้อมูลบุคลากรจริงไปยัง External AI หรือ External Services
+
+Raw Scan Data ต้องเป็น Immutable Source Data
+
+การแก้ไขผลการลงเวลาต้องทำใน Attendance หรือ Adjustment Layer เท่านั้น
+
+## 3.2 Production Database Safety
+
+หากต้องเปลี่ยน Database Schema:
+
+- ใช้ Versioned Migration
+- Migration ต้องมีลำดับและ Checksum
+- ตรวจสอบ Existing Schema ก่อนสร้าง Migration
+- รองรับ Existing Production Data
+- หลีกเลี่ยง Destructive Migration
+- ระบุผลกระทบของ Migration
+- จัดทำคำสั่งสำหรับผู้ดูแลระบบแยกต่างหาก
+- จัดทำแผนตรวจสอบก่อนและหลัง Migration
+- ห้ามรัน Migration บน Production โดยอัตโนมัติ
+- ห้ามรัน Startup DDL บน Production MySQL
+- รักษา startupReadOnlyOnMysql Policy
+- ห้ามเปิด SAM_ATT_AUTO_MIGRATE โดยพลการ
+- ห้ามแก้ Production .env
+
+การสร้าง Migration File ใน Repository สามารถทำได้เมื่อจำเป็น แต่การนำไปใช้กับฐานข้อมูลจริงต้องได้รับการอนุมัติแยกต่างหาก
+
+## 3.3 Infrastructure Protection
+
+ห้ามกระทบ:
+
+- Procurement
+- Central API Gateway
+- HOSOffice
+- IIS
+- PM2 Daemon
+- Other Node.js Applications
+- Scanner Services
+- Other Hospital Information Systems
+
+ห้ามใช้:
+
+- iisreset
+- taskkill /IM node.exe /F
+- git reset --hard
+- git clean -fd
+
+ห้ามแก้ไข ScannerReader.exe หรือ ScannerSyncCli.exe โดยไม่มีเหตุผลและการอนุมัติ
+
+## 3.4 HOSOffice Safety
+
+- HOSOffice Live Push ต้องยังปิดอยู่
+- รักษา HOSOFFICE_LIVE_PUSH_ENABLED=false
+- ห้ามส่งข้อมูลจริงไปยัง HOSOffice ระหว่าง Development หรือ Testing
+- ห้ามแก้ไขข้อมูลใน HOSOffice Production
+- ใช้ Read-Only Connection สำหรับการอ่านข้อมูลที่ได้รับอนุญาต
+- ทดสอบ Write Operation เฉพาะ Isolated Test Environment
+- ห้ามสร้างระบบลางานหรือระบบเงินเดือนซ้ำกับ HOSOffice
+
+## 3.5 Security
+
+- รักษา Existing Authentication Architecture
+- รักษา Role-Based Access Control
+- ตรวจสอบ Authorization ฝั่ง Backend ทุก Endpoint
+- ป้องกัน IDOR
+- ป้องกัน SQL Injection
+- ป้องกัน XSS
+- ป้องกัน CSRF ตาม Authentication Architecture ที่ใช้งานจริง
+- ป้องกัน Brute Force
+- ป้องกันการเปิดเผย Password, Token และ Database Credentials
+- ห้ามเก็บ Plaintext Password
+- ห้ามส่ง Secrets ไปยัง Frontend
+- ห้ามบันทึก Secrets ลง Log
+- ใช้ Principle of Least Privilege
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# SECTION 04 — PHASE 0 GITHUB UPDATE CENTER FREEZE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+IMPORTANT — READ CAREFULLY
+
+ขณะนี้ GitHub Update Center อยู่ระหว่างพักการแก้ไข Phase 0
+
+ปัญหาที่พบล่าสุด:
+
+- One-Click Update ค้างที่ 5%
+- Deployment Job ถูกสร้างแล้ว
+- Progress API ถูกเรียกต่อเนื่อง
+- Checklist Step Names ไม่แสดง
+- Detached Worker Execution ยังไม่ได้รับการยืนยัน
+- Persistent Job Status Synchronization ยังไม่ได้รับการยืนยัน
+- Application Rollback ข้าม Commit ยังไม่ได้รับการทดสอบจริง
+
+ให้บันทึกปัญหาเหล่านี้เป็น Known Issues
+
+ห้ามเริ่มแก้ไข Phase 0 ใน Master Prompt ฉบับนี้
+
+ห้ามแก้ไขโดยพลการ:
+
+- deployment/Deploy_Sam_Att.ps1
+- deployment/deploy-runner.ts
+- backend/src/modules/deployment/jobStore.ts
+- backend/src/modules/deployment/githubUpdateCenter.ts
+- backend/src/modules/deployment/github-update.ts
+- DeploymentUpdateCenter.tsx
+- GitHubUpdateCenter.tsx
+- Deployment Worker Architecture
+- Deployment Job Store
+- Application Rollback Architecture
+- GitHub Rate Limit Protection
+
+หากจำเป็นต้องแก้ Shared Component ที่เกี่ยวข้องกับ Update Center ให้ตรวจสอบผลกระทบและรักษา Existing Behavior
+
+ห้ามทำให้ระบบกลับไปเรียก npm test บน Production Updater
+
+ห้ามทำให้ Production Startup กลับไปรัน Database Migration อัตโนมัติ
+
+ห้ามอ้างว่า Phase 0 เสร็จสมบูรณ์
+
+ให้ดำเนินการ Part A และ Part B ต่อไปใน Development Environment โดยไม่ต้องรอ Phase 0
+
+Production Deployment จะดำเนินการแยกต่างหากภายหลัง
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PART A — FIX & STABILIZE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE A0 — BASELINE SYSTEM AUDIT
+
+## A0.1 Source Code Audit
+
+ตรวจสอบ:
+
+- Repository Structure
+- Frontend Routes
+- Backend Routes
+- API Contracts
+- Authentication
+- Authorization
+- Database Schema
+- Existing Migrations
+- Attendance Engine
+- Shift Resolution
+- Scanner Integration
+- HOSOffice Integration
+- HR Review
+- Report Generation
+- Audit Logging
+- Scheduler
+- Error Handling
+- Test Coverage
+- Shared Components
+- Configuration
+- Existing Documentation
+
+## A0.2 Issue Classification
+
+จัดประเภทปัญหาเป็น:
+
+- CONFIRMED
+- ALREADY_FIXED
+- REQUIRES_VERIFICATION
+- NOT_REPRODUCIBLE
+- CONFIGURATION_DEPENDENT
+- DEFERRED
+- BLOCKED
+
+ข้อผิดพลาดจากการตรวจสอบหน้าจอก่อนหน้านี้เป็น Audit Evidence ไม่ใช่ข้อสรุปว่า Source Code ล่าสุดยังมีปัญหาเหมือนเดิมทุกประการ
+
+หากแก้ไขแล้ว ห้ามแก้ซ้ำโดยไม่จำเป็น
+
+## A0.3 Baseline Report
+
+สร้าง Issue Register ประกอบด้วย:
+
+- Issue ID
+- Page
+- Description
+- Evidence
+- Root Cause
+- Priority
+- Affected Files
+- Proposed Fix
+- Test Cases
+- Current Status
+
+Priority:
+
+- P0: Data Accuracy / Security / Critical Failure
+- P1: Functional Bug / Operational Impact
+- P2: UX / Performance / Maintainability
+- P3: Optional Enhancement
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE A1 — ATTENDANCE ENGINE CORRECTNESS
+
+Priority: P0
+
+Attendance Engine เป็นหัวใจหลักของ Sam_Att
+
+ต้องแก้ไขส่วนนี้ก่อนแก้ไข Dashboard และ Reports
+
+## A1.1 Attendance Lifecycle
+
+แยกสถานะการปฏิบัติงานให้สอดคล้องกับเวลาจริง
+
+รองรับ Logical Status ดังต่อไปนี้ โดย Mapping เข้ากับ Existing Schema อย่างเหมาะสม:
+
+- NOT_STARTED — ยังไม่ถึงเวลาเริ่มงาน
+- AWAITING_CHECKIN — รอสแกนเข้างาน
+- IN_PROGRESS — กำลังปฏิบัติงาน
+- LATE_IN_PROGRESS — มาสายและกำลังปฏิบัติงาน
+- NORMAL — ปฏิบัติงานครบตามเกณฑ์
+- LATE — มาสาย
+- EARLY_LEAVE — ออกก่อนเวลา
+- MISSING_CHECKIN — ไม่พบข้อมูลเข้างาน
+- MISSING_CHECKOUT — ไม่พบข้อมูลออกงาน
+- NO_SCAN — ไม่พบข้อมูลสแกนเมื่อถึงเวลาประเมิน
+- NO_SHIFT — ไม่มีตารางปฏิบัติงาน
+- OFF_DAY — วันหยุด
+- APPROVED_LEAVE — ลาที่ได้รับการรับรอง
+- OFFICIAL_DUTY — ไปราชการหรือปฏิบัติภารกิจ
+
+ไม่จำเป็นต้องสร้าง Database Enum ใหม่ทุกสถานะ หากสามารถใช้ Derived Status หรือ Existing Fields ได้อย่างถูกต้อง
+
+## A1.2 Time-Based Evaluation
+
+ตัวอย่าง:
+
+กะทำงาน 08:00–16:00
+
+เวลา 07:00:
+
+- ยังไม่ถึงเวลาเริ่มงาน
+- ห้ามสรุปว่าขาดสแกน
+
+เวลา 08:05:
+
+- หากมี Check-in และยังไม่ถึงเวลาเลิกงาน ให้แสดงกำลังปฏิบัติงานหรือมาสายตามเกณฑ์
+
+เวลา 10:00:
+
+- หากสแกนเข้าแล้ว ให้แสดงกำลังปฏิบัติงาน
+- ห้ามสรุป NORMAL ว่าปฏิบัติงานครบแล้ว
+
+เวลา 16:00:
+
+- ตรวจสอบเงื่อนไข Checkout Window และ Grace Period
+
+หลังสิ้นสุด Evaluation Window:
+
+- จึงประเมิน NORMAL, LATE, EARLY_LEAVE, MISSING_CHECKOUT หรือ NO_SCAN ตามข้อมูลจริง
+
+ห้ามประเมินวันในอนาคตเป็น NO_SCAN
+
+ห้ามประเมินกะที่ยังไม่สิ้นสุดว่าเสร็จสมบูรณ์
+
+ใช้ Server Time และ Asia/Bangkok เป็นหลัก
+
+ไม่ใช้ Browser Clock เป็นแหล่งตัดสิน Attendance Status
+
+## A1.3 Multiple Attendance Conditions
+
+บุคลากรหนึ่งคนอาจมีหลายเงื่อนไขพร้อมกัน เช่น:
+
+- มาสายและออกก่อนเวลา
+- มาสายและขาดสแกนออก
+- ลาครึ่งวันและมาสาย
+- ปฏิบัติงานข้ามวัน
+
+ห้ามสูญเสียข้อมูลเงื่อนไขรองเพราะใช้ Primary Status เพียงค่าเดียว
+
+แยก:
+
+- Attendance Status
+- Late Indicator
+- Late Minutes
+- Early Checkout Indicator
+- Early Checkout Minutes
+- Missing Scan Indicators
+- HR Review Status
+
+กำหนด Primary Status Priority ให้ชัดเจนและจัดทำเอกสาร
+
+## A1.4 Shift Resolution
+
+กำหนดลำดับการเลือกกะทำงานอย่างชัดเจน:
+
+1. Explicit Shift Assignment
+2. Individual Schedule Override
+3. Approved Off-Day / Leave / Official Duty ที่เกี่ยวข้อง
+4. Hospital Holiday Policy
+5. Effective Default Shift
+6. Personnel-Type Default Shift
+7. NO_SHIFT
+
+ลำดับจริงต้องตรวจสอบกับ Existing Business Rules
+
+หากมีความขัดแย้งระหว่างวันหยุด การลา และเวรที่ได้รับมอบหมาย ให้ใช้ Conflict Resolution ที่มีหลักฐานและสามารถให้ HR ตรวจสอบได้
+
+ห้ามสมมติว่าบุคลากรทุกคนทำงานวันจันทร์ถึงวันศุกร์
+
+ห้ามสมมติว่าบุคลากรทุกคนทำงานครบ 7 วัน
+
+## A1.5 Hospital Holiday Handling
+
+ใน Part A ให้แก้ Core Holiday Resolution และการประเมินวันหยุดให้ถูกต้อง
+
+หากยังไม่มี Holiday Management UI ให้พัฒนา UI เต็มรูปแบบใน Part B
+
+รองรับ:
+
+- วันเสาร์และวันอาทิตย์ตามนโยบายของบุคลากร
+- วันหยุดราชการ
+- วันหยุดชดเชย
+- วันหยุดพิเศษของโรงพยาบาล
+- วันหยุดเฉพาะบุคคล
+- วันหยุดตามตารางเวร
+
+Explicit Shift Assignment สำหรับเจ้าหน้าที่เวรต้องสามารถ Override วันหยุดทั่วไปได้ตามนโยบาย
+
+## A1.6 Overnight and Complex Shifts
+
+รองรับ:
+
+- กะปกติ
+- กะเช้า
+- กะบ่าย
+- กะดึก
+- กะข้ามวัน
+- กะ 12 ชั่วโมง
+- กะ 24 ชั่วโมง
+- หลายกะต่อวัน
+- เวลาพัก
+- ลาครึ่งวัน
+- ปฏิบัติงานนอกสถานที่
+
+การสแกนออกหลังเที่ยงคืนต้องจับคู่กับ Shift Instance ที่ถูกต้อง ไม่ใช่จับคู่จาก Calendar Date เพียงอย่างเดียว
+
+## A1.7 Scanner Matching
+
+รักษา Raw Scanner Contract:
+
+- machineNo
+- enrollNumber
+- scanDateTime
+- verifyMode
+- inOutMode
+- workCode
+
+ตรวจสอบ Raw Mode และ Calculated Direction แยกจากกัน
+
+ห้ามสมมติว่า inOutMode สามารถใช้ตัดสิน IN/OUT ได้ถูกต้องทุกเครื่อง
+
+ใช้ Existing Matching Rules ร่วมกับ Shift Windows
+
+รองรับ:
+
+- Multiple Scans
+- Duplicate Scans
+- Missing Check-in
+- Missing Check-out
+- Out-of-Order Events
+- Cross-Midnight Events
+- Unknown Enroll Number
+- Conflicting Scan Events
+
+เก็บเหตุผลของ Matching Decision ให้ตรวจสอบย้อนหลังได้
+
+## A1.8 Historical Mapping
+
+ตรวจสอบการ Mapping:
+
+- Scanner Enroll Number
+- FINGLE_ID หรือ Identifier ที่ใช้งานจริง
+- Personnel ID
+- Effective From
+- Effective To
+- Active Status
+
+ห้ามนำ Mapping ปัจจุบันไปเขียนทับประวัติย้อนหลังทั้งหมดโดยอัตโนมัติ
+
+รองรับ Preview ก่อนเปลี่ยน Mapping ย้อนหลัง
+
+แสดง:
+
+- จำนวนรายการที่จะได้รับผลกระทบ
+- Mapping Conflict
+- Existing Attendance
+- HR Reviewed Records
+- Proposed Reprocessing Range
+
+## A1.9 Safe Reprocessing
+
+การประมวลผลซ้ำต้องเป็น Idempotent
+
+- ไม่สร้าง Attendance ซ้ำ
+- ไม่ลบ Raw Scans
+- ไม่ลบ HR Notes
+- ไม่ลบ Approval History
+- ไม่เปลี่ยน Manual Adjustment โดยไม่มีเหตุผล
+- ตรวจสอบผลกระทบก่อนดำเนินการ
+
+หากผล Attendance เปลี่ยนแปลงอย่างมีนัยสำคัญหลัง HR อนุมัติแล้ว ให้แสดง NEEDS_RE_REVIEW หรือสถานะที่เทียบเท่า
+
+## A1.10 Historical Attendance Completeness
+
+ตรวจสอบความครบถ้วนของข้อมูลย้อนหลัง:
+
+- Expected Shift Instances
+- Existing Attendance Records
+- Missing Attendance Records
+- Missing Scanner Mapping
+- Unprocessed Raw Scans
+- Unresolved Conflicts
+- HR Review Pending
+
+ห้ามถือว่าบุคลากรที่ไม่มี Attendance Record คือ NO_SCAN โดยอัตโนมัติ
+
+ต้องตรวจสอบก่อนว่าบุคลากรมีหน้าที่ปฏิบัติงานในวันนั้นจริงหรือไม่
+
+## A1.11 Shared Business Logic
+
+Dashboard, My Attendance, All Attendance, HR Review, Lateness Report และ HOSOffice Preview ต้องใช้ Attendance Calculation และ Shared Query Logic ที่สอดคล้องกัน
+
+ห้ามสร้าง Calculation Logic แยกแต่ละหน้าโดยไม่มีเหตุผล
+
+เมื่อใช้ Date Range, Personnel Scope, Filters และ Evaluation Snapshot เดียวกัน ผลลัพธ์ต้องสามารถอธิบายและตรวจสอบความแตกต่างได้
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE A2 — HOSOFFICE INTEGRATION
+
+Priority: P0
+
+## A2.1 API Route Verification
+
+ตรวจสอบ Endpoint ที่เคยพบปัญหา:
+
+GET /api/Sam_Att/hosoffice/push-history
+
+ตรวจสอบความแตกต่างระหว่าง:
+
+- /hosoffice/push-history
+- /hosoffice/push/history
+
+แก้ Frontend และ Backend ให้ใช้ API Contract เดียวกัน
+
+หากต้องรักษา Backward Compatibility ให้ใช้ Alias ที่มี Authorization เหมือนกัน
+
+## A2.2 Preview Data Accuracy
+
+จากการตรวจสอบก่อนหน้านี้ เคยพบ:
+
+- Total Records: 5,617
+- Valid Records: 522
+- Invalid Records: 5,095
+- Invalid Reasons: NO_SCAN และ review_status = PENDING
+- Ready List บางช่องแสดงขีดแทนข้อมูล
+
+ตัวเลขเหล่านี้เป็น Historical Audit Evidence เท่านั้น
+
+ตรวจสอบกับข้อมูลจริง ห้าม Hardcode
+
+Preview ต้องแสดง:
+
+- Personnel
+- Personnel Identifier
+- Work Date
+- Shift
+- Check-in
+- Check-out
+- Attendance Status
+- HR Review Status
+- Eligibility
+- Invalid Reason
+- Target Mapping
+
+## A2.3 Eligibility Rules
+
+ใช้ Explicit Allowlist สำหรับรายการที่สามารถส่ง HOSOffice
+
+ห้ามถือว่าทุกรายการที่ไม่พบ Error สามารถส่งได้
+
+แยก:
+
+- Eligible
+- Pending HR Review
+- Missing Mapping
+- Missing Scan
+- Invalid Shift
+- Invalid Data
+- Already Exported
+- Conflict
+
+## A2.4 Preview Consistency
+
+รองรับ:
+
+- Preview ID
+- Preview Timestamp
+- Filter Snapshot
+- Data Hash หรือ Version Reference
+- Expiration
+- Stale Preview Detection
+
+หากข้อมูลเปลี่ยนหลัง Preview ต้องให้ตรวจสอบใหม่ก่อนดำเนินการ
+
+## A2.5 Future Push Safety
+
+แม้ Live Push ยังปิดอยู่ ให้ตรวจสอบ Design สำหรับ:
+
+- Idempotency
+- Duplicate Prevention
+- Transaction Safety
+- Batch Reconciliation
+- Unknown Commit Outcome
+- Partial Failure Handling
+- Target Unique Constraints
+- Least Privilege
+- Audit Trail
+
+ห้ามเปิด Live Push ใน Phase นี้
+
+ทดสอบ Write Behavior เฉพาะ Mock หรือ Isolated Test Database
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE A3 — AUTHENTICATION, RBAC & USER SECURITY
+
+Priority: P0
+
+## A3.1 Existing Roles
+
+รักษา Roles เดิม:
+
+### ADMIN
+
+- System Configuration
+- User Management
+- System Administration
+- Full Authorized Access
+
+### RESPONSIBLE_STAFF
+
+- HR Review
+- Personnel Management ตามสิทธิ์
+- Attendance Management ตามสิทธิ์
+- Reports ตามสิทธิ์
+
+### GENERAL_USER
+
+- ดูข้อมูลของตนเองเท่านั้น
+- ดูตารางเวรของตนเอง
+- ดูประวัติการลงเวลาของตนเอง
+
+ห้าม GENERAL_USER เข้าถึงข้อมูลบุคลากรอื่นด้วยการแก้ URL, Query Parameter หรือ Request Body
+
+## A3.2 Authorization
+
+ตรวจสอบทั้ง:
+
+- Frontend Route Guard
+- Sidebar Visibility
+- Backend Middleware
+- Object-Level Authorization
+- API Authorization
+- Export Authorization
+
+การซ่อนเมนูไม่ถือว่าเป็นการรักษาความปลอดภัย
+
+## A3.3 Account Management
+
+รองรับ:
+
+- Create User
+- Edit User
+- Enable / Disable User
+- Reset Password
+- Change Role
+- Personnel Linking
+- Account Status
+- Last Login หากมีข้อมูลที่เชื่อถือได้
+
+ตรวจสอบ Partial Update ไม่ให้เขียนทับ Field อื่นโดยไม่ตั้งใจ
+
+## A3.4 Last Administrator Protection
+
+ห้าม:
+
+- ลบ ADMIN คนสุดท้าย
+- Disable ADMIN คนสุดท้าย
+- ลด Role ของ ADMIN คนสุดท้าย
+
+ต้องป้องกันฝั่ง Backend และรองรับ Concurrent Requests
+
+## A3.5 Password Security
+
+ตรวจสอบ Existing Password Hashing
+
+- ห้าม Plaintext Password
+- ห้าม Default Password เดียวกันทุกบัญชี
+- ใช้ Password Policy ที่เหมาะสม
+- Temporary Password ต้องเปลี่ยนเมื่อเข้าสู่ระบบครั้งแรก
+- ไม่แสดง Password ใน Audit Log
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE A4 — PERFORMANCE & API OPTIMIZATION
+
+Priority: P1
+
+## A4.1 Dashboard Payload
+
+จากการตรวจสอบก่อนหน้านี้พบ Attendance API Response ประมาณ 6.6–6.7 MB
+
+Dashboard ไม่ควรโหลด Attendance Records ทั้งหมดเพียงเพื่อคำนวณ Summary
+
+ให้สร้างหรือปรับ Existing Summary Endpoint
+
+ส่งเฉพาะ:
+
+- Total Personnel
+- Expected Attendance
+- In Progress
+- Completed
+- Late
+- Missing Scan
+- Off Day
+- Pending Review
+- Other Required Aggregates
+
+คำนวณ Aggregation ฝั่ง Backend หรือ Database อย่างเหมาะสม
+
+## A4.2 Server-Side Pagination
+
+ใช้ Server-Side:
+
+- Filtering
+- Sorting
+- Searching
+- Pagination
+- Counting
+
+ต้อง Filter ก่อน Count และ Pagination
+
+ห้ามโหลดข้อมูลทั้งหมดเข้า Browser แล้วค่อยแบ่งหน้า หากไม่จำเป็น
+
+## A4.3 Request Management
+
+รองรับ:
+
+- Debounce
+- AbortController
+- Request Deduplication
+- Stale Response Protection
+- Loading State
+- Empty State
+- Error State
+- Retry ตามความเหมาะสม
+- Component Unmount Cleanup
+
+ห้ามเกิด Infinite Request Loop
+
+ห้ามแก้ Deployment Polling ที่พักไว้ใน Phase 0
+
+## A4.4 Database Optimization
+
+ตรวจสอบ:
+
+- N+1 Queries
+- Full Table Scans
+- Duplicate Queries
+- Existing Indexes
+- Date Range Queries
+- Personnel Mapping Queries
+- Attendance Queries
+- Raw Scan Queries
+
+ใช้ EXPLAIN ใน Isolated Environment หรือ Read-Only Diagnostic ที่ได้รับอนุญาต
+
+ห้ามเพิ่ม Index จำนวนมากโดยไม่มีเหตุผล
+
+หากต้องเพิ่ม Index ให้จัดทำ Versioned Migration แยกต่างหาก
+
+## A4.5 Frontend Bundle
+
+ตรวจสอบ JavaScript Bundle ที่เคยมีขนาดประมาณ 1.6 MB
+
+พิจารณา:
+
+- Route-Based Code Splitting
+- Lazy Loading
+- Shared Components
+- Removing Unused Imports
+- Avoiding Duplicate Libraries
+
+รักษา Compatibility กับ Existing Vite Configuration
+
+ห้ามเพิ่ม Dependency ขนาดใหญ่โดยไม่จำเป็น
+
+รายงาน Before / After Metrics ตามที่วัดได้จริง
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE A5 — FULL PAGE-BY-PAGE AUDIT
+
+ตรวจสอบระบบเดิมทั้ง 16 หน้า
+
+## PAGE 01 — LOGIN
+
+ตรวจสอบ:
+
+- Login Validation
+- Incorrect Credentials
+- Disabled Accounts
+- Session Expiration
+- Logout
+- Role Redirect
+- Password Visibility
+- Loading State
+- Thai Error Messages
+- Mobile Layout
+- Rate Limiting
+
+ห้ามเปิดเผยว่าบัญชีใดมีอยู่ในระบบโดยไม่จำเป็น
+
+## PAGE 02 — DASHBOARD
+
+แก้ไข:
+
+- สถิติไม่สอดคล้องกับ Attendance Lifecycle
+- การแสดง NORMAL ก่อนหมดเวลางาน
+- จำนวนบุคลากรไม่ตรงกับ Scope
+- Date Range
+- Department Filter
+- Personnel-Type Filter
+- Summary Accuracy
+- API Payload ขนาดใหญ่
+
+Dashboard ต้องแยกข้อมูล:
+
+- บุคลากรทั้งหมด
+- ผู้มีหน้าที่ปฏิบัติงาน
+- กำลังปฏิบัติงาน
+- ปฏิบัติงานครบ
+- มาสาย
+- ขาดสแกน
+- วันหยุด
+- ลา / ไปราชการ
+- รอ HR ตรวจสอบ
+
+ระบุ Last Updated Time และ Data Scope
+
+สามารถคลิก Summary Card เพื่อ Drill Down ไปยังรายการที่เกี่ยวข้องได้
+
+## PAGE 03 — MY ATTENDANCE
+
+แก้ไข:
+
+- Default Shift Resolution
+- Explicit Shift Assignment
+- Monthly Attendance Summary
+- Today Attendance Status
+- Check-in / Check-out
+- Missing Scan
+- Off Day
+- Leave / Official Duty
+- Overnight Shift
+- HR Review Status
+
+จาก Audit ก่อนหน้านี้เคยพบความแตกต่างของจำนวนวันจาก Explicit Shift และ Default Shift
+
+ตรวจสอบ Root Cause จาก Source Code จริง
+
+GENERAL_USER ต้องเห็นข้อมูลตนเองเท่านั้น
+
+## PAGE 04 — ALL ATTENDANCE
+
+แก้ไข:
+
+- จำนวนรายการใน Tabs ไม่ตรงกับรายการจริง
+- Tab มี Count แต่เปิดแล้วไม่พบข้อมูล
+- Date Range Filter
+- Department Filter
+- Personnel Filter
+- Attendance Status Filter
+- HR Review Filter
+- Pagination
+- Sorting
+- Export
+
+Count ต้องใช้ Filter Scope เดียวกับรายการ
+
+รองรับการแสดง Shift และ Scan Details โดยไม่ต้องโหลดข้อมูลทั้งหมด
+
+## PAGE 05 — HR REVIEW
+
+แก้ไข:
+
+- HR Review Status
+- Review Reason
+- Notes
+- Approved / Rejected
+- Leave Handling
+- Half-Day Leave
+- Official Duty
+- Manual Adjustment
+- Reprocessing
+- Reviewed By
+- Reviewed At
+- Review History
+
+การอนุมัติไม่ควรเปลี่ยน Raw Scan Data
+
+แยก Attendance Result และ HR Decision
+
+หากมีการแก้ไขหลังอนุมัติ ให้ตรวจสอบ NEEDS_RE_REVIEW
+
+## PAGE 06 — PERSONNEL MANAGEMENT
+
+แก้ไข:
+
+- Personnel Synchronization
+- Personnel-Type Mapping
+- Department Mapping
+- Active / Inactive Status
+- Scanner Enrollment Mapping
+- Effective Date
+- Mapping Conflict
+- Missing Mapping
+- Historical Mapping
+- Search
+- Pagination
+
+จาก Audit ก่อนหน้านี้เคยพบ 240/241 รายการ แต่แสดง 100%
+
+ให้แสดง Percentage ที่ถูกต้องตามหลักการปัดเศษ เช่น 99.6% หากข้อมูลจริงเป็น 240/241
+
+ห้ามแสดง 100% หากยังไม่ครบโดยไม่มีคำอธิบาย
+
+## PAGE 07 — SHIFT MANAGEMENT
+
+แก้ไข:
+
+- Shift Template
+- Default Shift
+- Default Shift by Personnel Type
+- Explicit Shift Assignment
+- Effective Date
+- Working Days
+- Overnight Shift
+- Check-in Window
+- Check-out Window
+- Grace Period
+- Early Checkout Rules
+- Holiday Override
+
+แก้ Modal Scroll Lock และ Layout Overflow
+
+หาก Shift Template ถูกใช้งานอยู่ ให้ป้องกันการลบหรือแก้ไขที่กระทบประวัติย้อนหลัง
+
+HTTP 409 สำหรับ Conflict ที่ถูกต้องไม่ถือเป็น Bug
+
+ต้องแสดงข้อความอธิบายที่เข้าใจง่าย
+
+## PAGE 08 — LATENESS REPORT
+
+แก้ไข:
+
+- Late Minutes Calculation
+- Grace Period
+- Date Range
+- Personnel Filter
+- Department Filter
+- Personnel-Type Filter
+- Monthly Summary
+- Drill Down
+- Export
+
+ห้ามนับวันหยุดหรือกะที่ยังไม่ถึงเวลาประเมินเป็นการมาสาย
+
+CSV Export ต้องรองรับภาษาไทย UTF-8 BOM และป้องกัน Spreadsheet Formula Injection
+
+Native XLSX Export จะเพิ่มใน Part B
+
+## PAGE 09 — SCANNER MANAGEMENT
+
+ตรวจสอบ:
+
+- Scanner Connection
+- Scanner IP
+- Scanner Port
+- Machine Number
+- Last Sync
+- Sync Status
+- Sync Schedule
+- Manual Sync
+- Historical Sync
+- Error Handling
+- Duplicate Prevention
+- Per-Machine Results
+
+เคยพบการอ้างอิง Port 4370 และ 5005
+
+ตรวจสอบ Configuration และ Protocol จริงก่อนแก้ไข
+
+ห้ามเปลี่ยน Port โดยการคาดเดา
+
+ตรวจสอบ Schedule เช่น 00:00 และ 08:00 ว่าตรงกับ Scheduler จริงหรือไม่
+
+แยก:
+
+- Raw Events Received
+- New Events Inserted
+- Duplicate Events
+- Failed Events
+- Matched Events
+- Unmatched Events
+- Attendance Created
+- Attendance Updated
+
+## PAGE 10 — RAW SCANS
+
+แก้ไขปัญหาที่เคยพบ:
+
+- แสดงทั้งหมดแต่จำกัดเพียง 200 รายการ
+- Historical Date Filter
+- Multiple Scans Per Day
+- Scanner Filter
+- Enroll Number Filter
+- Personnel Mapping
+- Raw Mode
+- Calculated Direction
+
+รองรับ:
+
+- Total Record Count
+- Server-Side Pagination
+- Date Range
+- Search
+- Sort
+- Raw JSON Detail
+- Copy Raw JSON
+- Event Identifier / Hash หากมี
+
+Raw Scan ต้องไม่สามารถแก้ไขหรือลบผ่านหน้าจอทั่วไป
+
+## PAGE 11 — HOSOFFICE
+
+ดำเนินการตาม Phase A2
+
+ตรวจสอบ:
+
+- Connection Status
+- Preview
+- Eligible Records
+- Invalid Records
+- Invalid Reasons
+- Push History
+- API Routes
+- Empty States
+- Error States
+- Authorization
+
+ห้ามเปิด Live Push
+
+## PAGE 12 — USER MANAGEMENT
+
+ดำเนินการตาม Phase A3
+
+เพิ่มหรือแก้ไข Row Actions ที่จำเป็น:
+
+- Edit
+- Disable
+- Enable
+- Reset Password
+- Change Role
+- Link Personnel
+
+ป้องกัน Last Administrator
+
+Bulk User Creation จะเพิ่มใน Part B
+
+## PAGE 13 — AUDIT LOG
+
+แก้ไข:
+
+- JSON แสดงเป็นบรรทัดเดียว
+- Action Labels ไม่เป็นภาษาไทย
+- Status Classification
+- Actor
+- Timestamp
+- Target Entity
+- Search
+- Filter
+- Pagination
+- Detail Modal
+- Copy JSON
+
+แยกสถานะ:
+
+- SUCCESS
+- FAILED
+- DENIED
+- WARNING
+- SKIPPED
+- CANCELLED
+
+ห้ามรวมทุกสถานะที่ไม่ใช่ SUCCESS เป็นความล้มเหลวโดยอัตโนมัติ
+
+แปล Action Labels ที่ยังเป็น Technical Identifier เช่น REPORT_LATENESS_EXPORT_CSV
+
+เก็บ Technical Action Code ไว้สำหรับตรวจสอบย้อนหลัง
+
+ห้ามบันทึก Secrets
+
+## PAGE 14 — GITHUB UPDATE CENTER
+
+Status: DEFERRED
+
+รักษา Existing Implementation
+
+ห้ามแก้ Phase 0 ที่พักไว้
+
+ตรวจสอบเฉพาะผลกระทบจาก Shared Components และ Navigation
+
+บันทึก Known Issues ใน Final Report
+
+## PAGE 15 — WORKFLOW
+
+ตรวจสอบ Workflow ทุกหมวดให้ตรงกับระบบจริง
+
+- ไม่แสดงขั้นตอนที่ยังไม่มี Feature
+- ไม่แสดงสถานะพร้อมใช้งานจาก Static Badge โดยไม่มีหลักฐาน
+- แยกคู่มือการทำงานออกจาก System Readiness
+- ตรวจสอบ Navigation Links
+- ตรวจสอบ Role Visibility
+- ตรวจสอบ Step Order
+- เพิ่ม Version และ Last Updated
+
+## PAGE 16 — USER MANUAL
+
+ปรับคู่มือให้ตรงกับ Feature จริง
+
+รองรับ:
+
+- ADMIN Manual
+- HR Manual
+- GENERAL_USER Manual
+- FAQ
+- Troubleshooting
+- Workflow Links
+- Role-Based Visibility
+- Version
+- Last Updated
+
+ใช้ Shared Documentation Source หากเหมาะสม เพื่อลดข้อมูลซ้ำและคู่มือไม่ตรงกับระบบ
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE A6 — GLOBAL UX/UI STABILIZATION
+
+รักษา Theme สีม่วงและขาวของ Sam_Att
+
+ไม่เปลี่ยน Design System ทั้งหมด
+
+ตรวจสอบทุกหน้า:
+
+- Consistent Page Header
+- Breadcrumb
+- Page Description
+- Search
+- Filters
+- Clear Filters
+- Loading State
+- Empty State
+- Error State
+- Pagination
+- Confirmation Dialog
+- Toast Notification
+- Form Validation
+- Button States
+- Disabled States
+- Modal Scrolling
+- Keyboard Navigation
+- Responsive Layout
+- Thai Language
+- Date Formatting
+- Time Formatting
+
+ห้ามแสดง Fake Progress
+
+ห้ามแสดง Success หาก Backend ยังไม่ยืนยัน
+
+ป้องกัน Double Submission
+
+ใช้ข้อความภาษาไทยที่เจ้าหน้าที่ทั่วไปเข้าใจได้
+
+Technical Error Details ให้แสดงในส่วนรายละเอียดสำหรับผู้ดูแลระบบ
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE A7 — PART A REGRESSION TESTING
+
+ทดสอบ Attendance Engine อย่างน้อยตาม Scenarios ต่อไปนี้:
+
+1. ยังไม่ถึงเวลาเริ่มงาน
+2. รอสแกนเข้า
+3. สแกนเข้าตรงเวลา
+4. กำลังปฏิบัติงาน
+5. มาสายและกำลังปฏิบัติงาน
+6. ปฏิบัติงานครบ
+7. มาสาย
+8. ออกก่อนเวลา
+9. มาสายและออกก่อนเวลา
+10. ขาดสแกนเข้า
+11. ขาดสแกนออก
+12. ไม่มีสแกนหลัง Evaluation Window
+13. ไม่มีสแกนก่อน Evaluation Window
+14. วันในอนาคต
+15. ไม่มีตารางเวร
+16. วันหยุด
+17. วันหยุดแต่มี Explicit Shift
+18. กะข้ามวัน
+19. กะ 12 ชั่วโมง
+20. กะ 24 ชั่วโมง
+21. หลายกะต่อวัน
+22. ลาครึ่งวัน
+23. ไปราชการ
+24. Duplicate Scan
+25. Unknown Scanner Mapping
+26. Historical Mapping
+27. Reprocessing After HR Approval
+28. Multiple Scan Conditions
+29. Default Shift Effective Date
+30. Personnel Active Period
+
+ทดสอบเพิ่มเติม:
+
+- API Contracts
+- Cross-Page Statistics
+- Pagination
+- Filters
+- Reports
+- RBAC
+- IDOR
+- Audit Log
+- HOSOffice Preview
+- Database Safety
+- Production Startup Read-Only
+- UI Responsive
+- Thai Language
+- Existing Feature Regression
+
+ใช้ Synthetic Data หรือ Isolated Test Database เท่านั้น
+
+ห้ามใช้ Production MySQL 10.1.0.201
+
+รักษา Test Isolation Guard
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# QUALITY GATE A — REQUIRED BEFORE PART B
+
+Part A จะถือว่าผ่านเมื่อ:
+
+- Critical Attendance Calculation ถูกต้อง
+- ไม่พบ Critical Security Vulnerability ที่ยังไม่ได้จัดการ
+- Raw Scan Data ไม่ถูกแก้ไข
+- Historical Mapping ถูกต้อง
+- HR Review History ไม่สูญหาย
+- Dashboard และ Reports ใช้ Business Logic ที่สอดคล้องกัน
+- HOSOffice Live Push ยังปิดอยู่
+- API Contract ถูกต้อง
+- TypeScript Check ผ่าน
+- Existing Automated Tests ผ่าน
+- New Regression Tests ผ่าน
+- Production Build ผ่าน
+- ไม่มี Production Database Mutation
+- ไม่มีการแก้ Production .env
+- ไม่มีการกระทบ Phase 0 Update Center โดยไม่จำเป็น
+
+หากมี Critical Failure ให้แก้ไขก่อนเริ่ม Feature ที่พึ่งพาส่วนนั้น
+
+หากพบ Business Policy ที่ไม่สามารถตัดสินใจได้จากข้อมูลจริง ให้รายงานเป็น Pending Decision และใช้ Safe Default ที่ไม่ทำให้เกิดการลงโทษบุคลากรโดยอัตโนมัติ
+
+เมื่อผ่าน Quality Gate A ใน Development Environment แล้ว ให้เริ่ม Part B ต่อได้
+
+ไม่ต้อง Deploy Part A ไปยัง Production ก่อนเริ่ม Part B
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PART B — IMPROVE & ENHANCE
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE B0 — FEATURE DESIGN & DEPENDENCY PLANNING
+
+ก่อนเพิ่ม Feature:
+
+- ตรวจสอบ Existing Components
+- ตรวจสอบ Existing Tables
+- ตรวจสอบ Existing APIs
+- ตรวจสอบ Existing Business Logic
+- ตรวจสอบ Feature ที่มีอยู่แล้ว
+- Reuse Existing Services
+- หลีกเลี่ยง Duplicate Logic
+- หลีกเลี่ยง Duplicate Tables
+- กำหนด Feature Dependencies
+- กำหนด Required Migrations
+- กำหนด Permission Matrix
+- กำหนด Acceptance Criteria
+
+ห้ามสร้าง Microservices เพิ่มโดยไม่มีความจำเป็น
+
+ให้รักษา Standalone Architecture เดิม
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE B1 — HOSPITAL HOLIDAY CALENDAR
+
+Priority: P0
+
+Feature ID: B-01
+
+สร้างหรือปรับปรุงระบบปฏิทินวันหยุดของโรงพยาบาล
+
+## Required Features
+
+- วันหยุดราชการ
+- วันหยุดชดเชย
+- วันหยุดพิเศษ
+- วันหยุดประจำสัปดาห์
+- วันหยุดเฉพาะหน่วยงาน
+- วันหยุดเฉพาะบุคคล
+- Holiday Effective Date
+- Holiday Scope
+- Active / Inactive
+- Holiday Reason
+- Calendar View
+- List View
+- Year Filter
+- Import / Export หากเหมาะสม
+
+รองรับการสร้างวันหยุดล่วงหน้า
+
+ห้าม Hardcode วันหยุดทุกปีใน Source Code
+
+ห้ามนำวันหยุดราชการมาใช้กับเจ้าหน้าที่เวรทุกคนโดยอัตโนมัติ
+
+## Holiday Override
+
+หากบุคลากรได้รับมอบหมาย Explicit Shift ในวันหยุด ให้ประเมินตามกะและนโยบายที่กำหนด
+
+## Retroactive Changes
+
+หากแก้ไขวันหยุดย้อนหลัง:
+
+- แสดง Impact Preview
+- แสดงจำนวน Attendance Records ที่ได้รับผลกระทบ
+- ป้องกันการแก้ข้อมูลเดือนที่ปิดรอบแล้ว
+- รองรับ Reprocessing ที่ปลอดภัย
+- เก็บ Audit Trail
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE B2 — ADVANCED ATTENDANCE LIFECYCLE EXPERIENCE
+
+Priority: P0
+
+Feature ID: B-02
+
+ใช้ Attendance Engine ที่แก้ไขจาก Part A
+
+ห้ามสร้าง Attendance Engine ใหม่ซ้ำอีกชุด
+
+เพิ่มความสามารถด้านการแสดงผล:
+
+- Today Status Card
+- Shift Timeline
+- Actual Check-in
+- Actual Check-out
+- Expected Work Time
+- Late Minutes
+- Early Checkout Minutes
+- Remaining Evaluation Time
+- Missing Scan Indicators
+- HR Review Status
+- Holiday / Leave / Official Duty
+
+ใช้ข้อความที่เข้าใจง่าย เช่น:
+
+- ยังไม่ถึงเวลาเริ่มงาน
+- รอสแกนเข้างาน
+- กำลังปฏิบัติงาน
+- กำลังปฏิบัติงาน — มาสาย 10 นาที
+- รอสแกนออก
+- ปฏิบัติงานครบ
+- ไม่พบข้อมูลสแกนออก
+- วันหยุดตามตารางเวร
+
+ห้ามแสดงคำว่าขาดงานก่อนมีข้อมูลและการประเมินที่เพียงพอ
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE B3 — HISTORICAL ATTENDANCE COMPLETENESS CENTER
+
+Priority: P0
+
+Feature ID: B-03
+
+สร้างเครื่องมือตรวจสอบความครบถ้วนของข้อมูลย้อนหลัง
+
+## Required Features
+
+- Date Range
+- Department Filter
+- Personnel-Type Filter
+- Expected Shift Count
+- Existing Attendance Count
+- Missing Attendance Count
+- Missing Mapping Count
+- Unprocessed Scan Count
+- Pending Review Count
+- Conflict Count
+
+แสดงรายการที่ต้องดำเนินการ พร้อมเหตุผล
+
+รองรับ:
+
+- Preview Missing Records
+- Preview Reprocessing
+- Safe Batch Processing
+- Processing Progress
+- Result Summary
+- Failed Records
+- Retry เฉพาะรายการที่ล้มเหลว
+- Audit Trail
+
+ห้ามสร้าง Attendance ปลอมเพื่อทำให้ Completeness เป็น 100%
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE B4 — HR WORK CENTER
+
+Priority: P1
+
+Feature ID: B-04
+
+สร้างหน้าศูนย์ปฏิบัติงาน HR
+
+ชื่อภาษาไทย:
+
+**ศูนย์ปฏิบัติงานบุคลากร (HR Work Center)**
+
+## Objective
+
+ลดจำนวนเมนูที่ HR ต้องเปิดตรวจสอบในแต่ละวัน
+
+ใช้ Existing Data และ Shared Business Logic
+
+ไม่สร้างฐานข้อมูล Attendance ซ้ำ
+
+## Section A — Daily Overview
+
+แสดง:
+
+- บุคลากรที่มีหน้าที่ปฏิบัติงานวันนี้
+- กำลังปฏิบัติงาน
+- ปฏิบัติงานครบ
+- มาสาย
+- ขาดสแกน
+- รอตรวจสอบ
+- ข้อมูลไม่สมบูรณ์
+- คำร้องรออนุมัติ
+
+## Section B — Daily Work Queue
+
+แสดงรายการงานที่ต้องดำเนินการ:
+
+- Missing Check-in
+- Missing Check-out
+- NO_SCAN ที่ประเมินแล้ว
+- Late Review
+- Early Checkout
+- Missing Scanner Mapping
+- Shift Conflict
+- Pending HR Review
+- Employee Correction Request
+- Needs Re-Review
+- HOSOffice Readiness
+
+แต่ละรายการต้องสามารถ Drill Down ไปยังข้อมูลที่เกี่ยวข้องได้
+
+## Section C — Quick Actions
+
+- ตรวจสอบรายการลงเวลา
+- ตรวจสอบข้อมูลผิดปกติ
+- จัดการ Mapping
+- ตรวจสอบตารางเวร
+- ประมวลผลข้อมูล
+- ตรวจสอบคำร้อง
+- สร้างรายงาน
+- ตรวจสอบความพร้อม HOSOffice
+
+## Section D — Work Prioritization
+
+แบ่งงานเป็น:
+
+- ต้องดำเนินการเร่งด่วน
+- ต้องตรวจสอบวันนี้
+- รอดำเนินการ
+- ดำเนินการเรียบร้อย
+
+ห้ามสร้าง Priority จากการคาดเดาพฤติกรรมของบุคลากร
+
+ใช้ Business Rules ที่ตรวจสอบได้
+
+## Section E — Operational Efficiency
+
+รองรับ:
+
+- Saved Filters
+- Department Filter
+- Date Filter
+- Assigned Work หากจำเป็น
+- Bulk Actions
+- Clear Work Queue
+- Last Updated
+
+HR Work Center ต้องเป็นจุดเริ่มต้นการทำงานที่สะดวก ไม่ใช่เพียง Dashboard ที่มีกราฟเพิ่มขึ้น
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE B5 — BULK USER CREATION
+
+Priority: P1
+
+Feature ID: B-05
+
+เพิ่มระบบสร้างบัญชีผู้ใช้จากทะเบียนบุคลากรพร้อมกัน
+
+## Workflow
+
+1. เลือกบุคลากรที่ยังไม่มีบัญชี
+2. Filter ตามหน่วยงานหรือประเภทบุคลากร
+3. เลือกรายการ
+4. Preview Username
+5. ตรวจสอบ Duplicate
+6. เลือก Role ที่ได้รับอนุญาต
+7. สร้างบัญชี
+8. แสดงผลสำเร็จและไม่สำเร็จ
+9. บันทึก Audit Log
+
+## Security
+
+- Default Role ต้องเป็น GENERAL_USER
+- ห้ามสร้าง ADMIN จำนวนมากโดยอัตโนมัติ
+- ห้ามใช้ Password เดียวกันทุกบัญชี
+- ใช้ Secure Temporary Password หรือ Account Activation
+- บังคับเปลี่ยน Temporary Password เมื่อเข้าสู่ระบบครั้งแรก
+- ห้ามแสดง Password ซ้ำใน History
+- ห้ามส่ง Password ไปยัง External Services
+- ไม่ใช้เลขบัตรประชาชนเป็น Default Password
+- ไม่ใช้วันเกิดเป็น Default Password
+
+รองรับ Duplicate Prevention และ Idempotency
+
+หากสร้างบางรายการไม่สำเร็จ ให้แสดงเหตุผลและ Retry เฉพาะรายการนั้น
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE B6 — EXCEL EXPORT & REPORT CENTER
+
+Priority: P1
+
+Feature ID: B-06
+
+เพิ่ม Native XLSX Export
+
+ห้ามเปลี่ยนนามสกุล CSV เป็น XLSX โดยไม่สร้าง Excel Workbook จริง
+
+## Required Reports
+
+- รายงานการลงเวลาทั้งหมด
+- รายงานรายบุคคล
+- รายงานรายหน่วยงาน
+- รายงานการมาสาย
+- รายงานออกก่อนเวลา
+- รายงานขาดสแกน
+- รายงานวันหยุด
+- รายงาน HR Review
+- รายงานสรุปประจำเดือน
+- รายงานความครบถ้วนของข้อมูล
+- HOSOffice Preview Report
+
+## Excel Requirements
+
+- รองรับภาษาไทย
+- Column Headers ภาษาไทย
+- Date / Time Cell Types ถูกต้อง
+- Numeric Cell Types ถูกต้อง
+- Auto Filter
+- Freeze Header
+- Column Width
+- Report Title
+- Date Range
+- Generated Date
+- Filter Summary
+- Total Records
+- Summary Sheet เมื่อเหมาะสม
+
+ป้องกัน Formula Injection
+
+Export ต้องใช้ Filter และ Permission Scope เดียวกับหน้าจอ
+
+GENERAL_USER ส่งออกได้เฉพาะข้อมูลของตนเอง
+
+ห้าม Export ข้อมูลส่วนบุคคลเกินความจำเป็น
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE B7 — BULK HR REVIEW & APPROVAL
+
+Priority: P1
+
+Feature ID: B-07
+
+เพิ่มความสามารถตรวจสอบและอนุมัติหลายรายการพร้อมกัน
+
+## Required Workflow
+
+1. Filter รายการ
+2. เลือกรายการ
+3. Preview รายการที่จะเปลี่ยนแปลง
+4. แสดงรายการที่ไม่สามารถดำเนินการได้
+5. ระบุเหตุผล
+6. Confirm
+7. Process
+8. แสดงผล
+9. Audit Log
+
+## Safety
+
+- ตรวจสอบ Authorization รายรายการ
+- ตรวจสอบ Record Version
+- ป้องกัน Concurrent Approval
+- ป้องกัน Duplicate Submission
+- ห้ามอนุมัติรายการที่ถูกปิดรอบ
+- ห้ามอนุมัติรายการที่ข้อมูลไม่ครบโดยไม่มีเหตุผล
+- ห้ามเปลี่ยน Raw Scan
+- เก็บ Previous Status
+- เก็บ New Status
+- เก็บ Reviewer
+- เก็บ Reviewed At
+- เก็บ Review Reason
+
+รองรับ Partial Success อย่างชัดเจน
+
+ห้ามรายงานว่าทุกรายการสำเร็จหากมีรายการล้มเหลว
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE B8 — MONTHLY ATTENDANCE CLOSING
+
+Priority: P1
+
+Feature ID: B-08
+
+สร้างระบบปิดรอบข้อมูลเวลาปฏิบัติงานประจำเดือน
+
+## Period Status
+
+- OPEN
+- REVIEWING
+- READY_TO_CLOSE
+- CLOSED
+- REOPENED
+
+## Closing Readiness
+
+ตรวจสอบ:
+
+- Missing Attendance
+- Missing Mapping
+- Pending HR Review
+- Pending Correction Request
+- Unresolved Shift Conflict
+- Unprocessed Scan
+- Needs Re-Review
+
+แสดง Blocking Issues และ Warning แยกกัน
+
+## Closing Workflow
+
+1. เลือกเดือน
+2. ตรวจสอบความครบถ้วน
+3. แสดง Summary
+4. ตรวจสอบ Blocking Issues
+5. Confirm Closing
+6. บันทึก Closing Snapshot หรือ Version Reference
+7. Lock Attendance Adjustment
+8. Audit Log
+
+## Reopen Workflow
+
+เฉพาะผู้ได้รับอนุญาต
+
+- ต้องระบุเหตุผล
+- ต้องบันทึกผู้ดำเนินการ
+- ต้องบันทึกเวลา
+- ต้องรักษา Closing History
+- ต้องแจ้งว่ารายงานก่อนหน้าอาจเปลี่ยนแปลง
+
+Raw Scan Ingestion สามารถดำเนินต่อได้ตามปกติ
+
+แต่ห้ามนำ Raw Scan ที่มาภายหลังไปแก้ Attendance ที่ปิดรอบแล้วโดยอัตโนมัติ
+
+ให้สร้างรายการรอตรวจสอบ
+
+การปิดรอบไม่ใช่การส่ง HOSOffice และห้ามเปิด Live Push
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE B9 — SYSTEM HEALTH CENTER
+
+Priority: P1
+
+Feature ID: B-09
+
+สร้างหน้าศูนย์ตรวจสอบสถานะระบบสำหรับ ADMIN
+
+ชื่อภาษาไทย:
+
+**ศูนย์ตรวจสอบสถานะระบบ**
+
+## Required Health Indicators
+
+- Backend Status
+- Application Version
+- Database Connectivity
+- Database Schema Compatibility
+- Scanner Connection
+- Last Scanner Sync
+- Scheduler Status
+- Last Processing Time
+- Processing Backlog
+- Unprocessed Raw Scans
+- Mapping Conflicts
+- HOSOffice Read-Only Connectivity
+- HOSOffice Live Push Lock
+- GitHub Connectivity จาก Existing Cached Status
+- GitHub Rate Limit จาก Existing Metadata
+- Disk Space หากสามารถตรวจสอบได้อย่างปลอดภัย
+- Last Known Backup Status หากมีข้อมูลจากระบบสำรองข้อมูลเดิม
+
+## Health Status
+
+- HEALTHY
+- WARNING
+- CRITICAL
+- UNKNOWN
+- NOT_CONFIGURED
+
+ห้ามแสดง HEALTHY หากยังไม่ได้ตรวจสอบจริง
+
+หากไม่สามารถตรวจสอบ Backup Status ได้ ให้แสดง UNKNOWN
+
+ไม่ต้องสร้างระบบ Database Backup ใหม่
+
+## Safety
+
+System Health Center เป็น Monitoring Center เท่านั้น
+
+ห้าม:
+
+- Restart IIS
+- Restart ระบบอื่น
+- เปิด HOSOffice Live Push
+- แก้ Database Schema
+- เปิดเผย Credentials
+- สั่ง GitHub Deployment
+- แก้ไข Phase 0 Update Center
+
+ใช้ Lightweight Health Checks
+
+ไม่เพิ่ม API Polling ที่สร้างภาระระบบ
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# PHASE B10 — SMART NAVIGATION
+
+Priority: P1
+
+Feature ID: B-10
+
+ปรับ Sidebar ให้เข้าใจง่ายขึ้น โดยรักษา Existing Routes
+
+## Suggested Navigation
+
+### 1. หน้าหลัก
+
+- Dashboard
+- HR Work Center ตามสิทธิ์
+
+### 2. ข้อมูลของฉัน
+
+- เวลาปฏิบัติงานของฉัน
+- ตารางเวรของฉัน
+- คำร้องของฉัน
+
+### 3. บริหารจัดการบุคลากร
+
+- รายการลงเวลาทั้งหมด
+- ตรวจสอบเวลาและหมายเหตุ
+- คำร้องแก้ไขเวลา
+- ทะเบียนบุคลากร
+- ตารางเวรและก

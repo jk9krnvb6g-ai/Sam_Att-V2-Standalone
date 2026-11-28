@@ -76,7 +76,6 @@ export function DashboardView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ code?: string; message: string } | null>(null);
   const [data, setData] = useState<any>(null);
-  const [attendanceRows, setAttendanceRows] = useState<any[]>([]);
 
   const [rankTab, setRankTab] = useState<RankTabKey>('LATE_MINS');
   const [rankSearch, setRankSearch] = useState('');
@@ -89,6 +88,7 @@ export function DashboardView({
     title: string;
     subtitle: string;
     rows: any[];
+    loading?: boolean;
     targetNav?: NavViewKey;
     targetNavLabel?: string;
   } | null>(null);
@@ -116,15 +116,10 @@ export function DashboardView({
         ...(department ? { department } : {}),
         ...(personnelType ? { personnelType } : {}),
       });
-      const [summaryRes, attRes] = await Promise.all([
-        apiRequest(`/dashboard/summary?${qs.toString()}`),
-        apiRequest(`/attendance?${qs.toString()}`),
-      ]);
+      const summaryRes = await apiRequest(`/dashboard/summary?${qs.toString()}`);
       setData(summaryRes);
-      setAttendanceRows(attRes.items || []);
     } catch (err) {
       setData(null);
-      setAttendanceRows([]);
       if (err instanceof ApiClientError) {
         setError({ code: err.code, message: err.message });
       } else {
@@ -206,99 +201,137 @@ export function DashboardView({
     return filteredAndSortedRanking.slice(start, start + rankPageSize);
   }, [filteredAndSortedRanking, rankPage, rankPageSize]);
 
-  function openKpiDrilldown(filterType: DrillFilterType) {
-    let rows = attendanceRows;
+  async function openKpiDrilldown(filterType: DrillFilterType) {
     let title = 'รายการลงเวลาทั้งหมดในช่วงเวลาที่เลือก';
     let targetNav: NavViewKey = 'hrAttendance';
     let targetNavLabel = 'ไปที่หน้ารายการลงเวลาทั้งหมด';
+    let endpoint = '/attendance';
+    const qs = new URLSearchParams({
+      dateFrom: resolvedRange.dateFrom,
+      dateTo: resolvedRange.dateTo,
+      page: '1',
+      pageSize: '100',
+      ...(department ? { department } : {}),
+      ...(personnelType ? { personnelType } : {}),
+    });
 
     if (filterType === 'NORMAL') {
-      rows = attendanceRows.filter((r) => r.status === 'NORMAL');
+      qs.set('status', 'NORMAL');
       title = 'รายการลงเวลาปกติ';
     } else if (filterType === 'LATE') {
-      rows = attendanceRows.filter((r) => Number(r.is_late) === 1 || r.status === 'LATE');
+      qs.set('status', 'LATE');
       title = `รายการมาสาย (${kpi?.latePeople || 0} คนไม่ซ้ำ · รวม ${kpi?.lateOccurrences || 0} ครั้ง)`;
       targetNav = 'reports';
       targetNavLabel = 'ไปที่หน้ารายงานการมาสาย';
     } else if (filterType === 'NO_SCAN') {
-      rows = attendanceRows.filter((r) => r.status === 'NO_SCAN');
+      qs.set('status', 'NO_SCAN');
       title = 'รายการไม่พบข้อมูลสแกนหลังเวลาตัดรอบ';
       targetNav = 'attendanceReview';
       targetNavLabel = 'ไปที่หน้าตรวจสอบและหมายเหตุ';
     } else if (filterType === 'MISSING_CHECKIN') {
-      rows = attendanceRows.filter((r) => r.status === 'MISSING_CHECKIN');
+      qs.set('status', 'MISSING_CHECKIN');
       title = 'รายการไม่พบข้อมูลสแกนเข้างาน';
       targetNav = 'attendanceReview';
       targetNavLabel = 'ไปที่หน้าตรวจสอบและหมายเหตุ';
     } else if (filterType === 'MISSING_CHECKOUT') {
-      rows = attendanceRows.filter((r) => r.status === 'MISSING_CHECKOUT');
+      qs.set('status', 'MISSING_CHECKOUT');
       title = 'รายการไม่สแกนออกงาน';
       targetNav = 'attendanceReview';
       targetNavLabel = 'ไปที่หน้าตรวจสอบและหมายเหตุ';
     } else if (filterType === 'EARLY_CHECKOUT') {
-      rows = attendanceRows.filter(
-        (r) =>
-          Number(r.early_checkout_indicator || 0) === 1 ||
-          Number(r.early_checkout_minutes || 0) > 0 ||
-          r.status === 'EARLY_CHECKOUT'
-      );
+      qs.set('status', 'EARLY_CHECKOUT');
       title = 'รายการออกงานก่อนเวลา';
       targetNav = 'attendanceReview';
       targetNavLabel = 'ไปที่หน้าตรวจสอบและหมายเหตุ';
     } else if (filterType === 'NEEDS_RE_REVIEW') {
-      rows = attendanceRows.filter((r) => r.review_status === 'NEEDS_RE_REVIEW');
+      qs.set('status', 'NEEDS_RE_REVIEW');
       title = 'รายการที่ต้องตรวจสอบซ้ำ (หลังคำนวณเวลาใหม่)';
       targetNav = 'attendanceReview';
       targetNavLabel = 'ไปที่หน้าตรวจสอบและหมายเหตุ';
     } else if (filterType === 'PENDING_REVIEW') {
-      rows = attendanceRows.filter(
-        (r) => r.review_status === 'PENDING' && (r.status !== 'NORMAL' || Number(r.is_late) === 1)
-      );
+      endpoint = '/attendance-review';
+      qs.set('reviewStatus', 'PENDING');
       title = 'รายการผิดปกติที่รอการตรวจสอบโดยเจ้าหน้าที่ HR';
       targetNav = 'attendanceReview';
       targetNavLabel = 'ไปที่หน้าตรวจสอบและหมายเหตุ';
     }
 
+    setDrillPage(1);
     setDrillModal({
       title,
-      subtitle: `${resolvedRange.thaiPeriodLabel} · แสดงครบทั้งหมด ${rows.length} รายการจากฐานข้อมูลจริง`,
-      rows,
+      subtitle: `${resolvedRange.thaiPeriodLabel} · กำลังดึงข้อมูลจากฐานข้อมูล...`,
+      rows: [],
+      loading: true,
       targetNav,
       targetNavLabel,
     });
+
+    try {
+      const res = await apiRequest<{ items?: any[]; totalCount?: number }>(
+        `${endpoint}?${qs.toString()}`
+      );
+      const rows = res.items || [];
+      const total = Number(res.totalCount ?? rows.length);
+      setDrillModal({
+        title,
+        subtitle:
+          total > rows.length
+            ? `${resolvedRange.thaiPeriodLabel} · แสดง ${rows.length} จากทั้งหมด ${total} รายการ`
+            : `${resolvedRange.thaiPeriodLabel} · แสดงครบทั้งหมด ${rows.length} รายการจากฐานข้อมูลจริง`,
+        rows,
+        loading: false,
+        targetNav,
+        targetNavLabel,
+      });
+    } catch {
+      setDrillModal({
+        title,
+        subtitle: `${resolvedRange.thaiPeriodLabel} · ไม่สามารถดึงข้อมูลรายละเอียดได้`,
+        rows: [],
+        loading: false,
+        targetNav,
+        targetNavLabel,
+      });
+    }
   }
 
   // Mutually Exclusive Primary Shift Status Breakdown (Sum === totalShifts === 100%)
   const totalShiftsCount = Number(kpi?.totalShifts || 0);
   const totalShiftsSafe = Math.max(1, totalShiftsCount);
-  const statusNormalCount = attendanceRows.filter((r) => r.status === 'NORMAL').length;
-  const statusLateOnlyCount = attendanceRows.filter((r) => r.status === 'LATE').length;
-  const statusMissingInCount = attendanceRows.filter((r) => r.status === 'MISSING_CHECKIN').length;
-  const statusMissingOutCount = attendanceRows.filter((r) => r.status === 'MISSING_CHECKOUT').length;
-  const statusMissingOutAndLateCount = attendanceRows.filter(
-    (r) => r.status === 'MISSING_CHECKOUT' && Number(r.is_late) === 1
-  ).length;
-  const statusNoScanCount = attendanceRows.filter((r) => r.status === 'NO_SCAN').length;
-  const statusPendingMappingCount = attendanceRows.filter(
-    (r) => r.status === 'PENDING_MAPPING' || r.status === 'NO_SCHEDULE' || r.status === 'EARLY_CHECKOUT'
-  ).length;
+  const statusNormalCount = Number(kpi?.normalCount || 0);
+  const statusLateOnlyCount = Number(kpi?.lateOnlyCount || 0);
+  const statusInProgressCount =
+    Number(kpi?.inProgressCount || 0) + Number(kpi?.lateInProgressCount || 0);
+  const statusMissingInCount = Number(kpi?.missingCheckinCount || 0);
+  const statusMissingOutCount = Number(kpi?.missingCheckoutCount || 0);
+  const statusMissingOutAndLateCount = Number(kpi?.missingCheckoutLateCount || 0);
+  const statusNoScanCount = Number(kpi?.noScanCount || 0);
+  const statusPendingMappingCount = Math.max(
+    0,
+    totalShiftsCount -
+      (statusNormalCount +
+        statusLateOnlyCount +
+        statusInProgressCount +
+        statusMissingInCount +
+        statusMissingOutCount +
+        statusNoScanCount)
+  );
 
-  const earlyCheckoutCount = attendanceRows.filter(
-    (r) =>
-      Number(r.early_checkout_indicator || 0) === 1 ||
-      Number(r.early_checkout_minutes || 0) > 0 ||
-      r.status === 'EARLY_CHECKOUT'
-  ).length;
-  const needsReReviewCount = attendanceRows.filter(
-    (r) => r.review_status === 'NEEDS_RE_REVIEW'
-  ).length;
+  const earlyCheckoutCount = Number(kpi?.earlyCheckoutCount || 0);
+  const needsReReviewCount = Number(kpi?.needsReReviewCount || 0);
 
-  const normalPct = totalShiftsCount > 0 ? Number(((statusNormalCount / totalShiftsSafe) * 100).toFixed(1)) : 0;
-  const lateOnlyPct = totalShiftsCount > 0 ? Number(((statusLateOnlyCount / totalShiftsSafe) * 100).toFixed(1)) : 0;
-  const missingOutPct = totalShiftsCount > 0 ? Number(((statusMissingOutCount / totalShiftsSafe) * 100).toFixed(1)) : 0;
-  const missingInPct = totalShiftsCount > 0 ? Number(((statusMissingInCount / totalShiftsSafe) * 100).toFixed(1)) : 0;
-  const noScanPct = totalShiftsCount > 0 ? Number(((statusNoScanCount / totalShiftsSafe) * 100).toFixed(1)) : 0;
-  const pendingMapPct = totalShiftsCount > 0 ? Number(((statusPendingMappingCount / totalShiftsSafe) * 100).toFixed(1)) : 0;
+  const safePct = (count: number): number => {
+    if (totalShiftsCount <= 0 || count <= 0) return 0;
+    if (count >= totalShiftsCount) return 100;
+    return Math.min(99.9, Number(((count / totalShiftsSafe) * 100).toFixed(1)));
+  };
+
+  const normalPct = safePct(statusNormalCount);
+  const lateOnlyPct = safePct(statusLateOnlyCount);
+  const missingOutPct = safePct(statusMissingOutCount);
+  const missingInPct = safePct(statusMissingInCount);
+  const noScanPct = safePct(statusNoScanCount);
+  const pendingMapPct = safePct(statusPendingMappingCount + statusInProgressCount);
 
   const scannerOnlineCount = Number(telemetry?.onlineDevices ?? telemetry?.activeDevices ?? 0);
   const scannerTotalCount = Number(telemetry?.totalDevices ?? 0);
@@ -515,6 +548,45 @@ export function DashboardView({
                 </button>
               )}
             </div>
+          )}
+
+          {/* 2.5 Today Live Attendance Strip (B2) */}
+          {data?.todaySummary && (
+            <section
+              aria-label="สถานะการปฏิบัติงานวันนี้แบบเรียลไทม์"
+              className="his-surface px-5 py-4 flex flex-col xl:flex-row xl:items-center justify-between gap-4 bg-white"
+            >
+              <div className="space-y-0.5 min-w-0">
+                <div className="text-[12px] font-semibold text-[#8066B5]">
+                  สรุปสถานะวันนี้ ({formatThaiDate(data.todaySummary.workDate)})
+                </div>
+                <div className="text-[14.5px] font-bold text-[#292638]">
+                  จัดเวรวันนี้ {data.todaySummary.scheduled} เวร · สแกนเข้าแล้ว {data.todaySummary.checkedIn} · กำลังปฏิบัติงาน{' '}
+                  {Number(data.todaySummary.inProgress || 0) + Number(data.todaySummary.lateInProgress || 0)}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-4 text-[13px] font-mono tabular-nums">
+                <span className="text-[#198568] font-semibold">
+                  ครบเข้า–ออก: {data.todaySummary.completed}
+                </span>
+                <span className="text-[#5879BC] font-semibold">
+                  รอสแกนเข้า: {data.todaySummary.awaitingCheckin}
+                </span>
+                <span className="text-[#C74455] font-semibold">
+                  แจ้งเตือน/ขาดสแกน: {data.todaySummary.missingOrAlert}
+                </span>
+                {onNavigate && (
+                  <button
+                    type="button"
+                    onClick={() => onNavigate('hrWorkCenter')}
+                    className="ent-btn-secondary h-8 px-3 text-[12.5px] font-sans whitespace-nowrap"
+                  >
+                    <span>เปิดศูนย์งาน HR วันนี้</span>
+                    <ArrowRight className="w-3.5 h-3.5 text-[#8066B5]" aria-hidden="true" />
+                  </button>
+                )}
+              </div>
+            </section>
           )}
 
           {/* 3. Unified Single-Elevation Metric Strip (5 Core Hospital KPIs) */}
@@ -1078,7 +1150,13 @@ export function DashboardView({
                     </tr>
                   </thead>
                   <tbody>
-                    {pagedDrillRows.length === 0 ? (
+                    {drillModal?.loading ? (
+                      <tr>
+                        <td colSpan={6} className="py-10 text-center text-[14px] text-[#777287]">
+                          กำลังดึงรายละเอียดรายการลงเวลาจากฐานข้อมูล...
+                        </td>
+                      </tr>
+                    ) : pagedDrillRows.length === 0 ? (
                       <TableEmptyState
                         colSpan={6}
                         title="ไม่มีรายการในหมวดหมู่นี้สำหรับช่วงเวลาที่เลือก"

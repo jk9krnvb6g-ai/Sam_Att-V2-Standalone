@@ -452,7 +452,7 @@ export function PersonnelView({
             value: `${validMappedCount.toLocaleString('th-TH')} คน`,
             subtext:
               items.length > 0
-                ? `${Math.round((validMappedCount / items.length) * 100)}% ของทะเบียนทั้งหมด`
+                ? `${validMappedCount === items.length ? '100' : ((validMappedCount / items.length) * 100).toFixed(1)}% ของทะเบียนทั้งหมด`
                 : 'พร้อมจับคู่สแกนลายนิ้วมือ',
             tone: 'success',
           },

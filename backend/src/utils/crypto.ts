@@ -130,6 +130,80 @@ export function verifyPassword(plainPassword: string, storedHash: string): boole
   }
 }
 
+const WEAK_PASSWORDS = new Set([
+  'password',
+  'password1',
+  'password123',
+  '12345678',
+  '123456789',
+  '1234567890',
+  'qwertyui',
+  'admin123',
+  'admin1234',
+  'samatt123',
+]);
+
+/**
+ * ตรวจสอบความแข็งแรงของรหัสผ่าน:
+ * - ความยาวอย่างน้อย 8 ตัวอักษร (และไม่เกิน 128 ตัวอักษร)
+ * - ต้องมีอักขระอย่างน้อย 2 ประเภท (ตัวพิมพ์เล็ก, ตัวพิมพ์ใหญ่, ตัวเลข, อักขระพิเศษ)
+ * - ไม่อยู่ในรายการรหัสผ่านที่คาดเดาง่าย
+ */
+export function validatePasswordStrength(password: string): { valid: boolean; reason?: string } {
+  const raw = String(password || '');
+  if (raw.length < 8) {
+    return { valid: false, reason: 'รหัสผ่านต้องมีความยาวอย่างน้อย 8 ตัวอักษร' };
+  }
+  if (raw.length > 128) {
+    return { valid: false, reason: 'รหัสผ่านต้องมีความยาวไม่เกิน 128 ตัวอักษร' };
+  }
+  if (WEAK_PASSWORDS.has(raw.trim().toLowerCase())) {
+    return { valid: false, reason: 'รหัสผ่านนี้คาดเดาง่ายเกินไป กรุณาตั้งรหัสผ่านที่ปลอดภัยกว่านี้' };
+  }
+  let classes = 0;
+  if (/[a-z]/.test(raw)) classes += 1;
+  if (/[A-Z]/.test(raw)) classes += 1;
+  if (/[0-9]/.test(raw)) classes += 1;
+  if (/[^A-Za-z0-9]/.test(raw)) classes += 1;
+  if (classes < 2) {
+    return {
+      valid: false,
+      reason: 'รหัสผ่านต้องประกอบด้วยอักขระอย่างน้อย 2 ประเภท (เช่น ตัวอักษรพิมพ์ใหญ่/เล็ก ตัวเลข หรือสัญลักษณ์)',
+    };
+  }
+  return { valid: true };
+}
+
+/**
+ * สร้างรหัสผ่านชั่วคราวแบบสุ่มด้วย CSPRNG (ความยาวค่าเริ่มต้น 12 ตัวอักษร)
+ * หลีกเลี่ยงอักขระที่สับสนง่าย (0, O, 1, l, I) และรับประกันการมีอักขระครบทุกประเภท
+ */
+export function generateTemporaryPassword(length = 12): string {
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const lower = 'abcdefghijkmnopqrstuvwxyz';
+  const digits = '23456789';
+  const special = '@#$%&*!';
+  const all = upper + lower + digits + special;
+  const targetLen = Math.max(10, length);
+
+  const chars: string[] = [
+    upper[crypto.randomInt(0, upper.length)],
+    lower[crypto.randomInt(0, lower.length)],
+    digits[crypto.randomInt(0, digits.length)],
+    special[crypto.randomInt(0, special.length)],
+  ];
+  while (chars.length < targetLen) {
+    chars.push(all[crypto.randomInt(0, all.length)]);
+  }
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(0, i + 1);
+    const tmp = chars[i];
+    chars[i] = chars[j];
+    chars[j] = tmp;
+  }
+  return chars.join('');
+}
+
 function base64UrlEncode(input: string | Buffer): string {
   return Buffer.from(input)
     .toString('base64')

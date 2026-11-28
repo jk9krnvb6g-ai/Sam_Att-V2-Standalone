@@ -76,6 +76,8 @@ import {
   sanitizeDeploymentLog,
   type GitHubVersionCheckResult,
 } from '../deployment/githubUpdateCenter.ts';
+import { getScannerSchedulerStatus } from '../scanners/scheduler.ts';
+import { getCurrentBangkokDateParts } from '../../utils/crypto.ts';
 
 export const settingsRouter = Router();
 
@@ -2232,5 +2234,450 @@ settingsRouter.all('/deployment/rollback-app', (req, res) => {
     requestId: req.requestId,
   });
 });
+
+// ============================================================================
+// B9. ศูนย์สุขภาพระบบ (System Health & Operations Monitoring Center — ADMIN Only)
+// ============================================================================
+
+type ComponentHealthState = 'HEALTHY' | 'WARNING' | 'CRITICAL' | 'UNKNOWN' | 'NOT_CONFIGURED';
+
+settingsRouter.get(
+  '/system/health-center',
+  requireAuth,
+  requireRoles('ADMIN'),
+  async (req, res, next) => {
+    try {
+      const cfg = loadConfig();
+      const bkk = getCurrentBangkokDateParts();
+      const checkedAt = bkk.nowDateTimeBkk;
+
+      // 1. Backend Application Health
+      const backendHealth = {
+        key: 'backend',
+        labelThai: 'ระบบหลังบ้าน (Backend Application)',
+        status: 'HEALTHY' as ComponentHealthState,
+        detailThai: `ทำงานปกติ (Node ${process.version}, พอร์ต ${cfg.port})`,
+        metrics: {
+          version: readPackageVersion(),
+          runtimeNodeVersion: process.version,
+          uptimeSeconds: Math.round(process.uptime()),
+          dataMode: cfg.dataMode,
+          port: cfg.port,
+        },
+      };
+
+      // 2. Database & Schema Health (Timed read-only SELECT 1 + migration inspection)
+      let databaseHealth: {
+        key: string;
+        labelThai: string;
+        status: ComponentHealthState;
+        detailThai: string;
+        metrics: Record<string, unknown>;
+      };
+      try {
+        const startMs = Date.now();
+        await dbQuery<{ ok: number }>('SELECT 1 AS ok');
+        const latencyMs = Date.now() - startMs;
+        const dbInspection = await inspectMigrationsDetailedReadOnly();
+        const hasPending = dbInspection.hasPendingMigrations;
+        const hasMismatch = dbInspection.checksumMismatches.length > 0;
+        const status: ComponentHealthState = hasMismatch
+          ? 'CRITICAL'
+          : hasPending
+            ? 'WARNING'
+            : 'HEALTHY';
+        databaseHealth = {
+          key: 'database',
+          labelThai: 'ฐานข้อมูลหลัก (Database & Schema)',
+          status,
+          detailThai:
+            status === 'HEALTHY'
+              ? `เชื่อมต่อปกติ (${cfg.dbEngine}, ${latencyMs} ms, Migration ครบ ${dbInspection.appliedMigrations.length} ฉบับ)`
+              : hasMismatch
+                ? `พบ Checksum Migration ไม่ตรงกัน ${dbInspection.checksumMismatches.length} รายการ`
+                : `มี Migration รอดำเนินการ ${dbInspection.pendingFiles.length} ฉบับ`,
+          metrics: {
+            engine: cfg.dbEngine,
+            databaseName: cfg.samAttDb.database,
+            latencyMs,
+            appliedMigrationsCount: dbInspection.appliedMigrations.length,
+            pendingMigrationsCount: dbInspection.pendingFiles.length,
+            checksumMismatchesCount: dbInspection.checksumMismatches.length,
+          },
+        };
+      } catch (dbErr) {
+        databaseHealth = {
+          key: 'database',
+          labelThai: 'ฐานข้อมูลหลัก (Database & Schema)',
+          status: 'CRITICAL',
+          detailThai:
+            dbErr instanceof Error
+              ? `ไม่สามารถเชื่อมต่อฐานข้อมูลได้: ${dbErr.message}`
+              : 'ไม่สามารถเชื่อมต่อฐานข้อมูลได้',
+          metrics: { engine: cfg.dbEngine },
+        };
+      }
+
+      // 3. Scanner Connection & Scheduler
+      let scannerHealth: {
+        key: string;
+        labelThai: string;
+        status: ComponentHealthState;
+        detailThai: string;
+        metrics: Record<string, unknown>;
+      };
+      try {
+        const [scannerCounts, lastSyncRows, scheduler] = await Promise.all([
+          dbQuery<{ totalCount: number; activeCount: number }>(
+            'SELECT COUNT(*) AS totalCount, SUM(CASE WHEN is_enabled = 1 THEN 1 ELSE 0 END) AS activeCount FROM scanner_devices'
+          ),
+          dbQuery<{
+            id: number;
+            status: string;
+            sync_mode: string;
+            started_at: string;
+            finished_at: string | null;
+            new_scans_inserted: number;
+            error_code: string | null;
+          }>(
+            'SELECT id, status, sync_scope_mode AS sync_mode, started_at, finished_at, new_scans_inserted, error_code FROM sync_runs ORDER BY id DESC LIMIT 1'
+          ),
+          Promise.resolve(getScannerSchedulerStatus()),
+        ]);
+        const lastRun = lastSyncRows[0] || null;
+        const activeCount = Number(scannerCounts[0]?.activeCount || 0);
+        const totalCount = Number(scannerCounts[0]?.totalCount || 0);
+        let status: ComponentHealthState = 'UNKNOWN';
+        let detailThai = 'ยังไม่มีประวัติการซิงก์เครื่องสแกน';
+        if (totalCount === 0) {
+          status = 'NOT_CONFIGURED';
+          detailThai = 'ยังไม่ได้ตั้งค่าเครื่องสแกนในระบบ';
+        } else if (lastRun) {
+          if (String(lastRun.status).toUpperCase() === 'FAILED') {
+            status = 'WARNING';
+            detailThai = `ซิงก์ล่าสุดไม่สำเร็จ (${lastRun.error_code || 'FAILED'}) — เปิดใช้งานเครื่องสแกน ${activeCount}/${totalCount} เครื่อง`;
+          } else {
+            status = 'HEALTHY';
+            detailThai = `ซิงก์ล่าสุดสำเร็จ (${lastRun.finished_at || lastRun.started_at}) — เครื่องสแกนพร้อม ${activeCount}/${totalCount} เครื่อง`;
+          }
+        } else {
+          status = 'UNKNOWN';
+          detailThai = `ตั้งค่าไว้ ${activeCount}/${totalCount} เครื่อง แต่ยังไม่มีรอบซิงก์`;
+        }
+        scannerHealth = {
+          key: 'scanner',
+          labelThai: 'การเชื่อมต่อเครื่องสแกน (Scanner Sync)',
+          status,
+          detailThai,
+          metrics: {
+            totalScanners: totalCount,
+            activeScanners: activeCount,
+            lastSyncRun: lastRun,
+            schedulerRunning: scheduler.timerActive,
+            autoSchedulerEnabled: cfg.scanner.autoSchedulerEnabled,
+          },
+        };
+      } catch {
+        scannerHealth = {
+          key: 'scanner',
+          labelThai: 'การเชื่อมต่อเครื่องสแกน (Scanner Sync)',
+          status: 'UNKNOWN',
+          detailThai: 'ไม่สามารถอ่านสถานะเครื่องสแกนได้',
+          metrics: {},
+        };
+      }
+
+      // 4. Attendance Processing & Scan Backlog
+      let backlogHealth: {
+        key: string;
+        labelThai: string;
+        status: ComponentHealthState;
+        detailThai: string;
+        metrics: Record<string, unknown>;
+      };
+      try {
+        const [mapRows, unprocessedRows, lateClosedRows, lastProcessedRows] = await Promise.all([
+          dbQuery<{ mapping_state: string; cnt: number }>(
+            'SELECT mapping_state, COUNT(*) AS cnt FROM raw_scan_mappings GROUP BY mapping_state'
+          ),
+          dbQuery<{ cnt: number }>(
+            `SELECT COUNT(*) AS cnt
+             FROM raw_scans rs
+             INNER JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
+             LEFT JOIN attendance_raw_scan_usage u ON u.raw_scan_id = rs.id
+             WHERE rsm.mapping_state = 'MATCHED' AND u.raw_scan_id IS NULL`
+          ),
+          dbQuery<{ cnt: number }>(
+            'SELECT COUNT(*) AS cnt FROM attendance WHERE COALESCE(late_scan_review_required, 0) = 1'
+          ),
+          dbQuery<{ last_processed_at: string | null }>(
+            'SELECT MAX(processed_at) AS last_processed_at FROM attendance'
+          ),
+        ]);
+        const unmatchedCount = Number(
+          mapRows.find((r) => r.mapping_state === 'UNMATCHED')?.cnt || 0
+        );
+        const conflictCount = Number(
+          mapRows.find((r) => r.mapping_state === 'CONFLICT')?.cnt || 0
+        );
+        const unprocessedCount = Number(unprocessedRows[0]?.cnt || 0);
+        const lateClosedReviewCount = Number(lateClosedRows[0]?.cnt || 0);
+        const status: ComponentHealthState =
+          conflictCount > 0 || unmatchedCount > 0 || lateClosedReviewCount > 0
+            ? 'WARNING'
+            : 'HEALTHY';
+        backlogHealth = {
+          key: 'processingBacklog',
+          labelThai: 'งานประมวลผลเวลาและสแกนค้าง (Backlog)',
+          status,
+          detailThai:
+            status === 'HEALTHY'
+              ? 'ไม่มีสแกนค้างผูกชื่อหรือขัดแย้ง'
+              : `ไม่พบชื่อผูก ${unmatchedCount} | ขัดแย้ง ${conflictCount} | รอประมวลผล ${unprocessedCount} | สแกนเข้าเดือนปิดรอบ ${lateClosedReviewCount}`,
+          metrics: {
+            unmatchedRawScans: unmatchedCount,
+            conflictRawScans: conflictCount,
+            unprocessedMatchedScans: unprocessedCount,
+            lateScanClosedReviewCount: lateClosedReviewCount,
+            lastProcessedAt: lastProcessedRows[0]?.last_processed_at || null,
+          },
+        };
+      } catch {
+        backlogHealth = {
+          key: 'processingBacklog',
+          labelThai: 'งานประมวลผลเวลาและสแกนค้าง (Backlog)',
+          status: 'UNKNOWN',
+          detailThai: 'ไม่สามารถตรวจสอบคิวประมวลผลเวลาได้',
+          metrics: {},
+        };
+      }
+
+      // 5. HOSOffice Read-Only Connection Check (never enables live push)
+      let hosofficeHealth: {
+        key: string;
+        labelThai: string;
+        status: ComponentHealthState;
+        detailThai: string;
+        metrics: Record<string, unknown>;
+      };
+      const hosHost = String(cfg.hosofficeDb.host || '').trim();
+      const isHosConfigured =
+        Boolean(hosHost) &&
+        hosHost !== 'CHANGE_ME' &&
+        hosHost.toLowerCase() !== 'disabled' &&
+        cfg.dbEngine === 'mysql';
+      if (!isHosConfigured) {
+        hosofficeHealth = {
+          key: 'hosoffice',
+          labelThai: 'การเชื่อมต่อฐานข้อมูล HOSOffice (อ่านอย่างเดียว)',
+          status: 'NOT_CONFIGURED',
+          detailThai:
+            cfg.dbEngine !== 'mysql'
+              ? 'โหมดทดสอบ/ออฟไลน์ (ไม่ได้เชื่อมต่อฐาน HOSOffice ภายนอก)'
+              : 'ยังไม่ได้ตั้งค่า Host ของ HOSOffice',
+          metrics: {
+            configured: false,
+            livePushEnabled: cfg.hosofficePush.livePushEnabled,
+          },
+        };
+      } else {
+        let conn: mysql.Connection | null = null;
+        try {
+          const t0 = Date.now();
+          conn = await mysql.createConnection({
+            host: cfg.hosofficeDb.host,
+            port: cfg.hosofficeDb.port,
+            user: cfg.hosofficeDb.user,
+            password: cfg.hosofficeDb.password,
+            database: cfg.hosofficeDb.database,
+            connectTimeout: 2000,
+          });
+          await conn.query('SELECT 1');
+          const latencyMs = Date.now() - t0;
+          hosofficeHealth = {
+            key: 'hosoffice',
+            labelThai: 'การเชื่อมต่อฐานข้อมูล HOSOffice (อ่านอย่างเดียว)',
+            status: 'HEALTHY',
+            detailThai: `เชื่อมต่ออ่านข้อมูล HOSOffice สำเร็จ (${latencyMs} ms, Live Push ปิดอยู่)`,
+            metrics: {
+              configured: true,
+              latencyMs,
+              livePushEnabled: cfg.hosofficePush.livePushEnabled,
+            },
+          };
+        } catch (hosErr) {
+          hosofficeHealth = {
+            key: 'hosoffice',
+            labelThai: 'การเชื่อมต่อฐานข้อมูล HOSOffice (อ่านอย่างเดียว)',
+            status: 'WARNING',
+            detailThai:
+              hosErr instanceof Error
+                ? `ไม่สามารถเชื่อมต่อ HOSOffice ได้ชั่วคราว: ${hosErr.message}`
+                : 'ไม่สามารถเชื่อมต่อ HOSOffice ได้',
+            metrics: {
+              configured: true,
+              livePushEnabled: cfg.hosofficePush.livePushEnabled,
+            },
+          };
+        } finally {
+          if (conn) {
+            await conn.end().catch(() => undefined);
+          }
+        }
+      }
+
+      // 6. GitHub Updater Readiness (Cache/DB read-only — ZERO live GitHub polling loops)
+      let githubHealth: {
+        key: string;
+        labelThai: string;
+        status: ComponentHealthState;
+        detailThai: string;
+        metrics: Record<string, unknown>;
+      };
+      try {
+        const lastDeploys = await dbQuery<{
+          id: number;
+          status: string;
+          target_version: string | null;
+          finished_at: string | null;
+        }>('SELECT id, status, release_version AS target_version, executed_at AS finished_at FROM deployment_history ORDER BY id DESC LIMIT 1');
+        const tokenConfigured = cfg.github.tokenConfigured;
+        const status: ComponentHealthState = tokenConfigured ? 'HEALTHY' : 'WARNING';
+        githubHealth = {
+          key: 'githubUpdater',
+          labelThai: 'ระบบอัปเดต GitHub Update Center',
+          status,
+          detailThai: tokenConfigured
+            ? `ตั้งค่า GITHUB_TOKEN พร้อมใช้งาน (${cfg.github.repo} / ${cfg.github.branch})`
+            : `ยังไม่ได้ตั้งค่า GITHUB_TOKEN (จำกัด Rate Limit 60 ครั้ง/ชั่วโมง)`,
+          metrics: {
+            repo: cfg.github.repo,
+            branch: cfg.github.branch,
+            tokenConfigured,
+            lastDeployment: lastDeploys[0] || null,
+          },
+        };
+      } catch {
+        githubHealth = {
+          key: 'githubUpdater',
+          labelThai: 'ระบบอัปเดต GitHub Update Center',
+          status: 'UNKNOWN',
+          detailThai: 'ไม่สามารถอ่านประวัติศูนย์อัปเดตได้',
+          metrics: {},
+        };
+      }
+
+      // 7. Disk Space Check (Safe statfsSync with UNKNOWN fallback)
+      let diskHealth: {
+        key: string;
+        labelThai: string;
+        status: ComponentHealthState;
+        detailThai: string;
+        metrics: Record<string, unknown>;
+      };
+      try {
+        const stat = fs.statfsSync(process.cwd());
+        const totalBytes = Number(stat.blocks) * Number(stat.bsize);
+        const freeBytes = Number(stat.bavail) * Number(stat.bsize);
+        const totalGb = Number((totalBytes / 1024 ** 3).toFixed(2));
+        const freeGb = Number((freeBytes / 1024 ** 3).toFixed(2));
+        const usedPercent = totalBytes > 0 ? Number((((totalBytes - freeBytes) / totalBytes) * 100).toFixed(1)) : 0;
+        const status: ComponentHealthState =
+          usedPercent >= 95 ? 'CRITICAL' : usedPercent >= 85 || freeGb < 2 ? 'WARNING' : 'HEALTHY';
+        diskHealth = {
+          key: 'diskSpace',
+          labelThai: 'พื้นที่ดิสก์เซิร์ฟเวอร์ (Disk Space)',
+          status,
+          detailThai: `เหลือพื้นที่ว่าง ${freeGb} GB จาก ${totalGb} GB (ใช้งาน ${usedPercent}%)`,
+          metrics: { freeGb, totalGb, usedPercent },
+        };
+      } catch {
+        diskHealth = {
+          key: 'diskSpace',
+          labelThai: 'พื้นที่ดิสก์เซิร์ฟเวอร์ (Disk Space)',
+          status: 'UNKNOWN',
+          detailThai: 'ไม่สามารถตรวจวัดพื้นที่ดิสก์ได้บนสภาพแวดล้อมปัจจุบัน',
+          metrics: {},
+        };
+      }
+
+      // 8. Backup Status Check (Explicit UNKNOWN if not configured/present)
+      let backupHealth: {
+        key: string;
+        labelThai: string;
+        status: ComponentHealthState;
+        detailThai: string;
+        metrics: Record<string, unknown>;
+      };
+      const backupDir = process.env.SAM_ATT_BACKUP_DIR || 'C:\\SamAttBackups';
+      try {
+        if (!fs.existsSync(backupDir)) {
+          backupHealth = {
+            key: 'backup',
+            labelThai: 'การสำรองข้อมูล (Backup Verification)',
+            status: 'UNKNOWN',
+            detailThai: `ไม่พบโฟลเดอร์สำรองข้อมูล (${backupDir}) หรือยังไม่มีการสำรองอัตโนมัติในสภาพแวดล้อมนี้`,
+            metrics: { backupDir, exists: false },
+          };
+        } else {
+          const entries = fs.readdirSync(backupDir);
+          backupHealth = {
+            key: 'backup',
+            labelThai: 'การสำรองข้อมูล (Backup Verification)',
+            status: entries.length > 0 ? 'HEALTHY' : 'WARNING',
+            detailThai:
+              entries.length > 0
+                ? `พบชุดสำรองข้อมูล ${entries.length} รายการใน ${backupDir}`
+                : `พบโฟลเดอร์ ${backupDir} แต่ยังไม่มีไฟล์สำรอง`,
+            metrics: { backupDir, exists: true, entryCount: entries.length },
+          };
+        }
+      } catch {
+        backupHealth = {
+          key: 'backup',
+          labelThai: 'การสำรองข้อมูล (Backup Verification)',
+          status: 'UNKNOWN',
+          detailThai: 'ไม่สามารถอ่านสถานะโฟลเดอร์สำรองข้อมูลได้',
+          metrics: { backupDir },
+        };
+      }
+
+      const components = [
+        backendHealth,
+        databaseHealth,
+        scannerHealth,
+        backlogHealth,
+        hosofficeHealth,
+        githubHealth,
+        diskHealth,
+        backupHealth,
+      ];
+
+      const criticalCount = components.filter((c) => c.status === 'CRITICAL').length;
+      const warningCount = components.filter((c) => c.status === 'WARNING').length;
+      const overallStatus: ComponentHealthState =
+        criticalCount > 0 ? 'CRITICAL' : warningCount > 0 ? 'WARNING' : 'HEALTHY';
+
+      res.json({
+        checkedAt,
+        overallStatus,
+        summary: {
+          totalChecks: components.length,
+          healthyCount: components.filter((c) => c.status === 'HEALTHY').length,
+          warningCount,
+          criticalCount,
+          unknownCount: components.filter((c) => c.status === 'UNKNOWN').length,
+          notConfiguredCount: components.filter((c) => c.status === 'NOT_CONFIGURED').length,
+        },
+        components,
+        readOnly: true,
+        requestId: req.requestId,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
 
 

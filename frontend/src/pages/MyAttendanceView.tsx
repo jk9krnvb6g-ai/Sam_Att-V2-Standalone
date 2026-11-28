@@ -11,13 +11,14 @@
  *   3. ประวัติการสแกนลายนิ้วมือต้นฉบับของตนเอง
  */
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { PanelRightOpen, CalendarDays, List, ChevronLeft, ChevronRight, Search } from 'lucide-react';
-import { apiRequest, ApiClientError, type AuthUser } from '../services/api.ts';
+import { PanelRightOpen, CalendarDays, List, ChevronLeft, ChevronRight, Search, Download, Clock, CheckCircle2, CalendarOff } from 'lucide-react';
+import { apiRequest, ApiClientError, downloadReportCenterXlsx, type AuthUser } from '../services/api.ts';
 import {
   AttendanceStatusText,
   ReviewStatusLabel,
   ErrorBanner,
 } from '../components/StatusText.tsx';
+import { useToast } from '../components/common/ToastContext.tsx';
 import {
   PageHeader,
   MetricStrip,
@@ -86,6 +87,8 @@ export function MyAttendanceView({
 
   // Slide-Over Detail Drawer for inspecting a single shift & its raw scan trace
   const [selectedRowModal, setSelectedRowModal] = useState<any | null>(null);
+  const [exportingOwnExcel, setExportingOwnExcel] = useState(false);
+  const toast = useToast();
 
   const filteredShifts = useMemo(() => {
     const q = shiftsSearch.trim().toLowerCase();
@@ -232,6 +235,49 @@ export function MyAttendanceView({
     setCalendarMonth(nextYm);
   }
 
+  const todayCard = attendanceData?.todayStatusCard;
+
+  async function handleExportOwnExcel() {
+    setExportingOwnExcel(true);
+    try {
+      await downloadReportCenterXlsx({
+        reportType: 'OWN_ATTENDANCE',
+        dateFrom: resolvedRange.dateFrom,
+        dateTo: resolvedRange.dateTo,
+      });
+      toast.showSuccess('ดาวน์โหลดไฟล์ Excel เวลาปฏิบัติงานส่วนตัวเรียบร้อยแล้ว');
+    } catch (err) {
+      toast.showError(
+        'ไม่สามารถดาวน์โหลดไฟล์ Excel ได้',
+        err instanceof ApiClientError ? err.message : undefined
+      );
+    } finally {
+      setExportingOwnExcel(false);
+    }
+  }
+
+  function getLifecycleTone(state?: string) {
+    switch (state) {
+      case 'COMPLETE':
+        return 'success' as const;
+      case 'IN_PROGRESS':
+      case 'AWAITING_CHECKIN':
+        return 'info' as const;
+      case 'LATE_IN_PROGRESS':
+      case 'MISSING_CHECKOUT':
+        return 'warning' as const;
+      case 'NO_SCAN':
+      case 'MISSING_CHECKIN':
+        return 'danger' as const;
+      case 'OFF_DAY':
+      case 'APPROVED_LEAVE':
+      case 'OFFICIAL_DUTY':
+        return 'brand' as const;
+      default:
+        return 'neutral' as const;
+    }
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -239,12 +285,23 @@ export function MyAttendanceView({
         title="เวลาปฏิบัติงานและตารางเวรของฉัน"
         subtitle={`แสดงข้อมูลการลงเวลาเฉพาะของ ${user.displayName} (รหัสบุคลากร: ${user.approvedPersonId || 'ยังไม่ได้ผูกชื่อบุคลากร'})`}
         actions={
-          <PageHelpAction
-            guideKey="myAttendance"
-            activeTabKey={activeTab}
-            userRole={user.role}
-            onNavigate={onNavigate}
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleExportOwnExcel}
+              disabled={exportingOwnExcel || !user.approvedPersonId}
+              className="ent-btn-secondary whitespace-nowrap shrink-0"
+            >
+              <Download className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+              <span>{exportingOwnExcel ? 'กำลังส่งออก...' : 'ดาวน์โหลด Excel (.xlsx)'}</span>
+            </button>
+            <PageHelpAction
+              guideKey="myAttendance"
+              activeTabKey={activeTab}
+              userRole={user.role}
+              onNavigate={onNavigate}
+            />
+          </div>
         }
       />
 
@@ -264,6 +321,118 @@ export function MyAttendanceView({
       />
 
       <ErrorBanner error={error} onRetry={loadOwnData} />
+
+      {!loading && todayCard && (
+        <section
+          aria-label="สถานะเวรวันนี้แบบเรียลไทม์"
+          className="his-surface overflow-hidden"
+        >
+          <div className="px-5 py-4 border-b border-[#E8E4EF] flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-[#F8F7FC]">
+            <div className="flex items-start gap-3 min-w-0">
+              <div className="w-9 h-9 rounded-lg bg-[#F1ECFA] text-[#4E3978] flex items-center justify-center shrink-0">
+                {todayCard.holiday ? (
+                  <CalendarOff className="w-4.5 h-4.5" aria-hidden="true" />
+                ) : (
+                  <Clock className="w-4.5 h-4.5" aria-hidden="true" />
+                )}
+              </div>
+              <div className="min-w-0">
+                <div className="text-[12px] font-semibold text-[#8066B5]">
+                  สถานะเวรวันนี้แบบเรียลไทม์ · {formatThaiDate(todayCard.workDate)}
+                </div>
+                <div className="text-[16px] font-bold text-[#292638] truncate">
+                  {todayCard.shiftCode ? `${todayCard.shiftCode} · ` : ''}
+                  {todayCard.shiftName || 'ไม่มีตารางเวรวันนี้'}
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {todayCard.holiday && (
+                <StatusBadge
+                  tone="brand"
+                  label={`${todayCard.holiday.holiday_name} (${todayCard.holiday.override_policy})`}
+                  compact
+                />
+              )}
+              <StatusBadge
+                tone={getLifecycleTone(todayCard.lifecycleState)}
+                label={todayCard.lifecycleLabelThai}
+              />
+            </div>
+          </div>
+
+          <div className="p-5 space-y-4">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 divide-y sm:divide-y-0 sm:divide-x divide-[#E8E4EF]">
+              <div className="pt-1 sm:pt-0">
+                <div className="text-[12px] text-[#777287]">เวลาตามตารางเวร</div>
+                <div className="font-mono font-bold text-[15px] text-[#292638] tabular-nums mt-0.5">
+                  {todayCard.scheduledStart && todayCard.scheduledEnd
+                    ? `${String(todayCard.scheduledStart).slice(11, 16)} – ${String(todayCard.scheduledEnd).slice(11, 16)} น.`
+                    : '—'}
+                </div>
+              </div>
+              <div className="pt-2 sm:pt-0 sm:pl-4">
+                <div className="text-[12px] text-[#777287]">เวลาสแกนเข้า / ออกจริง</div>
+                <div className="font-mono font-bold text-[15px] text-[#292638] tabular-nums mt-0.5">
+                  {todayCard.checkInTime ? String(todayCard.checkInTime).slice(11, 16) : '—'} /{' '}
+                  {todayCard.checkOutTime ? String(todayCard.checkOutTime).slice(11, 16) : '—'}
+                </div>
+              </div>
+              <div className="pt-2 sm:pt-0 sm:pl-4">
+                <div className="text-[12px] text-[#777287]">ช่วงรับสแกนเข้างานที่เหลือ</div>
+                <div className="font-mono font-bold text-[15px] text-[#4E3978] tabular-nums mt-0.5">
+                  {typeof todayCard.remainingCheckinWindowMinutes === 'number'
+                    ? `${todayCard.remainingCheckinWindowMinutes} นาที`
+                    : todayCard.checkInTime
+                      ? 'สแกนเข้าแล้ว'
+                      : '—'}
+                </div>
+              </div>
+              <div className="pt-2 sm:pt-0 sm:pl-4">
+                <div className="text-[12px] text-[#777287]">เวลาปฏิบัติงานคงเหลือ / สาย</div>
+                <div className="font-mono font-bold text-[15px] text-[#292638] tabular-nums mt-0.5">
+                  {Number(todayCard.lateMinutes || 0) > 0 ? (
+                    <span className="text-[#B87516]">สาย {todayCard.lateMinutes} นาที</span>
+                  ) : typeof todayCard.remainingShiftMinutes === 'number' ? (
+                    `เหลือ ${todayCard.remainingShiftMinutes} นาที`
+                  ) : todayCard.isFinalized ? (
+                    'สรุปผลแล้ว'
+                  ) : (
+                    '—'
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {Array.isArray(todayCard.phases) && todayCard.phases.length > 0 && (
+              <div className="pt-4 border-t border-[#E8E4EF]">
+                <div className="grid grid-cols-1 sm:grid-cols-5 gap-2.5">
+                  {todayCard.phases.map((p: any, idx: number) => (
+                    <div
+                      key={p.key || idx}
+                      className={`px-3 py-2.5 rounded-lg border text-[12.5px] ${
+                        p.active
+                          ? 'bg-[#F1ECFA] border-[#8066B5] text-[#4E3978]'
+                          : p.completed
+                            ? 'bg-[#EEF8F4] border-[#198568]/25 text-[#198568]'
+                            : 'bg-[#F8F7FC] border-[#E8E4EF] text-[#777287]'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1 font-semibold">
+                        <span className="truncate">{idx + 1}. {p.labelThai}</span>
+                        {p.completed && <CheckCircle2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />}
+                      </div>
+                      <div className="font-mono text-[11.5px] tabular-nums mt-1 opacity-85">
+                        {p.at ? `${String(p.at).slice(11, 16)} น.` : '—'}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {summary && (
         <MetricStrip

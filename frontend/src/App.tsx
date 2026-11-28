@@ -5,7 +5,7 @@
  * ============================================================================
  */
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react';
 import {
   LogOut,
   Menu,
@@ -32,18 +32,60 @@ import {
   type SidebarUpdateBadge,
 } from './components/layout/Sidebar.tsx';
 import { LoginView } from './pages/LoginView.tsx';
-import { DashboardView } from './pages/DashboardView.tsx';
-import { MyAttendanceView } from './pages/MyAttendanceView.tsx';
-import { PersonnelView } from './pages/PersonnelView.tsx';
-import { ShiftsView } from './pages/ShiftsView.tsx';
-import { HrAttendanceView } from './pages/HrAttendanceView.tsx';
-import { RawScansView } from './pages/RawScansView.tsx';
-import { ReportsView } from './pages/ReportsView.tsx';
-import { AdminViews } from './pages/AdminViews.tsx';
-import { WorkflowGuideView } from './pages/WorkflowGuideView.tsx';
-import { UserManualView } from './pages/UserManualView.tsx';
+import { ForcePasswordChangeView } from './components/auth/ForcePasswordChangeView.tsx';
 import { ToastProvider } from './components/common/ToastContext.tsx';
 import { ConfirmDialog } from './components/common/SharedComponents.tsx';
+
+const DashboardView = lazy(() =>
+  import('./pages/DashboardView.tsx').then((m) => ({ default: m.DashboardView }))
+);
+const MyAttendanceView = lazy(() =>
+  import('./pages/MyAttendanceView.tsx').then((m) => ({ default: m.MyAttendanceView }))
+);
+const PersonnelView = lazy(() =>
+  import('./pages/PersonnelView.tsx').then((m) => ({ default: m.PersonnelView }))
+);
+const ShiftsView = lazy(() =>
+  import('./pages/ShiftsView.tsx').then((m) => ({ default: m.ShiftsView }))
+);
+const HrAttendanceView = lazy(() =>
+  import('./pages/HrAttendanceView.tsx').then((m) => ({ default: m.HrAttendanceView }))
+);
+const RawScansView = lazy(() =>
+  import('./pages/RawScansView.tsx').then((m) => ({ default: m.RawScansView }))
+);
+const ReportsView = lazy(() =>
+  import('./pages/ReportsView.tsx').then((m) => ({ default: m.ReportsView }))
+);
+const AdminViews = lazy(() =>
+  import('./pages/AdminViews.tsx').then((m) => ({ default: m.AdminViews }))
+);
+const WorkflowGuideView = lazy(() =>
+  import('./pages/WorkflowGuideView.tsx').then((m) => ({ default: m.WorkflowGuideView }))
+);
+const UserManualView = lazy(() =>
+  import('./pages/UserManualView.tsx').then((m) => ({ default: m.UserManualView }))
+);
+const HrWorkCenterView = lazy(() =>
+  import('./pages/HrWorkCenterView.tsx').then((m) => ({ default: m.HrWorkCenterView }))
+);
+const CompletenessView = lazy(() =>
+  import('./pages/CompletenessView.tsx').then((m) => ({ default: m.CompletenessView }))
+);
+const MonthlyClosingView = lazy(() =>
+  import('./pages/MonthlyClosingView.tsx').then((m) => ({ default: m.MonthlyClosingView }))
+);
+const SystemHealthView = lazy(() =>
+  import('./pages/SystemHealthView.tsx').then((m) => ({ default: m.SystemHealthView }))
+);
+
+function WorkspaceLoadingFallback() {
+  return (
+    <div className="his-surface p-8 text-center text-[14px] text-[#777287]">
+      กำลังโหลดหน้าจอ...
+    </div>
+  );
+}
 
 export const UPDATE_NOTIFICATION_POLL_INTERVAL_MS = 30 * 60 * 1000;
 
@@ -268,6 +310,18 @@ export default function App() {
     return <LoginView dataMode={dataMode} onLoginSuccess={handleLoginSuccess} />;
   }
 
+  if (user.mustChangePassword) {
+    return (
+      <ToastProvider>
+        <ForcePasswordChangeView
+          user={user}
+          onPasswordChanged={() => setUser({ ...user, mustChangePassword: false })}
+          onLogout={handleLogout}
+        />
+      </ToastProvider>
+    );
+  }
+
   const breadcrumb = getNavBreadcrumb(activeView);
   const isStaffOrAdmin = user.role === 'ADMIN' || user.role === 'RESPONSIBLE_STAFF';
 
@@ -359,106 +413,132 @@ export default function App() {
 
         {/* Main Content Viewport */}
         <main className="flex-1 px-4 sm:px-6 lg:px-8 py-5 sm:py-6 pb-24 lg:pb-10 max-w-[1440px] w-full mx-auto min-w-0">
-          {activeView === 'dashboard' && (
-            <DashboardView
-              user={user}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
-          {activeView === 'myAttendance' && (
-            <MyAttendanceView
-              user={user}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
-          {activeView === 'personnel' && (
-            <PersonnelView
-              userRole={user.role}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
-          {activeView === 'shifts' && (
-            <ShiftsView
-              userRole={user.role}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
-          {activeView === 'hrAttendance' && (
-            <HrAttendanceView
-              mode="management"
-              userRole={user.role}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
-          {activeView === 'attendanceReview' && (
-            <HrAttendanceView
-              mode="review"
-              userRole={user.role}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
-          {activeView === 'rawScans' && (
-            <RawScansView
-              mode="rawScans"
-              user={user}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
-          {activeView === 'scanners' && (
-            <RawScansView
-              mode="scanners"
-              user={user}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
-          {activeView === 'reports' && (
-            <ReportsView
-              mode="reports"
-              userRole={user.role}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
-          {activeView === 'hosofficePush' && (
-            <ReportsView
-              mode="hosofficePush"
-              userRole={user.role}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
-          {activeView === 'adminUsers' && (
-            <AdminViews
-              mode="users"
-              userRole={user.role}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
-          {activeView === 'systemLogs' && (
-            <AdminViews
-              mode="auditLogs"
-              userRole={user.role}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
-          {activeView === 'deployment' && (
-            <AdminViews
-              mode="deployment"
-              userRole={user.role}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-              onNotificationChange={handleNotificationChange}
-            />
-          )}
-          {activeView === 'workflowGuide' && (
-            <WorkflowGuideView
-              user={user}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
-          {activeView === 'userManual' && (
-            <UserManualView
-              user={user}
-              onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
-            />
-          )}
+          <Suspense fallback={<WorkspaceLoadingFallback />}>
+            {activeView === 'dashboard' && (
+              <DashboardView
+                user={user}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'myAttendance' && (
+              <MyAttendanceView
+                user={user}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'personnel' && (
+              <PersonnelView
+                userRole={user.role}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'shifts' && (
+              <ShiftsView
+                userRole={user.role}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'hrAttendance' && (
+              <HrAttendanceView
+                mode="management"
+                userRole={user.role}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'attendanceReview' && (
+              <HrAttendanceView
+                mode="review"
+                userRole={user.role}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'rawScans' && (
+              <RawScansView
+                mode="rawScans"
+                user={user}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'scanners' && (
+              <RawScansView
+                mode="scanners"
+                user={user}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'reports' && (
+              <ReportsView
+                mode="reports"
+                userRole={user.role}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'hosofficePush' && (
+              <ReportsView
+                mode="hosofficePush"
+                userRole={user.role}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'adminUsers' && (
+              <AdminViews
+                mode="users"
+                userRole={user.role}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'systemLogs' && (
+              <AdminViews
+                mode="auditLogs"
+                userRole={user.role}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'deployment' && (
+              <AdminViews
+                mode="deployment"
+                userRole={user.role}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+                onNotificationChange={handleNotificationChange}
+              />
+            )}
+            {activeView === 'workflowGuide' && (
+              <WorkflowGuideView
+                user={user}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'userManual' && (
+              <UserManualView
+                user={user}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'hrWorkCenter' && (
+              <HrWorkCenterView
+                userRole={user.role}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'completeness' && (
+              <CompletenessView
+                userRole={user.role}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'monthlyClosing' && (
+              <MonthlyClosingView
+                userRole={user.role}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+            {activeView === 'systemHealth' && (
+              <SystemHealthView
+                userRole={user.role}
+                onNavigate={(view) => setActiveView(resolveSafeNavView(view, user.role))}
+              />
+            )}
+          </Suspense>
         </main>
       </div>
 

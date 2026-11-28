@@ -36,6 +36,7 @@ export interface AuthenticatedUser {
   displayName: string;
   role: UserRole;
   approvedPersonId: string | null;
+  mustChangePassword: boolean;
   jti: string;
   exp: number;
   authSource?: 'COOKIE' | 'BEARER';
@@ -143,8 +144,9 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       role: UserRole;
       approved_person_id: string | null;
       is_active: number;
+      must_change_password?: number;
     }>(
-      'SELECT id, username, display_name, role, approved_person_id, is_active FROM users WHERE id = ? AND username = ? LIMIT 1',
+      'SELECT id, username, display_name, role, approved_person_id, is_active, must_change_password FROM users WHERE id = ? AND username = ? LIMIT 1',
       [payload.userId, payload.sub]
     );
 
@@ -162,12 +164,30 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       dbUser.display_name,
       dbUser.username === 'admin' ? 'ผู้ดูแลระบบสูงสุด (โรงพยาบาลสามชุก)' : dbUser.username
     ).text;
+    const mustChangePassword = Number(dbUser.must_change_password || 0) === 1;
+    const reqPath = (req.path || '').split('?')[0];
+    const allowedDuringForcedChange =
+      reqPath === '/auth/me' ||
+      reqPath === '/auth/logout' ||
+      reqPath === '/auth/change-password';
+
+    if (mustChangePassword && !allowedDuringForcedChange) {
+      res.status(403).json({
+        error: 'PASSWORD_CHANGE_REQUIRED',
+        message: 'กรุณาเปลี่ยนรหัสผ่านชั่วคราวก่อนใช้งานระบบ',
+        mustChangePassword: true,
+        requestId: req.requestId,
+      });
+      return;
+    }
+
     req.user = {
       id: dbUser.id,
       username: dbUser.username,
       displayName: cleanDisplayName,
       role: dbUser.role,
       approvedPersonId: dbUser.approved_person_id,
+      mustChangePassword,
       jti: payload.jti,
       exp: payload.exp,
       authSource: source,

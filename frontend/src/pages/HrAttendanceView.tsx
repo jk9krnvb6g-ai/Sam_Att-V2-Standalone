@@ -21,6 +21,9 @@ import {
   ChevronDown,
   ChevronUp,
   RefreshCw,
+  CheckSquare,
+  ListChecks,
+  AlertTriangle,
 } from 'lucide-react';
 import { apiRequest, ApiClientError, type UserRole } from '../services/api.ts';
 import {
@@ -39,6 +42,7 @@ import {
   TableEmptyState,
   TableLoadingSkeleton,
   ConfirmDialog,
+  SharedModal,
   RequiredMark,
   type PageSizeOption,
 } from '../components/common/SharedComponents.tsx';
@@ -129,6 +133,18 @@ export function HrAttendanceView({
   const [previewingReprocess, setPreviewingReprocess] = useState(false);
   const [confirmReprocessOpen, setConfirmReprocessOpen] = useState(false);
   const [executingReprocess, setExecutingReprocess] = useState(false);
+
+  // B7: Bulk HR Review state
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [bulkModalOpen, setBulkModalOpen] = useState(false);
+  const [bulkTargetStatus, setBulkTargetStatus] = useState<'VERIFIED_APPROVED' | 'REVIEWED' | 'REJECTED'>('VERIFIED_APPROVED');
+  const [bulkReasonCategory, setBulkReasonCategory] = useState('VERIFIED_BY_HR');
+  const [bulkComment, setBulkComment] = useState('');
+  const [bulkPreviewLoading, setBulkPreviewLoading] = useState(false);
+  const [bulkPreview, setBulkPreview] = useState<any | null>(null);
+  const [bulkSubmitting, setBulkSubmitting] = useState(false);
+  const [bulkResult, setBulkResult] = useState<any | null>(null);
+  const [bulkError, setBulkError] = useState<string | null>(null);
 
   useEffect(() => {
     setReviewQueueFilter(mode === 'review' ? 'PENDING' : 'ALL');
@@ -278,6 +294,7 @@ export function HrAttendanceView({
     if (reviewQueueFilter === 'PENDING') {
       list = list.filter(
         (r) =>
+          r.review_status === 'PENDING' ||
           r.review_status === 'PENDING_REVIEW' ||
           r.review_status === 'NEEDS_RE_REVIEW' ||
           r.status === 'NEEDS_RE_REVIEW' ||
@@ -287,6 +304,7 @@ export function HrAttendanceView({
       list = list.filter(
         (r) =>
           r.review_status === 'VERIFIED_APPROVED' ||
+          r.review_status === 'REVIEWED' ||
           r.review_status === 'VERIFIED' ||
           r.review_status === 'APPROVED'
       );
@@ -297,12 +315,17 @@ export function HrAttendanceView({
   const queueCounts = useMemo(() => {
     let base = [...items];
     if (departmentFilter) base = base.filter((r) => r.department_name === departmentFilter);
-    if (personnelTypeFilter) base = base.filter((r) => r.personnel_type_name === personnelTypeFilter);
+    if (personnelTypeFilter) {
+      base = base.filter(
+        (r) => String(r.personnel_type_name || r.personnel_type_code || '') === personnelTypeFilter
+      );
+    }
     let pending = 0;
     let verified = 0;
     for (const r of base) {
       if (
         r.review_status === 'VERIFIED_APPROVED' ||
+        r.review_status === 'REVIEWED' ||
         r.review_status === 'VERIFIED' ||
         r.review_status === 'APPROVED'
       ) {
@@ -338,7 +361,13 @@ export function HrAttendanceView({
       ) {
         missingOrNoScan += 1;
       }
-      if (r.review_status === 'PENDING_REVIEW' || r.status === 'NEEDS_RE_REVIEW') {
+      if (
+        r.review_status === 'PENDING' ||
+        r.review_status === 'PENDING_REVIEW' ||
+        r.review_status === 'NEEDS_RE_REVIEW' ||
+        r.status === 'NEEDS_RE_REVIEW' ||
+        !r.review_status
+      ) {
         pendingReview += 1;
       }
     }
@@ -517,6 +546,125 @@ export function HrAttendanceView({
     }
   }
 
+  function toggleRowSelected(id: number) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAllOnPage() {
+    const pageIds = pagedItems.map((r) => Number(r.id));
+    if (pageIds.length === 0) return;
+    const allSelected = pageIds.every((id) => selectedIds.has(id));
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allSelected) {
+        pageIds.forEach((id) => next.delete(id));
+      } else {
+        pageIds.forEach((id) => next.add(id));
+      }
+      return next;
+    });
+  }
+
+  async function runBulkReviewPreview(opts?: {
+    targetStatus?: 'VERIFIED_APPROVED' | 'REVIEWED' | 'REJECTED';
+    comment?: string;
+  }) {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    setBulkPreviewLoading(true);
+    setBulkError(null);
+    try {
+      const res = await apiRequest('/attendance/bulk-review/preview', {
+        method: 'POST',
+        body: JSON.stringify({
+          attendanceIds: ids,
+          targetReviewStatus: opts?.targetStatus ?? bulkTargetStatus,
+          reviewComment: (opts?.comment ?? bulkComment).trim(),
+        }),
+      });
+      setBulkPreview(res);
+    } catch (err) {
+      const msg =
+        err instanceof ApiClientError
+          ? err.message
+          : 'ไม่สามารถตรวจสอบสิทธิ์รายการที่เลือกได้';
+      setBulkError(msg);
+    } finally {
+      setBulkPreviewLoading(false);
+    }
+  }
+
+  function openBulkReviewModal() {
+    setBulkResult(null);
+    setBulkError(null);
+    setBulkPreview(null);
+    setBulkModalOpen(true);
+    void runBulkReviewPreview();
+  }
+
+  async function handleExecuteBulkReview() {
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    setBulkSubmitting(true);
+    setBulkError(null);
+    try {
+      const rowMap = new Map(items.map((r) => [Number(r.id), r]));
+      const payloadItems =
+        bulkPreview?.eligibleItems && bulkPreview.eligibleItems.length > 0
+          ? bulkPreview.eligibleItems.map((e: any) => ({
+              id: Number(e.id),
+              recordVersion: Number(e.recordVersion ?? 1),
+            }))
+          : ids.map((id) => ({
+              id,
+              recordVersion: Number(rowMap.get(id)?.record_version ?? 1),
+            }));
+
+      if (payloadItems.length === 0) {
+        setBulkError('ไม่มีรายการที่ผ่านเงื่อนไขพร้อมบันทึก กรุณาระบุเหตุผลหรือยกเลิกรายการในงวดปิดรอบ');
+        return;
+      }
+
+      const res = await apiRequest('/attendance/bulk-review', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: payloadItems,
+          targetReviewStatus: bulkTargetStatus,
+          reviewReasonCategory: bulkReasonCategory,
+          reviewComment: bulkComment.trim(),
+        }),
+      });
+      setBulkResult(res);
+      const succeededIds = new Set<number>(
+        (res.succeeded || []).map((s: any) => Number(s.id))
+      );
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        succeededIds.forEach((id) => next.delete(id));
+        return next;
+      });
+      toast.showSuccess(
+        `บันทึกผลตรวจสอบแบบกลุ่มสำเร็จ ${res.succeededCount} รายการ`,
+        res.failedCount > 0 ? `ไม่ผ่าน ${res.failedCount} รายการ` : undefined
+      );
+      await loadData();
+    } catch (err) {
+      const msg =
+        err instanceof ApiClientError
+          ? err.message
+          : 'ไม่สามารถบันทึกการตรวจสอบแบบกลุ่มได้';
+      setBulkError(msg);
+      toast.showError('ตรวจสอบแบบกลุ่มไม่สำเร็จ', msg);
+    } finally {
+      setBulkSubmitting(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -562,6 +710,8 @@ export function HrAttendanceView({
             >
               <option value="">ทุกสถานะการลงเวลา</option>
               <option value="NORMAL">ลงเวลาปกติ</option>
+              <option value="IN_PROGRESS">กำลังปฏิบัติงาน (ยังไม่ถึงเวลาออก)</option>
+              <option value="LATE_IN_PROGRESS">เข้าสาย (กำลังปฏิบัติงาน)</option>
               <option value="LATE">มาสาย</option>
               <option value="EARLY_CHECKOUT">ออกก่อนเวลา</option>
               <option value="NO_SCAN">ไม่พบข้อมูลสแกน</option>
@@ -646,7 +796,7 @@ export function HrAttendanceView({
             value: `${stats.normal.toLocaleString('th-TH')} เวร`,
             subtext:
               stats.total > 0
-                ? `${Math.round((stats.normal / stats.total) * 100)}% ของรายการที่กรอง`
+                ? `${stats.normal === stats.total ? '100' : ((stats.normal / stats.total) * 100).toFixed(1)}% ของรายการที่กรอง`
                 : 'สแกนเข้า–ออกครบถ้วน',
             tone: 'success',
           },
@@ -810,6 +960,46 @@ export function HrAttendanceView({
         </div>
       )}
 
+      {/* Sticky Bulk Action Toolbar (B7) */}
+      {selectedIds.size > 0 && (
+        <div
+          role="region"
+          aria-label="แถบดำเนินการตรวจสอบแบบกลุ่ม"
+          className="sticky top-[68px] z-20 rounded-xl border border-[#8066B5]/35 bg-[#F1ECFA] px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+        >
+          <div className="flex flex-wrap items-center gap-2.5 text-[13.5px]">
+            <ListChecks className="w-4 h-4 text-[#4E3978] shrink-0" aria-hidden="true" />
+            <span className="font-bold text-[#4E3978] tabular-nums">
+              เลือกแล้ว {selectedIds.size.toLocaleString('th-TH')} รายการ
+            </span>
+            <button
+              type="button"
+              onClick={toggleSelectAllOnPage}
+              className="text-[12.5px] font-semibold text-[#4E3978] underline underline-offset-2 cursor-pointer"
+            >
+              สลับเลือกทั้งหน้านี้ ({pagedItems.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedIds(new Set())}
+              className="text-[12.5px] font-medium text-[#777287] hover:text-[#292638] cursor-pointer"
+            >
+              ล้างที่เลือก
+            </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={openBulkReviewModal}
+              className="ent-btn-primary h-9 px-4 text-[13px]"
+            >
+              <CheckSquare className="w-4 h-4" aria-hidden="true" />
+              <span>ตรวจสอบ / รับรองผลแบบกลุ่ม ({selectedIds.size})</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main Attendance Table (Mobile Card List + Desktop Table) */}
       <div className="his-surface overflow-hidden">
         {loading ? (
@@ -825,17 +1015,30 @@ export function HrAttendanceView({
               ) : (
                 pagedItems.map((row) => {
                   const rowNotes = notes.filter((n) => n.attendance_id === row.id);
+                  const isChecked = selectedIds.has(Number(row.id));
                   return (
-                    <div key={row.id} className="p-4 space-y-3 bg-white">
+                    <div
+                      key={row.id}
+                      className={`p-4 space-y-3 ${isChecked ? 'bg-[#F1ECFA]/40' : 'bg-white'}`}
+                    >
                       <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="font-bold text-[15px] text-[#292638]">{row.full_name}</div>
-                          <div className="text-[12.5px] text-[#777287] mt-0.5">
-                            <span className="font-mono">{row.person_id}</span> · สแกน{' '}
-                            <span className="font-mono">{row.fingle_id || '—'}</span>
-                          </div>
-                          <div className="text-[12.5px] text-[#777287] truncate">
-                            {row.department_name}
+                        <div className="flex items-start gap-2.5 min-w-0">
+                          <input
+                            type="checkbox"
+                            aria-label={`เลือกรายการ ${row.full_name} วันที่ ${row.work_date}`}
+                            checked={isChecked}
+                            onChange={() => toggleRowSelected(Number(row.id))}
+                            className="mt-1 w-4 h-4 accent-[#8066B5] shrink-0 cursor-pointer"
+                          />
+                          <div className="min-w-0">
+                            <div className="font-bold text-[15px] text-[#292638]">{row.full_name}</div>
+                            <div className="text-[12.5px] text-[#777287] mt-0.5">
+                              <span className="font-mono">{row.person_id}</span> · สแกน{' '}
+                              <span className="font-mono">{row.fingle_id || '—'}</span>
+                            </div>
+                            <div className="text-[12.5px] text-[#777287] truncate">
+                              {row.department_name}
+                            </div>
                           </div>
                         </div>
                         <div className="text-right shrink-0">
@@ -923,6 +1126,18 @@ export function HrAttendanceView({
               <table className="his-table">
                 <thead>
                   <tr>
+                    <th className="w-10 text-center">
+                      <input
+                        type="checkbox"
+                        aria-label="เลือกรายการทั้งหมดในหน้านี้"
+                        checked={
+                          pagedItems.length > 0 &&
+                          pagedItems.every((r) => selectedIds.has(Number(r.id)))
+                        }
+                        onChange={toggleSelectAllOnPage}
+                        className="w-4 h-4 accent-[#8066B5] cursor-pointer"
+                      />
+                    </th>
                     <SortableHeader
                       label="วันที่ปฏิบัติงาน"
                       sortKey="work_date"
@@ -981,19 +1196,34 @@ export function HrAttendanceView({
                 </thead>
                 <tbody>
                   {pagedItems.length === 0 ? (
-                    <TableEmptyState colSpan={10} title="ไม่พบรายการลงเวลาตามตัวกรองที่เลือก" />
+                    <TableEmptyState colSpan={11} title="ไม่พบรายการลงเวลาตามตัวกรองที่เลือก" />
                   ) : (
                     pagedItems.map((row) => {
                       const rowNotes = notes.filter((n) => n.attendance_id === row.id);
                       const earlyMins = Number(row.early_checkout_minutes || 0);
+                      const isChecked = selectedIds.has(Number(row.id));
                       return (
-                        <tr key={row.id}>
+                        <tr key={row.id} className={isChecked ? 'bg-[#F1ECFA]/40' : undefined}>
+                          <td className="text-center">
+                            <input
+                              type="checkbox"
+                              aria-label={`เลือกรายการ ${row.full_name} วันที่ ${row.work_date}`}
+                              checked={isChecked}
+                              onChange={() => toggleRowSelected(Number(row.id))}
+                              className="w-4 h-4 accent-[#8066B5] cursor-pointer"
+                            />
+                          </td>
                           <td>
                             <div className="font-semibold text-[#292638]">
                               {formatThaiDate(row.work_date)}
                             </div>
                             <div className="text-[12px] font-mono text-[#777287] tabular-nums mt-0.5">
                               เวร #{row.id}
+                              {Number(row.is_locked_period || 0) === 1 && (
+                                <span className="ml-1.5 text-[#C74455] font-sans font-semibold">
+                                  (ปิดงวดแล้ว)
+                                </span>
+                              )}
                             </div>
                           </td>
                           <td>
@@ -1436,6 +1666,182 @@ export function HrAttendanceView({
         variant="primary"
         loading={executingReprocess}
       />
+
+      {/* B7: Bulk HR Review Modal */}
+      <SharedModal
+        open={bulkModalOpen}
+        onClose={() => !bulkSubmitting && setBulkModalOpen(false)}
+        kickerText="ตรวจสอบและรับรองผล HR แบบกลุ่ม"
+        title={`ดำเนินการตรวจสอบรายการลงเวลาแบบกลุ่ม (${selectedIds.size} รายการที่เลือก)`}
+        subtitle="ระบบตรวจสอบการปิดรอบบัญชีเดือน เหตุผลประกอบ และเลขเวอร์ชันข้อมูล (Optimistic Lock) ก่อนบันทึกทุกครั้ง"
+        maxWidthClass="max-w-3xl"
+      >
+        <div className="space-y-4">
+          {bulkError && (
+            <div
+              role="alert"
+              className="p-3.5 rounded-xl bg-[#FDF2F4] border border-[#C74455]/25 text-[#C74455] text-[13px] font-medium"
+            >
+              {bulkError}
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+            <div>
+              <label className="ent-label">
+                สถานะการตรวจสอบปลายทาง <RequiredMark />
+              </label>
+              <select
+                value={bulkTargetStatus}
+                disabled={bulkSubmitting}
+                onChange={(e) => {
+                  const val = e.target.value as 'VERIFIED_APPROVED' | 'REVIEWED' | 'REJECTED';
+                  setBulkTargetStatus(val);
+                  void runBulkReviewPreview({ targetStatus: val });
+                }}
+                className="ent-input w-full"
+              >
+                <option value="VERIFIED_APPROVED">ยืนยันรับรองผล HR (VERIFIED_APPROVED)</option>
+                <option value="REVIEWED">ตรวจสอบแล้ว (REVIEWED)</option>
+                <option value="REJECTED">ปฏิเสธ / ตีกลับ (REJECTED)</option>
+              </select>
+            </div>
+            <div>
+              <label className="ent-label">หมวดเหตุผลการตรวจสอบ</label>
+              <select
+                value={bulkReasonCategory}
+                disabled={bulkSubmitting}
+                onChange={(e) => setBulkReasonCategory(e.target.value)}
+                className="ent-input w-full"
+              >
+                <option value="VERIFIED_BY_HR">ตรวจสอบและรับรองผลถูกต้อง</option>
+                <option value="OFFICIAL_DUTY">ไปราชการ / อบรมภายนอก</option>
+                <option value="ANNUAL_LEAVE">ลาพักผ่อน / ลากิจ / ลาป่วย</option>
+                <option value="FORGOT_CHECKOUT_VERIFIED">ลืมสแกนออก (มีหลักฐานปฏิบัติงานจริง)</option>
+                <option value="SCANNER_ISSUE">เครื่องสแกนขัดข้องชั่วคราว</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end">
+            <div className="flex-1">
+              <label className="ent-label">
+                เหตุผล / ความเห็น HR (จำเป็นสำหรับรายการสาย ขาดสแกน หรือปฏิเสธผล)
+              </label>
+              <input
+                type="text"
+                disabled={bulkSubmitting}
+                value={bulkComment}
+                onChange={(e) => setBulkComment(e.target.value)}
+                placeholder="ระบุเลขที่หนังสือ คำชี้แจง หรือเหตุผลประกอบการรับรอง..."
+                className="ent-input w-full"
+              />
+            </div>
+            <button
+              type="button"
+              disabled={bulkPreviewLoading || bulkSubmitting}
+              onClick={() => runBulkReviewPreview()}
+              className="ent-btn-secondary shrink-0"
+            >
+              {bulkPreviewLoading ? (
+                <Loader2 className="w-4 h-4 animate-spin text-[#8066B5]" aria-hidden="true" />
+              ) : (
+                <Eye className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+              )}
+              <span>ตรวจสอบความพร้อมใหม่</span>
+            </button>
+          </div>
+
+          {bulkPreview && (
+            <div className="space-y-3 pt-1">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="p-3.5 rounded-xl bg-[#EEF8F4] border border-[#198568]/20">
+                  <div className="text-[12px] font-semibold text-[#198568]">
+                    พร้อมบันทึก (Eligible)
+                  </div>
+                  <div className="text-[20px] font-bold font-mono tabular-nums text-[#198568] mt-0.5">
+                    {bulkPreview.eligibleCount} รายการ
+                  </div>
+                </div>
+                <div className="p-3.5 rounded-xl bg-[#FEF7EA] border border-[#B87516]/25">
+                  <div className="text-[12px] font-semibold text-[#B87516]">
+                    ข้าม / ไม่ผ่านเงื่อนไข (Ineligible)
+                  </div>
+                  <div className="text-[20px] font-bold font-mono tabular-nums text-[#B87516] mt-0.5">
+                    {bulkPreview.ineligibleCount} รายการ
+                  </div>
+                </div>
+              </div>
+
+              {bulkPreview.ineligibleItems?.length > 0 && (
+                <div className="rounded-xl border border-[#F2DCBA] bg-[#FEF7EA]/70 p-3.5 space-y-1.5 max-h-40 overflow-y-auto text-[12.5px]">
+                  <div className="font-bold text-[#B87516] flex items-center gap-1.5">
+                    <AlertTriangle className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span>รายการที่ไม่สามารถบันทึกได้ในรอบนี้:</span>
+                  </div>
+                  {bulkPreview.ineligibleItems.map((inv: any) => (
+                    <div key={inv.id} className="text-[#292638]">
+                      <span className="font-mono font-semibold">เวร #{inv.id}</span>
+                      {inv.fullName ? ` · ${inv.fullName}` : ''} —{' '}
+                      <span className="text-[#C74455]">{inv.reasonThai}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {bulkResult && (
+            <div className="rounded-xl border border-[#D8D1E6] bg-[#F1ECFA] p-4 space-y-2 text-[13px]">
+              <div className="font-bold text-[#4E3978]">
+                สรุปผลดำเนินการแบบกลุ่ม: สำเร็จ {bulkResult.succeededCount} รายการ · ไม่สำเร็จ{' '}
+                {bulkResult.failedCount} รายการ
+              </div>
+              {bulkResult.failed?.length > 0 && (
+                <div className="space-y-1 max-h-32 overflow-y-auto text-[#C74455]">
+                  {bulkResult.failed.map((f: any) => (
+                    <div key={f.id}>
+                      เวร #{f.id}: {f.message} ({f.reasonCode})
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-col-reverse sm:flex-row justify-end gap-2.5 pt-3 border-t border-[#E8E4EF]">
+            <button
+              type="button"
+              disabled={bulkSubmitting}
+              onClick={() => setBulkModalOpen(false)}
+              className="ent-btn-secondary w-full sm:w-auto"
+            >
+              ปิดหน้าต่าง
+            </button>
+            <button
+              type="button"
+              disabled={
+                bulkSubmitting ||
+                bulkPreviewLoading ||
+                (bulkPreview ? bulkPreview.eligibleCount === 0 : selectedIds.size === 0)
+              }
+              onClick={handleExecuteBulkReview}
+              className="ent-btn-primary w-full sm:w-auto disabled:opacity-50"
+            >
+              {bulkSubmitting ? (
+                <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <CheckCircle2 className="w-4 h-4" aria-hidden="true" />
+              )}
+              <span>
+                {bulkSubmitting
+                  ? 'กำลังบันทึก...'
+                  : `ยืนยันบันทึกผล (${bulkPreview ? bulkPreview.eligibleCount : selectedIds.size} รายการ)`}
+              </span>
+            </button>
+          </div>
+        </div>
+      </SharedModal>
 
       {mode === 'review' && reviewHistory.length > 0 && (
         <div className="his-surface overflow-hidden">

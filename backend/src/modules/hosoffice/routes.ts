@@ -268,6 +268,20 @@ export async function evaluatePushBatch(dateFrom: string, dateTo: string) {
   );
 
   const validItems: ValidatedHosOfficePushRecord[] = [];
+  const previewItems: Array<{
+    attendanceId: number;
+    personId: string;
+    fingleId: string;
+    fullName: string;
+    departmentName: string;
+    workDate: string;
+    shiftCode: string | null;
+    checkInTime: string | null;
+    checkOutTime: string | null;
+    status: string;
+    lateMinutes: number;
+    reviewStatus: string;
+  }> = [];
   const invalidItems: Array<{
     attendanceId: number;
     personId: string;
@@ -277,8 +291,20 @@ export async function evaluatePushBatch(dateFrom: string, dateTo: string) {
     reason: string;
   }> = [];
 
+  const nonFinalStatuses = new Set([
+    'IN_PROGRESS',
+    'LATE_IN_PROGRESS',
+    'NOT_STARTED',
+    'AWAITING_CHECKIN',
+    'NO_SCHEDULE',
+    'NO_SHIFT',
+  ]);
+
   for (const r of rows) {
-    if (r.status === 'PENDING_MAPPING' || !r.fingle_id) {
+    const upperStatus = String(r.status || '').toUpperCase();
+    const upperReview = String(r.review_status || 'PENDING').toUpperCase();
+
+    if (upperStatus === 'PENDING_MAPPING' || !r.fingle_id) {
       invalidItems.push({
         attendanceId: r.id,
         personId: r.person_id,
@@ -290,7 +316,19 @@ export async function evaluatePushBatch(dateFrom: string, dateTo: string) {
       continue;
     }
 
-    if (r.review_status === 'NEEDS_RE_REVIEW') {
+    if (nonFinalStatuses.has(upperStatus)) {
+      invalidItems.push({
+        attendanceId: r.id,
+        personId: r.person_id,
+        fullName: r.full_name,
+        workDate: r.work_date,
+        status: r.status,
+        reason: `เวรยังอยู่ระหว่างปฏิบัติงานหรือยังไม่ปิดรอบประเมิน (${upperStatus}) จึงยังไม่พร้อมส่งเข้า HOSOffice`,
+      });
+      continue;
+    }
+
+    if (upperReview === 'NEEDS_RE_REVIEW') {
       invalidItems.push({
         attendanceId: r.id,
         personId: r.person_id,
@@ -304,8 +342,8 @@ export async function evaluatePushBatch(dateFrom: string, dateTo: string) {
     }
 
     if (
-      (r.status === 'NO_SCAN' || r.status === 'MISSING_CHECKIN' || r.status === 'MISSING_CHECKOUT') &&
-      r.review_status === 'PENDING'
+      (upperStatus === 'NO_SCAN' || upperStatus === 'MISSING_CHECKIN' || upperStatus === 'MISSING_CHECKOUT') &&
+      (upperReview === 'PENDING' || upperReview === 'PENDING_REVIEW')
     ) {
       invalidItems.push({
         attendanceId: r.id,
@@ -313,7 +351,7 @@ export async function evaluatePushBatch(dateFrom: string, dateTo: string) {
         fullName: r.full_name,
         workDate: r.work_date,
         status: r.status,
-        reason: `รายการสถานะ ${r.status} ยังไม่ผ่านการตรวจสอบโดยเจ้าหน้าที่ HR (review_status = PENDING)`,
+        reason: `รายการสถานะ ${r.status} ยังไม่ผ่านการตรวจสอบโดยเจ้าหน้าที่ HR (review_status = ${r.review_status})`,
       });
       continue;
     }
@@ -329,11 +367,36 @@ export async function evaluatePushBatch(dateFrom: string, dateTo: string) {
       LATE_MINUTES: Number(r.late_minutes || 0),
       HR_REVIEW_STATUS: r.review_status,
     });
+
+    previewItems.push({
+      attendanceId: r.id,
+      personId: r.person_id,
+      fingleId: r.fingle_id,
+      fullName: r.full_name,
+      departmentName: r.department_name,
+      workDate: r.work_date,
+      shiftCode: r.shift_code,
+      checkInTime: r.check_in_time,
+      checkOutTime: r.check_out_time,
+      status: r.status,
+      lateMinutes: Number(r.late_minutes || 0),
+      reviewStatus: r.review_status,
+    });
   }
+
+  const canonicalHashPayload = JSON.stringify({
+    dateFrom,
+    dateTo,
+    validItems,
+    invalidAttendanceIds: invalidItems.map((i) => i.attendanceId),
+  });
+  const dataHash = crypto.createHash('sha256').update(canonicalHashPayload).digest('hex');
 
   return {
     totalRecords: rows.length,
+    dataHash,
     validItems,
+    previewItems,
     invalidItems,
   };
 }
@@ -593,8 +656,13 @@ hosofficeRouter.post(
 
       const batch = await evaluatePushBatch(dateFrom, dateTo);
       const idempotencyKey = `PREVIEW-${dateFrom}-${dateTo}-${crypto.randomUUID().slice(0, 8)}`;
+      const previewId = idempotencyKey;
+      const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
       const payloadJson = JSON.stringify({
+        previewId,
+        dataHash: batch.dataHash,
+        expiresAt,
         contractStatus: cfg.hosofficePush.livePushEnabled
           ? 'LIVE_PUSH_READY'
           : 'DRY_RUN_ONLY_LIVE_PUSH_DISABLED',
@@ -635,6 +703,7 @@ hosofficeRouter.post(
         detail: {
           dateFrom,
           dateTo,
+          dataHash: batch.dataHash,
           totalRecords: batch.totalRecords,
           validCount: batch.validItems.length,
           invalidCount: batch.invalidItems.length,
@@ -647,12 +716,16 @@ hosofficeRouter.post(
         livePushEnabled: cfg.hosofficePush.livePushEnabled,
         targetTable: cfg.hosofficePush.targetTable,
         idempotencyKey,
+        previewId,
+        dataHash: batch.dataHash,
+        expiresAt,
         dateFrom,
         dateTo,
         totalRecords: batch.totalRecords,
         validCount: batch.validItems.length,
         invalidCount: batch.invalidItems.length,
         validItems: batch.validItems,
+        previewItems: batch.previewItems,
         invalidItems: batch.invalidItems,
       });
     } catch (err) {
@@ -742,6 +815,52 @@ hosofficeRouter.post(
 
       // 2. ประเมินและตรวจสอบความถูกต้องของข้อมูลในชุดที่จะส่ง
       const batch = await evaluatePushBatch(dateFrom, dateTo);
+      const requestedPreviewId = req.body?.previewId ? String(req.body.previewId).trim() : '';
+      const requestedDataHash = req.body?.dataHash ? String(req.body.dataHash).trim() : '';
+
+      if (requestedPreviewId) {
+        const previewRows = await dbQuery<{ payload_preview_json: string }>(
+          "SELECT payload_preview_json FROM push_history WHERE idempotency_key = ? AND push_mode = 'DRY_RUN_PREVIEW' LIMIT 1",
+          [requestedPreviewId]
+        );
+        if (previewRows.length === 0) {
+          res.status(409).json({
+            error: 'PREVIEW_NOT_FOUND',
+            message: 'ไม่พบข้อมูล Preview ที่อ้างอิง กรุณากดจำลองชุดข้อมูลใหม่ก่อนส่ง',
+            requestId: req.requestId,
+          });
+          return;
+        }
+        try {
+          const parsedPreview = JSON.parse(previewRows[0].payload_preview_json || '{}');
+          if (parsedPreview.expiresAt && new Date(parsedPreview.expiresAt).getTime() < Date.now()) {
+            res.status(409).json({
+              error: 'PREVIEW_EXPIRED',
+              message: 'ผลจำลองชุดข้อมูลหมดอายุแล้ว กรุณากดจำลองข้อมูลใหม่อีกครั้ง',
+              requestId: req.requestId,
+            });
+            return;
+          }
+          if (parsedPreview.dataHash && parsedPreview.dataHash !== batch.dataHash) {
+            res.status(409).json({
+              error: 'PREVIEW_STALE_DATA_CHANGED',
+              message: 'ข้อมูลการลงเวลามีการเปลี่ยนแปลงหลังการจำลอง กรุณากดจำลองข้อมูลใหม่ก่อนยืนยันส่ง',
+              requestId: req.requestId,
+            });
+            return;
+          }
+        } catch {
+          // ignore malformed legacy JSON
+        }
+      } else if (requestedDataHash && requestedDataHash !== batch.dataHash) {
+        res.status(409).json({
+          error: 'PREVIEW_STALE_DATA_CHANGED',
+          message: 'ข้อมูลการลงเวลามีการเปลี่ยนแปลงหลังการจำลอง กรุณากดจำลองข้อมูลใหม่ก่อนยืนยันส่ง',
+          requestId: req.requestId,
+        });
+        return;
+      }
+
       if (batch.validItems.length === 0) {
         res.status(422).json({
           error: 'NO_VALID_RECORDS_TO_PUSH',
@@ -1097,23 +1216,32 @@ hosofficeRouter.post(
   }
 );
 
+const getHosOfficePushHistoryHandler = async (_req: any, res: any, next: any) => {
+  try {
+    const items = await dbQuery(
+      `SELECT id, idempotency_key, push_mode, date_from, date_to,
+              total_records, valid_records, invalid_records, status,
+              initiated_by, created_at
+       FROM push_history
+       ORDER BY id DESC
+       LIMIT 50`
+    );
+    res.json({ items });
+  } catch (err) {
+    next(err);
+  }
+};
+
 hosofficeRouter.get(
   '/hosoffice/push/history',
   requireAuth,
   requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
-  async (_req, res, next) => {
-    try {
-      const items = await dbQuery(
-        `SELECT id, idempotency_key, push_mode, date_from, date_to,
-                total_records, valid_records, invalid_records, status,
-                initiated_by, created_at
-         FROM push_history
-         ORDER BY id DESC
-         LIMIT 50`
-      );
-      res.json({ items });
-    } catch (err) {
-      next(err);
-    }
-  }
+  getHosOfficePushHistoryHandler
+);
+
+hosofficeRouter.get(
+  '/hosoffice/push-history',
+  requireAuth,
+  requireRoles('ADMIN', 'RESPONSIBLE_STAFF'),
+  getHosOfficePushHistoryHandler
 );

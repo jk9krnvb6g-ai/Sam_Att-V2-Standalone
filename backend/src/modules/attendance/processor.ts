@@ -27,12 +27,17 @@ import {
   resolveEffectiveDailyScheduleForPersonDate,
   computeAbsoluteIntervalMinutes,
   loadPersonnelTypeRulesWithDefaultShifts,
-  loadActivePublicHolidaysMap,
   isFullDayPersonalHolidayLeaveType,
   type DailyOverrideRow,
   type ExistingAssignmentRow,
   type PersonnelTypeRuleRow,
 } from '../shifts/routes.ts';
+import {
+  holidayRowToPublicHolidayAdapter,
+  loadHospitalHolidaysForRange,
+  resolveHolidayForPersonDate,
+} from '../holidays/service.ts';
+import { extractYearMonth, findClosedPeriodsInRange } from '../periods/lock.ts';
 import {
   addDaysYmd,
   matchPersonShiftsGlobally,
@@ -476,11 +481,12 @@ export async function computeAttendanceOutcomes(
   }
   const activePersonnel = await dbQuery<{
     person_id: string;
+    department_name: string;
     personnel_type_code: string;
     personnel_type_name: string;
     mapping_status: string;
   }>(
-    `SELECT person_id, personnel_type_code, personnel_type_name, mapping_status
+    `SELECT person_id, department_name, personnel_type_code, personnel_type_name, mapping_status
      FROM personnel
      ${personnelWhere}
      ORDER BY person_id ASC`,
@@ -551,8 +557,8 @@ export async function computeAttendanceOutcomes(
     });
   }
 
-  // Load official public holidays and active leaves BEFORE resolving daily schedules (4-Step Priority Order)
-  const publicHolidayMap = await loadActivePublicHolidaysMap(evalDateFrom, evalDateTo);
+  // Load unified scoped holidays (hospital_holidays + public_holidays) and active leaves BEFORE resolving daily schedules
+  const hospitalHolidays = await loadHospitalHolidaysForRange(evalDateFrom, evalDateTo);
 
   const leaveParams: unknown[] = [evalDateFrom, evalDateTo];
   let leavePersonClause = '';
@@ -614,13 +620,19 @@ export async function computeAttendanceOutcomes(
   const shiftsByPerson = new Map<string, MatchingShiftInput[]>();
 
   for (const workDate of dateList) {
-    const dayPublicHoliday = publicHolidayMap.get(workDate) || null;
     for (const person of activePersonnel) {
       const pid = String(person.person_id ?? '').trim();
       const key = `${pid}:${workDate}`;
       const dayAssignments = assignmentsByPersonDate.get(key) || [];
       const dayOverride = overridesByPersonDate.get(key) || null;
       const dayPersonalHoliday = personalHolidayByPersonDate.get(key) || null;
+      const dayScopedHoliday = resolveHolidayForPersonDate({
+        workDate,
+        personId: pid,
+        departmentName: person.department_name,
+        holidays: hospitalHolidays,
+      });
+      const dayPublicHoliday = holidayRowToPublicHolidayAdapter(dayScopedHoliday);
 
       const resolved = resolveEffectiveDailyScheduleForPersonDate({
         person,
@@ -1034,6 +1046,8 @@ export function reprocessAttendanceRange(options: ReprocessOptions) {
 
 async function runReprocessAttendanceRangeInternal(options: ReprocessOptions) {
   const mappingStats = await resolveRawScanPersonnelMappings(options.dateFrom, options.dateTo);
+  const closedPeriods = await findClosedPeriodsInRange(options.dateFrom, options.dateTo);
+  const closedPeriodSet = new Set(closedPeriods);
   const projected = await computeAttendanceOutcomes(options);
 
   let insertedCount = 0;
@@ -1041,6 +1055,8 @@ async function runReprocessAttendanceRangeInternal(options: ReprocessOptions) {
   let changedCount = 0;
   let unchangedCount = 0;
   let reReviewFlaggedCount = 0;
+  let closedPeriodSkippedCount = 0;
+  let lateScanReviewFlaggedCount = 0;
   const keptAttendanceIds = new Set<number>();
   const pendingUsageRows: Array<{
     rawScanId: number;
@@ -1097,6 +1113,67 @@ async function runReprocessAttendanceRangeInternal(options: ReprocessOptions) {
              WHERE person_id = ? AND work_date = ? AND shift_assignment_id IS NULL AND shift_code = ? LIMIT 1`,
             [item.personId, item.workDate, item.shiftCode]
           );
+
+    const itemPeriodYm = extractYearMonth(item.workDate);
+    if (closedPeriodSet.has(itemPeriodYm)) {
+      closedPeriodSkippedCount++;
+      if (existing.length > 0) {
+        const prev = existing[0];
+        const lockedId = Number(prev.id);
+        keptAttendanceIds.add(lockedId);
+        if (hasMaterialAttendanceChange(prev, item)) {
+          lateScanReviewFlaggedCount++;
+          try {
+            await dbExecute(
+              `UPDATE attendance
+               SET late_scan_review_required = 1, is_locked_period = 1
+               WHERE id = ?`,
+              [lockedId]
+            );
+          } catch {
+            // Best-effort in case legacy schema lacks late_scan_review_required
+          }
+          await dbExecute(
+            `INSERT INTO attendance_matching_history (
+              attendance_id, person_id, work_date, shift_assignment_id,
+              previous_check_in_raw_scan_id, new_check_in_raw_scan_id,
+              previous_check_out_raw_scan_id, new_check_out_raw_scan_id,
+              previous_status, new_status,
+              previous_attendance_status, new_attendance_status,
+              previous_late_minutes, new_late_minutes,
+              previous_early_checkout_minutes, new_early_checkout_minutes,
+              previous_review_status, new_review_status,
+              matching_rule, change_reason, rule_version, triggered_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              lockedId,
+              item.personId,
+              item.workDate,
+              item.shiftAssignmentId,
+              prev.check_in_raw_scan_id,
+              prev.check_in_raw_scan_id,
+              prev.check_out_raw_scan_id,
+              prev.check_out_raw_scan_id,
+              prev.status,
+              prev.status,
+              prev.attendance_status,
+              prev.attendance_status,
+              Number(prev.late_minutes || 0),
+              Number(prev.late_minutes || 0),
+              Number(prev.early_checkout_minutes || 0),
+              Number(prev.early_checkout_minutes || 0),
+              prev.review_status,
+              prev.review_status,
+              item.matchingRule,
+              'REPROCESS_SKIPPED_CLOSED_PERIOD_LATE_SCAN',
+              ATTENDANCE_RULE_VERSION,
+              options.actorUsername,
+            ]
+          );
+        }
+      }
+      continue;
+    }
 
     let attendanceId: number;
 
@@ -1288,26 +1365,35 @@ async function runReprocessAttendanceRangeInternal(options: ReprocessOptions) {
     }
   }
 
-  // Synchronize attendance_raw_scan_usage for the reprocessed scope (ATT-03 DB-level anti-reuse)
+  // Synchronize attendance_raw_scan_usage for the reprocessed open-period scope (ATT-03 DB-level anti-reuse)
   const existingInRange = await dbQuery<{
     id: number;
     person_id: string;
+    work_date: string;
     review_status: string;
   }>(
-    `SELECT id, person_id, review_status FROM attendance
+    `SELECT id, person_id, work_date, review_status FROM attendance
      WHERE work_date >= ? AND work_date <= ?${options.personId ? ' AND person_id = ?' : ''}`,
     options.personId
       ? [options.dateFrom, options.dateTo, options.personId]
       : [options.dateFrom, options.dateTo]
   );
 
-  const inRangeAttendanceIds = new Set<number>(existingInRange.map((r) => Number(r.id)));
+  const inRangeOpenAttendanceIds = new Set<number>(
+    existingInRange
+      .filter((r) => !closedPeriodSet.has(extractYearMonth(normalizeWorkDateString(r.work_date))))
+      .map((r) => Number(r.id))
+  );
   for (const id of keptAttendanceIds) {
-    inRangeAttendanceIds.add(id);
+    // Only clear usage for open-period rows being updated in this run
+    const matched = existingInRange.find((r) => Number(r.id) === id);
+    if (!matched || !closedPeriodSet.has(extractYearMonth(normalizeWorkDateString(matched.work_date)))) {
+      inRangeOpenAttendanceIds.add(id);
+    }
   }
 
-  // Clear previous usage rows belonging to attendance records in this reprocessed range
-  for (const attId of inRangeAttendanceIds) {
+  // Clear previous usage rows belonging to open-period attendance records in this reprocessed range
+  for (const attId of inRangeOpenAttendanceIds) {
     await dbExecute('DELETE FROM attendance_raw_scan_usage WHERE attendance_id = ?', [attId]);
   }
 
@@ -1319,13 +1405,18 @@ async function runReprocessAttendanceRangeInternal(options: ReprocessOptions) {
         `ATT03_SCAN_REUSE_VIOLATION: raw_scan_id=${u.rawScanId} attempted reuse across shifts`
       );
     }
-    // If an outside-range stale record held this scan before global boundary correction, release stale claim first
-    const staleClaim = await dbQuery<{ attendance_id: number }>(
-      'SELECT attendance_id FROM attendance_raw_scan_usage WHERE raw_scan_id = ? LIMIT 1',
+    const staleClaim = await dbQuery<{ attendance_id: number; work_date: string }>(
+      'SELECT attendance_id, work_date FROM attendance_raw_scan_usage WHERE raw_scan_id = ? LIMIT 1',
       [u.rawScanId]
     );
-    if (staleClaim.length > 0 && !keptAttendanceIds.has(Number(staleClaim[0].attendance_id))) {
-      await dbExecute('DELETE FROM attendance_raw_scan_usage WHERE raw_scan_id = ?', [u.rawScanId]);
+    if (staleClaim.length > 0) {
+      const claimYm = extractYearMonth(normalizeWorkDateString(staleClaim[0].work_date));
+      if (closedPeriodSet.has(claimYm)) {
+        continue;
+      }
+      if (!keptAttendanceIds.has(Number(staleClaim[0].attendance_id))) {
+        await dbExecute('DELETE FROM attendance_raw_scan_usage WHERE raw_scan_id = ?', [u.rawScanId]);
+      }
     }
     await dbExecute(
       `INSERT INTO attendance_raw_scan_usage (
@@ -1344,9 +1435,13 @@ async function runReprocessAttendanceRangeInternal(options: ReprocessOptions) {
     insertedScanIdsThisRun.add(u.rawScanId);
   }
 
-  // Delete obsolete PENDING attendance rows with no notes/reviews if their shift was removed or cleared
+  // Delete obsolete PENDING attendance rows in OPEN periods if their shift was removed or cleared
   for (const row of existingInRange) {
     const rowId = Number(row.id);
+    const rowYm = extractYearMonth(normalizeWorkDateString(row.work_date));
+    if (closedPeriodSet.has(rowYm)) {
+      continue;
+    }
     if (!keptAttendanceIds.has(rowId) && row.review_status === 'PENDING') {
       const notes = await dbQuery<{ id: number }>(
         'SELECT id FROM attendance_notes WHERE attendance_id = ? LIMIT 1',
@@ -1385,6 +1480,8 @@ async function runReprocessAttendanceRangeInternal(options: ReprocessOptions) {
       changedCount,
       unchangedCount,
       reReviewFlaggedCount,
+      closedPeriodSkippedCount,
+      lateScanReviewFlaggedCount,
       earlyCheckoutCount,
       missingCheckinCount,
       usageRowsCount,
@@ -1403,6 +1500,8 @@ async function runReprocessAttendanceRangeInternal(options: ReprocessOptions) {
     changedCount,
     unchangedCount,
     reReviewFlaggedCount,
+    closedPeriodSkippedCount,
+    lateScanReviewFlaggedCount,
     earlyCheckoutCount,
     missingCheckinCount,
     usageRowsCount,

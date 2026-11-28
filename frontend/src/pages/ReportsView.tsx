@@ -21,8 +21,15 @@ import {
   Users,
   BarChart3,
   Info,
+  FileSpreadsheet,
 } from 'lucide-react';
-import { apiRequest, downloadLatenessCsv, ApiClientError, type UserRole } from '../services/api.ts';
+import {
+  apiRequest,
+  downloadReportCenterXlsx,
+  downloadReportCenterCsv,
+  ApiClientError,
+  type UserRole,
+} from '../services/api.ts';
 import { ErrorBanner } from '../components/StatusText.tsx';
 import {
   PageHeader,
@@ -71,6 +78,14 @@ export function ReportsView({
   const [personnelType, setPersonnelType] = useState('');
   const [departmentFilter, setDepartmentFilter] = useState('');
   const [rankSearch, setRankSearch] = useState('');
+  const [reportType, setReportType] = useState<string>(
+    userRole === 'GENERAL_USER' ? 'OWN_ATTENDANCE' : 'SUMMARY'
+  );
+  const [exportingFormat, setExportingFormat] = useState<'xlsx' | 'csv' | null>(null);
+  const [filterOptions, setFilterOptions] = useState<{
+    departments: string[];
+    personnelTypes: Array<{ code: string; name: string }>;
+  }>({ departments: [], personnelTypes: [] });
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<{ code?: string; message: string } | null>(null);
@@ -90,7 +105,7 @@ export function ReportsView({
   const [pushSummary, setPushSummary] = useState<string | null>(null);
   const [pushError, setPushError] = useState<string | null>(null);
 
-  const [sortKey, setSortKey] = useState('totalLateMinutes');
+  const [sortColIdx, setSortColIdx] = useState<number | null>(null);
   const [sortDir, setSortDir] = useState<'ASC' | 'DESC'>('DESC');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState<PageSizeOption>(10);
@@ -100,8 +115,8 @@ export function ReportsView({
 
   function formatPushModeLabel(pushMode?: string): string {
     const m = String(pushMode || '').toUpperCase();
-    if (m === 'LIVE' || m === 'DIRECT_PUSH') return 'ส่งข้อมูลจริง (Live)';
-    if (m === 'DRY_RUN' || m === 'PREVIEW') return 'จำลองตรวจข้อมูล (Dry-Run)';
+    if (m === 'LIVE' || m === 'LIVE_PUSH' || m === 'DIRECT_PUSH') return 'ส่งข้อมูลจริง (Live)';
+    if (m === 'DRY_RUN' || m === 'DRY_RUN_PREVIEW' || m === 'PREVIEW') return 'จำลองตรวจข้อมูล (Dry-Run)';
     return pushMode || '—';
   }
 
@@ -109,7 +124,8 @@ export function ReportsView({
     const s = String(status || '').toUpperCase();
     if (s === 'SUCCESS' || s === 'PUSHED') return 'ส่งสำเร็จ';
     if (s === 'FAILED') return 'ไม่สำเร็จ';
-    if (s === 'PREVIEW' || s === 'DRY_RUN') return 'จำลองแล้ว';
+    if (s === 'UNKNOWN') return 'รอตรวจสอบสถานะ';
+    if (s === 'PREVIEW' || s === 'PREVIEW_READY' || s === 'DRY_RUN') return 'จำลองแล้ว';
     return status || '—';
   }
 
@@ -126,18 +142,61 @@ export function ReportsView({
     [periodMode, dailyDate, monthValue, yearValue, customFrom, customTo]
   );
 
+  useEffect(() => {
+    if (userRole === 'GENERAL_USER') {
+      setReportType('OWN_ATTENDANCE');
+      setDepartmentFilter('');
+      setPersonnelType('');
+    }
+  }, [userRole]);
+
+  useEffect(() => {
+    if (mode !== 'reports' || userRole === 'GENERAL_USER') return;
+    let cancelled = false;
+    apiRequest<{ items?: any[] }>('/personnel')
+      .then((res) => {
+        if (cancelled) return;
+        const list = res.items || [];
+        const deptSet = new Set<string>();
+        const ptMap = new Map<string, string>();
+        for (const p of list) {
+          if (p.department_name) deptSet.add(String(p.department_name));
+          if (p.personnel_type_code) {
+            ptMap.set(
+              String(p.personnel_type_code),
+              String(p.personnel_type_name || p.personnel_type_code)
+            );
+          }
+        }
+        setFilterOptions({
+          departments: Array.from(deptSet).sort((a, b) => a.localeCompare(b, 'th')),
+          personnelTypes: Array.from(ptMap.entries())
+            .map(([code, name]) => ({ code, name }))
+            .sort((a, b) => a.name.localeCompare(b.name, 'th')),
+        });
+      })
+      .catch(() => {
+        // non-blocking metadata load
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [mode, userRole]);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       if (mode === 'reports') {
+        const effectiveType = userRole === 'GENERAL_USER' ? 'OWN_ATTENDANCE' : reportType;
         const qs = new URLSearchParams({
+          reportType: effectiveType,
           dateFrom: effectiveRange.dateFrom,
           dateTo: effectiveRange.dateTo,
-          sortOrder: sortDir === 'ASC' ? 'asc' : 'desc',
-          ...(personnelType ? { personnelType } : {}),
+          ...(userRole !== 'GENERAL_USER' && departmentFilter ? { department: departmentFilter } : {}),
+          ...(userRole !== 'GENERAL_USER' && personnelType ? { personnelType } : {}),
         });
-        const res = await apiRequest(`/reports/lateness?${qs.toString()}`);
+        const res = await apiRequest(`/reports/center?${qs.toString()}`);
         setReportData(res);
       } else {
         const res = await apiRequest('/hosoffice/push-history');
@@ -152,7 +211,15 @@ export function ReportsView({
     } finally {
       setLoading(false);
     }
-  }, [mode, effectiveRange.dateFrom, effectiveRange.dateTo, personnelType, sortDir]);
+  }, [
+    mode,
+    userRole,
+    reportType,
+    effectiveRange.dateFrom,
+    effectiveRange.dateTo,
+    departmentFilter,
+    personnelType,
+  ]);
 
   useEffect(() => {
     loadData();
@@ -192,30 +259,51 @@ export function ReportsView({
     };
   }, [mode, pushingLive, loadData]);
 
-  function handleSort(key: string) {
-    if (sortKey === key) {
+  function handleSortColumn(colIdx: number) {
+    if (sortColIdx === colIdx) {
       setSortDir((prev) => (prev === 'ASC' ? 'DESC' : 'ASC'));
     } else {
-      setSortKey(key);
+      setSortColIdx(colIdx);
       setSortDir('DESC');
     }
     setPage(1);
   }
 
-  async function handleExportCsv() {
+  async function handleExportReport(format: 'xlsx' | 'csv') {
     setError(null);
+    setExportingFormat(format);
+    const effectiveType = userRole === 'GENERAL_USER' ? 'OWN_ATTENDANCE' : reportType;
     try {
-      await downloadLatenessCsv({
-        dateFrom: effectiveRange.dateFrom,
-        dateTo: effectiveRange.dateTo,
-        personnelType: personnelType || undefined,
-      });
-      toast.showSuccess('ส่งออกไฟล์รายงาน CSV เรียบร้อยแล้ว');
+      if (format === 'xlsx') {
+        await downloadReportCenterXlsx({
+          reportType: effectiveType,
+          dateFrom: effectiveRange.dateFrom,
+          dateTo: effectiveRange.dateTo,
+          department: userRole !== 'GENERAL_USER' ? departmentFilter || undefined : undefined,
+          personnelType: userRole !== 'GENERAL_USER' ? personnelType || undefined : undefined,
+        });
+        toast.showSuccess('ส่งออกไฟล์ Excel (.xlsx) เรียบร้อยแล้ว');
+      } else {
+        await downloadReportCenterCsv({
+          reportType: effectiveType,
+          dateFrom: effectiveRange.dateFrom,
+          dateTo: effectiveRange.dateTo,
+          department: userRole !== 'GENERAL_USER' ? departmentFilter || undefined : undefined,
+          personnelType: userRole !== 'GENERAL_USER' ? personnelType || undefined : undefined,
+        });
+        toast.showSuccess('ส่งออกไฟล์รายงาน CSV เรียบร้อยแล้ว');
+      }
     } catch (err) {
       const msg =
-        err instanceof ApiClientError ? err.message : 'ไม่สามารถส่งออกไฟล์รายงาน CSV ได้';
+        err instanceof ApiClientError
+          ? err.message
+          : format === 'xlsx'
+            ? 'ไม่สามารถส่งออกไฟล์ Excel (.xlsx) ได้'
+            : 'ไม่สามารถส่งออกไฟล์รายงาน CSV ได้';
       setError({ code: err instanceof ApiClientError ? err.code : undefined, message: msg });
       toast.showError('ส่งออกรายงานไม่สำเร็จ', msg);
+    } finally {
+      setExportingFormat(null);
     }
   }
 
@@ -263,8 +351,11 @@ export function ReportsView({
           dateFrom: effectiveRange.dateFrom,
           dateTo: effectiveRange.dateTo,
           idempotencyKey:
-            previewBatch?.idempotencyKey ||
-            `LIVE-${effectiveRange.dateFrom}-${effectiveRange.dateTo}`,
+            previewBatch?.idempotencyKey
+              ? String(previewBatch.idempotencyKey).replace(/^PREVIEW-/, 'LIVE-')
+              : `LIVE-${effectiveRange.dateFrom}-${effectiveRange.dateTo}`,
+          ...(previewBatch?.previewId ? { previewId: previewBatch.previewId } : {}),
+          ...(previewBatch?.dataHash ? { dataHash: previewBatch.dataHash } : {}),
         }),
       });
       const summaryMsg =
@@ -524,26 +615,26 @@ export function ReportsView({
                         </tr>
                       </thead>
                       <tbody>
-                        {previewBatch.validItems.slice(0, 50).map((item: any, idx: number) => (
-                          <tr key={item.attendanceId || item.personId || idx}>
+                        {(previewBatch.previewItems || previewBatch.validItems).slice(0, 50).map((item: any, idx: number) => (
+                          <tr key={item.attendanceId || item.PERSON_ID || item.personId || idx}>
                             <td className="font-mono tabular-nums whitespace-nowrap">
-                              {formatThaiDate(item.workDate || item.work_date)}
+                              {formatThaiDate(item.workDate || item.work_date || item.WORK_DATE)}
                             </td>
                             <td>
                               <div className="font-semibold text-[#292638]">
-                                {item.fullName || item.full_name || item.personId || item.person_id}
+                                {item.fullName || item.full_name || item.PERSON_ID || item.personId || item.person_id}
                               </div>
                               <div className="text-[11.5px] font-mono text-[#777287]">
-                                {item.personId || item.person_id}
+                                {item.personId || item.person_id || item.PERSON_ID}
                               </div>
                             </td>
                             <td className="font-mono tabular-nums whitespace-nowrap text-[#777287]">
-                              {String(item.checkInTime || item.check_in_time || '—').slice(11, 16) || '—'} –{' '}
-                              {String(item.checkOutTime || item.check_out_time || '—').slice(11, 16) || '—'}
+                              {String(item.checkInTime || item.check_in_time || item.CHECK_IN_DATETIME || '—').slice(11, 16) || '—'} –{' '}
+                              {String(item.checkOutTime || item.check_out_time || item.CHECK_OUT_DATETIME || '—').slice(11, 16) || '—'}
                             </td>
                             <td className="text-right whitespace-nowrap">
                               <StatusBadge tone="success" compact>
-                                {item.status || 'พร้อมส่ง'}
+                                {item.status || item.ATTENDANCE_STATUS || 'พร้อมส่ง'}
                               </StatusBadge>
                             </td>
                           </tr>
@@ -707,61 +798,70 @@ export function ReportsView({
   }
 
   // =========================================================================
-  // โหมด 'reports': รายงานและสถิติการมาสายประจำงวด
+  // โหมด 'reports': ศูนย์รายงานมาตรฐาน 11 ประเภท พร้อมส่งออก Excel (.xlsx) และ CSV
   // =========================================================================
-  const kpi = reportData?.kpi;
-  const rawRanking: any[] = reportData?.ranking || [];
-  const deptBreakdown: any[] = reportData?.departmentBreakdown || [];
+  const availableReportTypes: Array<{ key: string; labelThai: string; adminOnlyOrg: boolean }> =
+    reportData?.availableReportTypes || [
+      ...(userRole === 'GENERAL_USER'
+        ? []
+        : [
+            { key: 'SUMMARY', labelThai: '1. รายงานสรุปภาพรวมการปฏิบัติงาน', adminOnlyOrg: true },
+            { key: 'DAILY_ATTENDANCE', labelThai: '2. รายงานลงเวลารายวันแบบละเอียด', adminOnlyOrg: true },
+            { key: 'LATENESS', labelThai: '3. รายงานสถิติและอันดับการมาสาย', adminOnlyOrg: true },
+            { key: 'EARLY_CHECKOUT', labelThai: '4. รายงานออกก่อนเวลากะ (Early Checkout)', adminOnlyOrg: true },
+            { key: 'MISSING_SCANS', labelThai: '5. รายงานไม่สแกน / ขาดสแกนเข้า-ออก', adminOnlyOrg: true },
+            { key: 'IN_PROGRESS_TODAY', labelThai: '6. รายงานผู้ปฏิบัติงานระหว่างกะวันนี้', adminOnlyOrg: true },
+            { key: 'HOLIDAY_WORK', labelThai: '7. รายงานการปฏิบัติงานในวันหยุด', adminOnlyOrg: true },
+            { key: 'HALF_DAY_LEAVE', labelThai: '8. รายงานการลาครึ่งวัน / ลาบางส่วน', adminOnlyOrg: true },
+            { key: 'DEPARTMENT_SUMMARY', labelThai: '9. รายงานสรุปแยกตามกลุ่มงาน/หน่วยงาน', adminOnlyOrg: true },
+            { key: 'HR_REVIEW_AUDIT', labelThai: '10. รายงานผลการตรวจสอบโดย HR', adminOnlyOrg: true },
+          ]),
+      { key: 'OWN_ATTENDANCE', labelThai: '11. รายงานเวลาปฏิบัติงานส่วนบุคคล', adminOnlyOrg: false },
+    ];
 
-  const availableDepartments = useMemo(() => {
-    const set = new Set<string>();
-    rawRanking.forEach((r) => {
-      if (r.departmentName) set.add(String(r.departmentName));
-    });
-    return Array.from(set).sort((a, b) => a.localeCompare(b, 'th'));
-  }, [rawRanking]);
+  const summaryRows: Array<{ metric: string; value: number | string; unit: string }> =
+    reportData?.summaryRows || [];
+  const headers: string[] = reportData?.headers || [];
+  const rawRows: Array<Array<string | number>> = reportData?.rows || [];
 
-  const filteredAndSortedRanking = useMemo(() => {
+  const filteredAndSortedRows = useMemo(() => {
     const q = rankSearch.trim().toLowerCase();
-    let list = [...rawRanking];
-    if (departmentFilter) {
-      list = list.filter((r) => String(r.departmentName || '') === departmentFilter);
-    }
+    let list = [...rawRows];
     if (q) {
-      list = list.filter(
-        (r) =>
-          String(r.fullName || '').toLowerCase().includes(q) ||
-          String(r.personId || '').toLowerCase().includes(q) ||
-          String(r.departmentName || '').toLowerCase().includes(q)
+      list = list.filter((row) =>
+        row.some((cell) => String(cell ?? '').toLowerCase().includes(q))
       );
     }
-    list.sort((a, b) => {
-      const valA = a[sortKey];
-      const valB = b[sortKey];
-      if (typeof valA === 'number' && typeof valB === 'number') {
-        return sortDir === 'ASC' ? valA - valB : valB - valA;
-      }
-      return sortDir === 'ASC'
-        ? String(valA || '').localeCompare(String(valB || ''), 'th')
-        : String(valB || '').localeCompare(String(valA || ''), 'th');
-    });
+    if (sortColIdx !== null && sortColIdx >= 0 && sortColIdx < headers.length) {
+      list.sort((a, b) => {
+        const valA = a[sortColIdx];
+        const valB = b[sortColIdx];
+        const numA = typeof valA === 'number' ? valA : Number.NaN;
+        const numB = typeof valB === 'number' ? valB : Number.NaN;
+        if (!Number.isNaN(numA) && !Number.isNaN(numB)) {
+          return sortDir === 'ASC' ? numA - numB : numB - numA;
+        }
+        return sortDir === 'ASC'
+          ? String(valA ?? '').localeCompare(String(valB ?? ''), 'th')
+          : String(valB ?? '').localeCompare(String(valA ?? ''), 'th');
+      });
+    }
     return list;
-  }, [rawRanking, departmentFilter, rankSearch, sortKey, sortDir]);
+  }, [rawRows, rankSearch, sortColIdx, sortDir, headers.length]);
 
-  const numericSize = pageSize === 'ALL' ? Math.max(1, filteredAndSortedRanking.length) : pageSize;
-  const pagedRanking = filteredAndSortedRanking.slice((page - 1) * numericSize, page * numericSize);
-
-  const maxDeptLateMins = Math.max(
-    1,
-    ...deptBreakdown.map((d: any) => Number(d.totalLateMinutes || 0))
-  );
+  const numericSize = pageSize === 'ALL' ? Math.max(1, filteredAndSortedRows.length) : pageSize;
+  const pagedRows = filteredAndSortedRows.slice((page - 1) * numericSize, page * numericSize);
 
   return (
     <div className="space-y-6">
       <PageHeader
         category="บริหารเวลาปฏิบัติงาน"
-        title="รายงานและสถิติการมาสาย"
-        subtitle="สรุปสถิติการมาสายแยกตามจำนวนคนไม่ซ้ำและจำนวนครั้งที่มาสาย พร้อมเปรียบเทียบตามกลุ่มงานและส่งออกไฟล์ CSV สำหรับงานบริหารบุคคล"
+        title="ศูนย์รายงานและส่งออก Excel"
+        subtitle={
+          userRole === 'GENERAL_USER'
+            ? 'ดูพรีวิวและดาวน์โหลดรายงานเวลาปฏิบัติงานส่วนบุคคลเป็นไฟล์ Excel (.xlsx) หรือ CSV'
+            : 'เลือกรายงานมาตรฐานโรงพยาบาล 11 ประเภท กรองตามงวดวันที่ หน่วยงาน ประเภทบุคลากร ดูพรีวิว และส่งออกไฟล์ Excel (.xlsx) แบบหลายชีตหรือ CSV'
+        }
         actions={
           <>
             <PageHelpAction
@@ -771,15 +871,96 @@ export function ReportsView({
             />
             <button
               type="button"
-              onClick={handleExportCsv}
+              disabled={exportingFormat !== null || loading}
+              onClick={() => handleExportReport('csv')}
+              className="ent-btn-secondary"
+            >
+              <Download className="w-4 h-4 text-[#8066B5]" aria-hidden="true" />
+              <span>{exportingFormat === 'csv' ? 'กำลังส่งออก CSV...' : 'ส่งออก CSV'}</span>
+            </button>
+            <button
+              type="button"
+              disabled={exportingFormat !== null || loading}
+              onClick={() => handleExportReport('xlsx')}
               className="ent-btn-primary"
             >
-              <Download className="w-4 h-4" aria-hidden="true" />
-              <span>ส่งออกรายงาน CSV</span>
+              <FileSpreadsheet className="w-4 h-4" aria-hidden="true" />
+              <span>
+                {exportingFormat === 'xlsx' ? 'กำลังสร้าง Excel...' : 'ดาวน์โหลด Excel (.xlsx)'}
+              </span>
             </button>
           </>
         }
       />
+
+      {/* Report Type Selector Card */}
+      <section className="his-surface p-4 sm:p-5 space-y-3">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div>
+            <div className="text-[12px] font-semibold text-[#8066B5]">
+              เลือกประเภทรายงานมาตรฐาน
+            </div>
+            <h2 className="text-[16px] font-bold text-[#292638]">
+              {reportData?.titleThai ||
+                availableReportTypes.find((t) => t.key === reportType)?.labelThai ||
+                'รายงานเวลาปฏิบัติงาน'}
+            </h2>
+            {reportData?.subtitleThai && (
+              <p className="text-[12.5px] text-[#777287] mt-0.5">{reportData.subtitleThai}</p>
+            )}
+          </div>
+          <div className="w-full lg:w-[380px]">
+            <label htmlFor="report-type-select" className="sr-only">
+              เลือกประเภทรายงาน
+            </label>
+            <select
+              id="report-type-select"
+              aria-label="เลือกประเภทรายงาน"
+              value={userRole === 'GENERAL_USER' ? 'OWN_ATTENDANCE' : reportType}
+              disabled={userRole === 'GENERAL_USER'}
+              onChange={(e) => {
+                setReportType(e.target.value);
+                setSortColIdx(null);
+                setPage(1);
+              }}
+              className="ent-input w-full font-semibold"
+            >
+              {availableReportTypes.map((t) => (
+                <option key={t.key} value={t.key}>
+                  {t.labelThai}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {userRole !== 'GENERAL_USER' && (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 pt-2 border-t border-[#E8E4EF]">
+            {availableReportTypes.map((t) => {
+              const active = reportType === t.key;
+              return (
+                <button
+                  key={t.key}
+                  type="button"
+                  onClick={() => {
+                    setReportType(t.key);
+                    setSortColIdx(null);
+                    setPage(1);
+                  }}
+                  className={`px-3 py-2 rounded-lg border text-left text-[12.5px] font-medium transition-colors cursor-pointer truncate ${
+                    active
+                      ? 'bg-[#F1ECFA] border-[#8066B5] text-[#4E3978] font-semibold'
+                      : 'bg-[#F8F7FC] border-[#E8E4EF] text-[#292638] hover:bg-[#F1ECFA]/60'
+                  }`}
+                  title={t.labelThai}
+                >
+                  {t.labelThai}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </section>
 
       <PeriodFilterBar
         mode={periodMode}
@@ -798,25 +979,25 @@ export function ReportsView({
         customTo={customTo}
         onCustomToChange={setCustomTo}
         extraFilters={
-          <>
-            <select
-              aria-label="กรองตามประเภทบุคลากร"
-              value={personnelType}
-              onChange={(e) => {
-                setPersonnelType(e.target.value);
-                setPage(1);
-              }}
-              className="ent-input w-full sm:w-auto"
-            >
-              <option value="">ทุกประเภทบุคลากร</option>
-              <option value="CIVIL_SERVANT">ข้าราชการ</option>
-              <option value="GOV_EMPLOYEE">พนักงานราชการ</option>
-              <option value="PUBLIC_HEALTH_EMP">พนักงานกระทรวงสาธารณสุข (พกส.)</option>
-              <option value="PERMANENT_EMP">ลูกจ้างประจำ</option>
-              <option value="TEMP_EMPLOYEE">ลูกจ้างชั่วคราว</option>
-            </select>
+          userRole !== 'GENERAL_USER' ? (
+            <>
+              <select
+                aria-label="กรองตามประเภทบุคลากร"
+                value={personnelType}
+                onChange={(e) => {
+                  setPersonnelType(e.target.value);
+                  setPage(1);
+                }}
+                className="ent-input w-full sm:w-auto"
+              >
+                <option value="">ทุกประเภทบุคลากร</option>
+                {filterOptions.personnelTypes.map((pt) => (
+                  <option key={pt.code} value={pt.code}>
+                    {pt.name}
+                  </option>
+                ))}
+              </select>
 
-            {availableDepartments.length > 0 && (
               <select
                 aria-label="กรองตามกลุ่มงาน"
                 value={departmentFilter}
@@ -826,112 +1007,48 @@ export function ReportsView({
                 }}
                 className="ent-input w-full sm:w-auto"
               >
-                <option value="">ทุกกลุ่มงาน</option>
-                {availableDepartments.map((dept) => (
+                <option value="">ทุกกลุ่มงาน / หน่วยงาน</option>
+                {filterOptions.departments.map((dept) => (
                   <option key={dept} value={dept}>
                     {dept}
                   </option>
                 ))}
               </select>
-            )}
-          </>
+            </>
+          ) : undefined
         }
       />
 
       <ErrorBanner error={error} onRetry={loadData} />
 
-      {/* Unified Single-Elevation KPI Strip + Explicit Calculation Formula */}
-      {kpi && (
-        <div className="space-y-2.5">
-          <MetricStrip
-            columns={4}
-            items={[
-              {
-                id: 'late-people',
-                label: 'จำนวนคนที่มาสาย (ไม่ซ้ำคน)',
-                value: kpi.latePeople,
-                unit: 'คน',
-                sublabel: `เฉลี่ย ${kpi.avgLateMinutesPerLatePerson} นาที/คน`,
-                tone: 'warning',
-                icon: <Users className="w-4 h-4 text-[#B87516]" />,
-              },
-              {
-                id: 'late-occ',
-                label: 'จำนวนครั้งที่มาสายรวม',
-                value: kpi.lateOccurrences,
-                unit: 'ครั้ง',
-                sublabel: `จากเวรปฏิบัติงานทั้งหมด ${kpi.totalShifts} เวร`,
-                tone: 'default',
-                icon: <Clock className="w-4 h-4 text-[#8066B5]" />,
-              },
-              {
-                id: 'late-mins',
-                label: 'นาทีสายสะสมรวม',
-                value: kpi.totalLateMinutes,
-                unit: 'นาที',
-                sublabel: 'นับหลังหักเวลาผ่อนผันของแต่ละกะ',
-                tone: 'default',
-                icon: <BarChart3 className="w-4 h-4 text-[#8066B5]" />,
-              },
-              {
-                id: 'late-avg',
-                label: 'ค่าเฉลี่ยนาทีสายต่อครั้ง',
-                value: kpi.avgLateMinutesPerOccurrence,
-                unit: 'นาที/ครั้ง',
-                sublabel: 'นาทีสายรวม ÷ จำนวนครั้งที่สาย',
-                tone: 'brand',
-              },
-            ]}
-          />
-          <div className="flex items-start sm:items-center gap-2 px-3.5 py-2 rounded-lg bg-[#F1ECFA]/60 border border-[#E8E4EF] text-[12.5px] text-[#4E3978]">
-            <Info className="w-4 h-4 text-[#8066B5] shrink-0 mt-0.5 sm:mt-0" aria-hidden="true" />
-            <span>
-              <strong>วิธีคำนวณค่าเฉลี่ย:</strong> เฉลี่ยต่อครั้ง = นาทีสายรวม ({kpi.totalLateMinutes}) ÷ จำนวนครั้งที่มาสาย ({kpi.lateOccurrences}) · เฉลี่ยต่อคน = นาทีสายรวม ({kpi.totalLateMinutes}) ÷ จำนวนคนที่มาสายไม่ซ้ำคน ({kpi.latePeople})
-            </span>
-          </div>
-        </div>
+      {/* Summary Strip */}
+      {summaryRows.length > 0 && (
+        <MetricStrip
+          columns={summaryRows.length <= 2 ? 2 : summaryRows.length === 3 ? 3 : 4}
+          items={summaryRows.slice(0, 8).map((s, idx) => ({
+            id: `summary-${idx}`,
+            label: s.metric,
+            value: s.value,
+            unit: s.unit,
+            tone: idx === 0 ? 'brand' : 'default',
+            icon:
+              idx === 0 ? (
+                <Users className="w-4 h-4 text-[#8066B5]" />
+              ) : idx === 1 ? (
+                <Clock className="w-4 h-4 text-[#8066B5]" />
+              ) : (
+                <BarChart3 className="w-4 h-4 text-[#8066B5]" />
+              ),
+          }))}
+        />
       )}
 
-      {deptBreakdown.length > 0 && (
-        <section className="his-surface p-5 sm:p-6 space-y-4">
-          <SectionHeader
-            title="เปรียบเทียบสถิติการมาสายแยกตามกลุ่มงาน / หน่วยงาน"
-            subtitle="แสดงนาทีสายสะสมเทียบกับจำนวนคนที่สายไม่ซ้ำและจำนวนครั้งที่สายในแต่ละหน่วยงาน"
-          />
-          <div className="space-y-3.5 pt-1">
-            {deptBreakdown.map((d: any) => {
-              const barPct = Math.round((Number(d.totalLateMinutes || 0) / maxDeptLateMins) * 100);
-              return (
-                <div key={d.departmentName} className="space-y-1.5">
-                  <div className="flex flex-wrap items-center justify-between gap-2 text-[13.5px]">
-                    <span className="font-semibold text-[#292638]">{d.departmentName}</span>
-                    <div className="flex flex-wrap items-center gap-3 sm:gap-4 font-mono text-[13px] tabular-nums">
-                      <span className="text-[#777287]">เวรรวม {d.totalShifts} เวร</span>
-                      <span className="text-[#B87516] font-semibold">
-                        สาย {d.latePeople} คน ({d.lateOccurrences} ครั้ง)
-                      </span>
-                      <span className="font-bold text-[#4E3978]">
-                        รวม {d.totalLateMinutes} นาที
-                      </span>
-                    </div>
-                  </div>
-                  <div className="h-2.5 w-full bg-[#F1ECFA] rounded-full overflow-hidden">
-                    <div
-                      style={{ width: `${Math.max(d.totalLateMinutes > 0 ? 4 : 0, barPct)}%` }}
-                      className="h-full bg-[#8066B5] rounded-full transition-all"
-                    />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </section>
-      )}
-
+      {/* Preview Table */}
       <div className="ent-table-wrapper">
         <div className="px-5 py-4 border-b border-[#E8E4EF] bg-white flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <SectionHeader
-            title={`ตารางจัดอันดับสถิติการมาสายรายบุคคล (${filteredAndSortedRanking.length} คน)`}
+            title={`พรีวิวข้อมูลรายงาน (${filteredAndSortedRows.length} รายการ)`}
+            subtitle="ไฟล์ Excel (.xlsx) ที่ดาวน์โหลดจะแยกชีตสรุปภาพรวมและชีตรายละเอียดให้ครบถ้วนโดยป้องกันสูตรอันตรายอัตโนมัติ"
           />
           <div className="relative w-full sm:w-64">
             <Search
@@ -940,159 +1057,91 @@ export function ReportsView({
             />
             <input
               type="text"
-              aria-label="ค้นหาชื่อบุคลากรในรายงาน"
+              aria-label="ค้นหาในพรีวิวรายงาน"
               value={rankSearch}
               onChange={(e) => {
                 setRankSearch(e.target.value);
                 setPage(1);
               }}
-              placeholder="ค้นหาชื่อ หรือ รหัสบุคลากร..."
+              placeholder="ค้นหาชื่อ รหัส หรือหน่วยงาน..."
               className="ent-input ent-input-with-icon pr-4 w-full"
             />
           </div>
         </div>
 
         {loading ? (
-          <TableLoadingSkeleton rows={6} cols={6} />
+          <TableLoadingSkeleton rows={6} cols={Math.max(headers.length, 5)} />
         ) : (
-          <>
-            <div className="md:hidden divide-y divide-[#E8E4EF]">
-              {pagedRanking.length === 0 ? (
-                <div className="py-10 px-4 text-center text-[14px] text-[#777287]">
-                  ไม่พบข้อมูลการจัดอันดับในช่วงเวลาที่เลือก
-                </div>
-              ) : (
-                pagedRanking.map((r: any, idx: number) => (
-                  <div key={r.personId} className="p-4 space-y-2 bg-white">
-                    <div className="flex items-start justify-between gap-2">
-                      <div>
-                        <div className="font-bold text-[14.5px] text-[#292638]">
-                          #{(page - 1) * numericSize + idx + 1} · {r.fullName}
-                        </div>
-                        <div className="text-[12.5px] text-[#777287]">
-                          {r.departmentName} · {r.personnelTypeName}
-                        </div>
-                      </div>
-                      <StatusBadge tone="warning" label={`รวม ${r.totalLateMinutes} น.`} compact />
-                    </div>
-                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[13px] font-mono tabular-nums">
-                      <span className="text-[#777287]">เวร {r.totalShifts}</span>
-                      <span className="text-[#B87516] font-semibold">สาย {r.lateOccurrences} ครั้ง</span>
-                      <span className="text-[#C74455] font-semibold">
-                        ขาด/ลืมออก {r.noScanCount}/{r.missingCheckoutCount}
-                      </span>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-
-            <div className="hidden md:block overflow-x-auto">
-              <table className="his-table">
-                <thead>
-                  <tr>
-                    <th>อันดับ</th>
-                    <SortableHeader
-                      label="ชื่อ-นามสกุล · รหัสบุคลากร"
-                      sortKey="fullName"
-                      activeSortKey={sortKey}
-                      sortDir={sortDir}
-                      onSort={handleSort}
-                    />
-                    <SortableHeader
-                      label="กลุ่มงาน · ประเภทบุคลากร"
-                      sortKey="departmentName"
-                      activeSortKey={sortKey}
-                      sortDir={sortDir}
-                      onSort={handleSort}
-                    />
-                    <SortableHeader
-                      label="เวรทั้งหมด"
-                      sortKey="totalShifts"
-                      activeSortKey={sortKey}
-                      sortDir={sortDir}
-                      onSort={handleSort}
-                      align="right"
-                    />
-                    <SortableHeader
-                      label="จำนวนครั้งที่สาย"
-                      sortKey="lateOccurrences"
-                      activeSortKey={sortKey}
-                      sortDir={sortDir}
-                      onSort={handleSort}
-                      align="right"
-                    />
-                    <SortableHeader
-                      label="นาทีสายสะสม"
-                      sortKey="totalLateMinutes"
-                      activeSortKey={sortKey}
-                      sortDir={sortDir}
-                      onSort={handleSort}
-                      align="right"
-                    />
-                    <SortableHeader
-                      label="เฉลี่ย (นาที/ครั้ง)"
-                      sortKey="avgLateMinutesPerOccurrence"
-                      activeSortKey={sortKey}
-                      sortDir={sortDir}
-                      onSort={handleSort}
-                      align="right"
-                    />
-                    <SortableHeader
-                      label="ขาดสแกน / ไม่สแกนออก"
-                      sortKey="noScanCount"
-                      activeSortKey={sortKey}
-                      sortDir={sortDir}
-                      onSort={handleSort}
-                      align="right"
-                    />
-                  </tr>
-                </thead>
-                <tbody>
-                  {pagedRanking.length === 0 ? (
-                    <TableEmptyState colSpan={8} title="ไม่พบข้อมูลการจัดอันดับในช่วงเวลาที่เลือก" />
-                  ) : (
-                    pagedRanking.map((r: any, idx: number) => (
-                      <tr key={r.personId}>
-                        <td className="font-mono tabular-nums font-semibold text-[#777287]">
-                          #{(page - 1) * numericSize + idx + 1}
-                        </td>
-                        <td>
-                          <div className="font-semibold text-[14px] text-[#292638]">{r.fullName}</div>
-                          <div className="text-[12px] font-mono text-[#777287] mt-0.5">
-                            รหัสบุคลากร: {r.personId}
-                          </div>
-                        </td>
-                        <td>
-                          <div className="font-medium text-[#292638]">{r.departmentName}</div>
-                          <div className="text-[12px] text-[#777287] mt-0.5">{r.personnelTypeName}</div>
-                        </td>
-                        <td className="text-right font-mono tabular-nums">{r.totalShifts}</td>
-                        <td className="text-right font-mono tabular-nums font-semibold text-[#B87516]">
-                          {r.lateOccurrences} ครั้ง
-                        </td>
-                        <td className="text-right font-mono tabular-nums font-bold">
-                          {r.totalLateMinutes} นาที
-                        </td>
-                        <td className="text-right font-mono tabular-nums text-[#777287]">
-                          {r.avgLateMinutesPerOccurrence}
-                        </td>
-                        <td className="text-right font-mono tabular-nums text-[#C74455] font-semibold">
-                          {r.noScanCount} / {r.missingCheckoutCount}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </>
+          <div className="overflow-x-auto">
+            <table className="his-table">
+              <thead>
+                <tr>
+                  <th className="w-12 text-center">#</th>
+                  {headers.map((header, idx) => {
+                    const isActive = sortColIdx === idx;
+                    return (
+                      <th
+                        key={`${header}-${idx}`}
+                        scope="col"
+                        onClick={() => handleSortColumn(idx)}
+                        className="cursor-pointer select-none hover:bg-[#F1ECFA]/70 whitespace-nowrap"
+                      >
+                        <span className={isActive ? 'text-[#4E3978] font-bold' : ''}>
+                          {header}
+                        </span>
+                        {isActive && (
+                          <span className="ml-1 text-[#8066B5] font-mono text-[11px]">
+                            {sortDir === 'ASC' ? '▲' : '▼'}
+                          </span>
+                        )}
+                      </th>
+                    );
+                  })}
+                </tr>
+              </thead>
+              <tbody>
+                {pagedRows.length === 0 ? (
+                  <TableEmptyState
+                    colSpan={Math.max(headers.length + 1, 2)}
+                    title="ไม่พบข้อมูลรายงานตามตัวกรองและช่วงวันที่ที่เลือก"
+                  />
+                ) : (
+                  pagedRows.map((row, rIdx) => (
+                    <tr key={`row-${(page - 1) * numericSize + rIdx}`}>
+                      <td className="text-center font-mono tabular-nums text-[#777287] text-[12.5px]">
+                        {(page - 1) * numericSize + rIdx + 1}
+                      </td>
+                      {row.map((cell, cIdx) => {
+                        const isNum = typeof cell === 'number';
+                        const str = String(cell ?? '—');
+                        const isTimestampLike = /^\d{4}-\d{2}-\d{2}|^\d{2}:\d{2}/.test(str);
+                        return (
+                          <td
+                            key={`cell-${rIdx}-${cIdx}`}
+                            className={
+                              isNum
+                                ? 'font-mono tabular-nums font-semibold text-[#292638] whitespace-nowrap'
+                                : isTimestampLike
+                                  ? 'font-mono tabular-nums text-[#292638] whitespace-nowrap'
+                                  : 'text-[#292638]'
+                            }
+                          >
+                            {str || '—'}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         )}
 
         <TablePaginationBar
           currentPage={page}
           pageSize={pageSize}
-          totalItems={filteredAndSortedRanking.length}
+          totalItems={filteredAndSortedRows.length}
           onPageChange={setPage}
           onPageSizeChange={setPageSize}
         />

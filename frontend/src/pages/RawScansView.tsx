@@ -205,6 +205,8 @@ export function RawScansView({
   const [showAdvancedTools, setShowAdvancedTools] = useState(false);
 
   const [rawScans, setRawScans] = useState<any[]>([]);
+  const [rawTotalCount, setRawTotalCount] = useState(0);
+  const [rawUnmatchedCount, setRawUnmatchedCount] = useState(0);
   const [scannerData, setScannerData] = useState<any>(null);
   const [search, setSearch] = useState('');
   const [machineFilter, setMachineFilter] = useState('');
@@ -333,16 +335,29 @@ export function RawScansView({
         setError(null);
       }
       try {
+        const effectivePageSize = pageSize === 'ALL' ? 200 : pageSize;
         const qs = new URLSearchParams({
+          page: String(page),
+          pageSize: String(effectivePageSize),
+          sortBy: sortKey,
+          sortDir,
           ...(search ? { search } : {}),
           ...(machineFilter ? { machineNo: machineFilter } : {}),
           ...(mappingState ? { mappingState } : {}),
+          ...(scanDateFrom ? { dateFrom: scanDateFrom } : {}),
+          ...(scanDateTo ? { dateTo: scanDateTo } : {}),
+          ...(onlyMultiScan ? { onlyMultiScan: '1' } : {}),
         });
         const [rsRes, scRes] = await Promise.all([
           apiRequest(`/raw-scans?${qs.toString()}`),
           apiRequest('/scanners'),
         ]);
-        setRawScans(rsRes.items || []);
+        const items = rsRes.items || [];
+        setRawScans(items);
+        setRawTotalCount(Number(rsRes.totalCount ?? items.length));
+        setRawUnmatchedCount(
+          Number(rsRes.unmatchedCount ?? items.filter((r: any) => !r.matched_person_id).length)
+        );
         setScannerData(scRes);
       } catch (err) {
         if (err instanceof ApiClientError) {
@@ -354,7 +369,18 @@ export function RawScansView({
         setLoading(false);
       }
     },
-    [search, machineFilter, mappingState]
+    [
+      page,
+      pageSize,
+      sortKey,
+      sortDir,
+      search,
+      machineFilter,
+      mappingState,
+      scanDateFrom,
+      scanDateTo,
+      onlyMultiScan,
+    ]
   );
 
   useEffect(() => {
@@ -420,57 +446,14 @@ export function RawScansView({
     setPage(1);
   }
 
-  const filteredAndSortedScans = useMemo(() => {
-    let list = [...rawScans];
-
-    if (scanDateFrom) {
-      list = list.filter((s) => String(s.canonical_bkk_time || '').slice(0, 10) >= scanDateFrom);
-    }
-    if (scanDateTo) {
-      list = list.filter((s) => String(s.canonical_bkk_time || '').slice(0, 10) <= scanDateTo);
-    }
-
-    if (onlyMultiScan) {
-      const counts = new Map<string, number>();
-      for (const s of list) {
-        const key = `${s.enroll_number}:${String(s.canonical_bkk_time || '').slice(0, 10)}`;
-        counts.set(key, (counts.get(key) || 0) + 1);
-      }
-      list = list.filter(
-        (s) =>
-          (counts.get(`${s.enroll_number}:${String(s.canonical_bkk_time || '').slice(0, 10)}`) ||
-            0) > 1
-      );
-    }
-
-    list.sort((a, b) => {
-      const valA = a[sortKey];
-      const valB = b[sortKey];
-      if (typeof valA === 'number' && typeof valB === 'number') {
-        return sortDir === 'ASC' ? valA - valB : valB - valA;
-      }
-      return sortDir === 'ASC'
-        ? String(valA || '').localeCompare(String(valB || ''), 'th')
-        : String(valB || '').localeCompare(String(valA || ''), 'th');
-    });
-    return list;
-  }, [rawScans, scanDateFrom, scanDateTo, onlyMultiScan, sortKey, sortDir]);
-
-  const pagedScans = useMemo(() => {
-    if (pageSize === 'ALL') return filteredAndSortedScans;
-    const start = (page - 1) * pageSize;
-    return filteredAndSortedScans.slice(start, start + pageSize);
-  }, [filteredAndSortedScans, page, pageSize]);
+  const pagedScans = rawScans;
 
   const maxSyncRangeDays = Number(scannerData?.syncRangeCapabilities?.maxRangeDays || 90);
   const devices: any[] = scannerData?.devices || [];
   const schedules: any[] = scannerData?.schedules || [];
   const activeDevicesCount = devices.filter((d) => Number(d.is_enabled) === 1).length;
   const activeSchedulesCount = schedules.filter((s) => Number(s.is_enabled) === 1).length;
-  const unmatchedRawCount = useMemo(
-    () => rawScans.filter((r) => !r.matched_person_id).length,
-    [rawScans]
-  );
+  const unmatchedRawCount = rawUnmatchedCount;
 
   const hasActiveRawScanFilters = Boolean(
     search || machineFilter || mappingState || scanDateFrom || scanDateTo || onlyMultiScan
@@ -2274,7 +2257,7 @@ export function RawScansView({
 
               <div className="flex items-center gap-3 text-[13px] text-[#777287]">
                 <span className="tabular-nums">
-                  พบ <strong className="text-[#292638]">{filteredAndSortedScans.length}</strong> รายการ
+                  พบ <strong className="text-[#292638]">{rawTotalCount}</strong> รายการ
                 </span>
                 {hasActiveRawScanFilters && (
                   <button
@@ -2470,11 +2453,14 @@ export function RawScansView({
             </div>
 
             <TablePaginationBar
-              totalItems={filteredAndSortedScans.length}
+              totalItems={rawTotalCount}
               currentPage={page}
               pageSize={pageSize}
               onPageChange={setPage}
-              onPageSizeChange={setPageSize}
+              onPageSizeChange={(next) => {
+                setPageSize(next);
+                setPage(1);
+              }}
             />
           </div>
         </div>

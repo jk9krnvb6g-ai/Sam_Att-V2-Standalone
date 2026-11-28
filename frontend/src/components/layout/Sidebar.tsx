@@ -19,22 +19,30 @@ import {
   HeartHandshake,
   Workflow,
   BookOpen,
+  Briefcase,
+  Layers,
+  Lock,
+  Activity,
 } from 'lucide-react';
 import { type AuthUser, type UserRole } from '../../services/api.ts';
 
 export type NavViewKey =
   | 'dashboard'
+  | 'hrWorkCenter'
   | 'myAttendance'
   | 'hrAttendance'
   | 'attendanceReview'
+  | 'completeness'
   | 'personnel'
   | 'shifts'
+  | 'monthlyClosing'
   | 'reports'
   | 'scanners'
   | 'rawScans'
   | 'hosofficePush'
   | 'adminUsers'
   | 'systemLogs'
+  | 'systemHealth'
   | 'deployment'
   | 'workflowGuide'
   | 'userManual';
@@ -56,7 +64,7 @@ interface SidebarNavGroup {
 export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
   {
     id: 'group_dashboard',
-    title: 'ภาพรวม',
+    title: 'หน้าหลัก',
     items: [
       {
         key: 'dashboard',
@@ -66,9 +74,22 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
         icon: LayoutDashboard,
       },
       {
+        key: 'hrWorkCenter',
+        label: 'ศูนย์ปฏิบัติงาน HR',
+        subLabel: 'คิวงานรายวันและรายการเร่งด่วน',
+        roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
+        icon: Briefcase,
+      },
+    ],
+  },
+  {
+    id: 'group_my_data',
+    title: 'ข้อมูลของฉัน',
+    items: [
+      {
         key: 'myAttendance',
         label: 'เวลาปฏิบัติงานของฉัน',
-        subLabel: 'ประวัติการลงเวลาและตารางเวรส่วนตัว',
+        subLabel: 'ประวัติการลงเวลา ตารางเวร และสแกนส่วนตัว',
         roles: ['GENERAL_USER', 'RESPONSIBLE_STAFF', 'ADMIN'],
         icon: Clock,
       },
@@ -76,7 +97,7 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
   },
   {
     id: 'group_hr',
-    title: 'บริหารเวลาปฏิบัติงาน',
+    title: 'บริหารจัดการบุคลากร',
     items: [
       {
         key: 'hrAttendance',
@@ -88,9 +109,16 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
       {
         key: 'attendanceReview',
         label: 'ตรวจสอบเวลาและหมายเหตุ',
-        subLabel: 'รับรองผลตรวจสอบและคำนวณเวลาใหม่',
+        subLabel: 'รับรองผล HR (เดี่ยว/กลุ่ม) และ Reprocess',
         roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
         icon: UserCheck,
+      },
+      {
+        key: 'completeness',
+        label: 'ตรวจความครบถ้วนย้อนหลัง',
+        subLabel: 'หาเวรที่ขาดบันทึกและเติมข้อมูลอย่างปลอดภัย',
+        roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
+        icon: Layers,
       },
       {
         key: 'personnel',
@@ -101,17 +129,17 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
       },
       {
         key: 'shifts',
-        label: 'ตารางเวรและกะทำงาน',
-        subLabel: 'ตารางเวรรายเดือนและแม่แบบกะทำงาน',
+        label: 'ตารางเวร กะ และวันหยุด',
+        subLabel: 'ตารางเวร แม่แบบกะ และปฏิทินวันหยุดโรงพยาบาล',
         roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
         icon: CalendarDays,
       },
       {
-        key: 'reports',
-        label: 'รายงานการมาสาย',
-        subLabel: 'สรุปรายงานประจำงวดและส่งออก CSV',
+        key: 'monthlyClosing',
+        label: 'ปิดรอบประจำเดือน',
+        subLabel: 'ตรวจความพร้อมและล็อกงวดเวลาปฏิบัติงาน',
         roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
-        icon: BarChart3,
+        icon: Lock,
       },
     ],
   },
@@ -136,9 +164,16 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
     ],
   },
   {
-    id: 'group_system',
-    title: 'ระบบและผู้ดูแล',
+    id: 'group_reports_hosoffice',
+    title: 'รายงานและ HOSOffice',
     items: [
+      {
+        key: 'reports',
+        label: 'ศูนย์รายงานและส่งออก',
+        subLabel: '11 รายงานมาตรฐาน ส่งออก Excel (.xlsx) และ CSV',
+        roles: ['GENERAL_USER', 'RESPONSIBLE_STAFF', 'ADMIN'],
+        icon: BarChart3,
+      },
       {
         key: 'hosofficePush',
         label: 'ส่งข้อมูล HOSOffice',
@@ -146,10 +181,16 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
         roles: ['RESPONSIBLE_STAFF', 'ADMIN'],
         icon: Send,
       },
+    ],
+  },
+  {
+    id: 'group_system',
+    title: 'ระบบและความปลอดภัย',
+    items: [
       {
         key: 'adminUsers',
         label: 'ผู้ใช้และสิทธิ์',
-        subLabel: 'จัดการบัญชีผู้ใช้และผูกชื่อบุคลากร',
+        subLabel: 'จัดการบัญชี สร้างหลายคน และผูกชื่อบุคลากร',
         roles: ['ADMIN'],
         icon: UserCog,
       },
@@ -159,6 +200,13 @@ export const SIDEBAR_GROUPS: SidebarNavGroup[] = [
         subLabel: 'บันทึกการใช้งานและความปลอดภัยระบบ',
         roles: ['ADMIN'],
         icon: FileClock,
+      },
+      {
+        key: 'systemHealth',
+        label: 'ศูนย์ตรวจสอบสถานะระบบ',
+        subLabel: 'สถานะเซิร์ฟเวอร์ ฐานข้อมูล และเครื่องสแกน',
+        roles: ['ADMIN'],
+        icon: Activity,
       },
       {
         key: 'deployment',

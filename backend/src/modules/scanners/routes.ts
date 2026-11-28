@@ -1422,6 +1422,7 @@ async function requireScannerTokenOrStaffAuth(req: Request, res: Response, next:
       displayName: 'ScannerReader.exe Agent',
       role: 'ADMIN',
       approvedPersonId: null,
+      mustChangePassword: false,
       jti: 'scanner-token-auth',
       exp: Math.floor(Date.now() / 1000) + 300,
     };
@@ -1493,6 +1494,27 @@ scannersRouter.get(
       const machineNo = String(req.query.machineNo || '').trim();
       const mappingState = String(req.query.mappingState || '').trim();
       const search = String(req.query.search || '').trim();
+      const onlyMultiScan =
+        String(req.query.onlyMultiScan || '').toLowerCase() === 'true' ||
+        String(req.query.onlyMultiScan || '') === '1';
+
+      const page = Math.max(1, Number.parseInt(String(req.query.page || '1'), 10) || 1);
+      const rawPageSize = Number.parseInt(String(req.query.pageSize || '50'), 10);
+      const pageSize = Number.isFinite(rawPageSize)
+        ? Math.min(200, Math.max(1, rawPageSize))
+        : 50;
+      const offset = (page - 1) * pageSize;
+
+      const sortKeyRaw = String(req.query.sortBy || 'canonical_bkk_time').trim();
+      const sortDir = String(req.query.sortDir || 'DESC').toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
+      const sortColumnMap: Record<string, string> = {
+        id: 'rs.id',
+        canonical_bkk_time: 'rs.canonical_bkk_time',
+        machine_no: 'rs.machine_no',
+        enroll_number: 'rs.enroll_number',
+        mapping_state: "COALESCE(rsm.mapping_state, 'UNMATCHED')",
+      };
+      const sortColumn = sortColumnMap[sortKeyRaw] || 'rs.canonical_bkk_time';
 
       const conditions = ['1=1'];
       const params: unknown[] = [];
@@ -1517,6 +1539,34 @@ scannersRouter.get(
         conditions.push('(rs.enroll_number LIKE ? OR rsm.matched_person_id LIKE ? OR p.full_name LIKE ?)');
         params.push(`%${search}%`, `%${search}%`, `%${search}%`);
       }
+      if (onlyMultiScan) {
+        conditions.push(
+          `EXISTS (
+             SELECT 1 FROM raw_scans rs2
+             WHERE rs2.enroll_number = rs.enroll_number
+               AND SUBSTR(rs2.canonical_bkk_time, 1, 10) = SUBSTR(rs.canonical_bkk_time, 1, 10)
+               AND rs2.id <> rs.id
+           )`
+        );
+      }
+
+      const whereSql = conditions.join(' AND ');
+      const fromJoinSql = `
+         FROM raw_scans rs
+         LEFT JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
+         LEFT JOIN personnel p ON p.person_id = rsm.matched_person_id
+         LEFT JOIN attendance_raw_scan_usage u ON u.raw_scan_id = rs.id
+         WHERE ${whereSql}`;
+
+      const countRows = await dbQuery<{ totalCount: number; unmatchedCount: number }>(
+        `SELECT COUNT(*) AS totalCount,
+                SUM(CASE WHEN rsm.matched_person_id IS NULL THEN 1 ELSE 0 END) AS unmatchedCount
+         ${fromJoinSql}`,
+        params
+      );
+      const totalCount = Number(countRows[0]?.totalCount || 0);
+      const unmatchedCount = Number(countRows[0]?.unmatchedCount || 0);
+      const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
       const items = await dbQuery(
         `SELECT rs.id, rs.event_dedup_key, rs.machine_no, rs.enroll_number,
@@ -1529,17 +1579,20 @@ scannersRouter.get(
                 u.attendance_id AS used_attendance_id,
                 u.work_date AS used_work_date,
                 u.shift_code AS used_shift_code
-         FROM raw_scans rs
-         LEFT JOIN raw_scan_mappings rsm ON rsm.raw_scan_id = rs.id
-         LEFT JOIN personnel p ON p.person_id = rsm.matched_person_id
-         LEFT JOIN attendance_raw_scan_usage u ON u.raw_scan_id = rs.id
-         WHERE ${conditions.join(' AND ')}
-         ORDER BY rs.canonical_bkk_time DESC, rs.id DESC
-         LIMIT 200`,
-        params
+         ${fromJoinSql}
+         ORDER BY ${sortColumn} ${sortDir}, rs.id DESC
+         LIMIT ? OFFSET ?`,
+        [...params, pageSize, offset]
       );
 
-      res.json({ items });
+      res.json({
+        items,
+        totalCount,
+        unmatchedCount,
+        page,
+        pageSize,
+        totalPages,
+      });
     } catch (err) {
       next(err);
     }

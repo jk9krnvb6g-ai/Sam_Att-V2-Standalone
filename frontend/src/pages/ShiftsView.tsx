@@ -79,6 +79,7 @@ import {
 } from '../components/common/SharedComponents.tsx';
 import { ShiftTemplateModal } from '../components/shifts/ShiftTemplateModal.tsx';
 import { PersonnelTypeDefaultModal } from '../components/shifts/PersonnelTypeDefaultModal.tsx';
+import { HospitalHolidaysTab } from '../components/shifts/HospitalHolidaysTab.tsx';
 import {
   DEFAULT_ERROR_TOAST_MS,
   DEFAULT_SUCCESS_TOAST_MS,
@@ -106,7 +107,7 @@ import {
   type ShiftIconKind,
 } from '../utils/shiftDisplay.ts';
 
-type WorkspaceTabKey = 'ROSTER' | 'ASSIGN_WORKSPACE' | 'TEMPLATES';
+type WorkspaceTabKey = 'ROSTER' | 'ASSIGN_WORKSPACE' | 'TEMPLATES' | 'HOLIDAYS';
 type RosterViewMode = 'MONTHLY_GRID' | 'WEEKLY_GRID' | 'DETAIL_LIST';
 type MonthDayRangeMode = 'ALL' | 'FIRST_HALF' | 'SECOND_HALF';
 type AssignMethodMode = 'SINGLE_PERSON' | 'MULTI_PERSON';
@@ -2317,6 +2318,11 @@ export function ShiftsView({
               label: '3. แม่แบบกะและกะเริ่มต้นตามประเภท',
               count: shifts.length,
               icon: <Clock className="w-4 h-4" />,
+            },
+            {
+              key: 'HOLIDAYS',
+              label: '4. ปฏิทินวันหยุดโรงพยาบาล',
+              icon: <CalendarDays className="w-4 h-4" />,
             },
           ]}
         />
@@ -5250,6 +5256,18 @@ export function ShiftsView({
             </div>
           </div>
         </div>
+      )}
+
+      {/* =====================================================================
+          หน้าจอที่ 4: ปฏิทินวันหยุดโรงพยาบาลและข้อยกเว้น (B1)
+         ===================================================================== */}
+      {activeTab === 'HOLIDAYS' && (
+        <HospitalHolidaysTab
+          canEdit={canEditShifts}
+          departments={departments}
+          personnel={personnel}
+          onHolidaysChanged={loadData}
+        />
       )}
 
       {/* =====================================================================
