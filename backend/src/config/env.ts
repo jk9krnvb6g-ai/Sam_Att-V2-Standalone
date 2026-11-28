@@ -65,6 +65,60 @@ export function resolveDotEnvFilePath(): string {
   return path.join(PROJECT_ROOT_DIR, '.env');
 }
 
+/**
+ * ฟอร์แมตค่าสำหรับบันทึกในไฟล์ .env อย่างปลอดภัย (FIX 06)
+ * - หากค่ามีอักขระพิเศษ เช่น `#`, `$`, `&`, `"`, `'`, `\`, หรือช่องว่าง จะครอบด้วย Double Quotes (`"..."`)
+ *   และ Escape เฉพาะ `\` และ `"` เพื่อป้องกันการถูกตัดข้อความที่เครื่องหมาย `#`
+ */
+export function formatEnvFileValue(rawVal: string): string {
+  const val = String(rawVal ?? '');
+  if (/[\r\n\0]/.test(val)) {
+    throw new Error('INVALID_ENV_VALUE: Environment variable value must not contain newline or null byte');
+  }
+  if (val === '') return '';
+  if (/[#$&"'\s\\;#]/.test(val)) {
+    const escaped = val.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return `"${escaped}"`;
+  }
+  return val;
+}
+
+/**
+ * แยกวิเคราะห์เนื้อหาไฟล์ .env แบบ Lossless 100% (FIX 06)
+ * - รองรับรหัสผ่านที่มี `#`, `$`, `&`, `'`, `"`, และช่องว่าง ทั้งแบบครอบ Quotes และไม่ครอบ Quotes
+ * - ไม่ตัดข้อความในรหัสผ่านที่ไม่ได้ครอบ Quotes เมื่อมี `#` ติดกับตัวอักษร (เช่น `P@ss#123$456&789`)
+ * - ไม่ทำการขยายตัวแปร `$VAR` เพื่อรักษารหัสผ่านตรงตามต้นฉบับทุกตัวอักษร
+ */
+export function parseDotEnvContentLossless(rawContent: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const lines = String(rawContent || '').split(/\r?\n/);
+
+  for (const rawLine of lines) {
+    const trimmedLine = rawLine.trim();
+    if (!trimmedLine || trimmedLine.startsWith('#')) {
+      continue;
+    }
+    const match = trimmedLine.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!match) {
+      continue;
+    }
+    const key = match[1].trim();
+    const rawVal = match[2];
+
+    if (rawVal.length >= 2 && rawVal.startsWith('"') && rawVal.endsWith('"')) {
+      const inner = rawVal.slice(1, -1);
+      result[key] = inner.replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    } else if (rawVal.length >= 2 && rawVal.startsWith("'") && rawVal.endsWith("'")) {
+      const inner = rawVal.slice(1, -1);
+      result[key] = inner.replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+    } else {
+      result[key] = rawVal.trim();
+    }
+  }
+
+  return result;
+}
+
 export function reloadEnvConfig(options: { override?: boolean } = {}): string | null {
   const override = Boolean(options.override);
   const envPath = resolveDotEnvFilePath();
@@ -78,7 +132,13 @@ export function reloadEnvConfig(options: { override?: boolean } = {}): string | 
   }
 
   if (fs.existsSync(envPath)) {
-    dotenv.config({ path: envPath, override, quiet: true });
+    const rawText = fs.readFileSync(envPath, 'utf8');
+    const parsed = parseDotEnvContentLossless(rawText);
+    for (const [k, v] of Object.entries(parsed)) {
+      if (override || process.env[k] === undefined) {
+        process.env[k] = v;
+      }
+    }
   } else if (!isAutomatedTestRuntime()) {
     dotenv.config({ override, quiet: true });
   }
@@ -332,7 +392,7 @@ export function persistGitHubTokenToEnvFile(rawToken: string | null): {
 
   // Reload .env เข้า process.env ด้วย override: true (หากอยู่ใน test จะ reload เมื่อตั้ง SAM_ATT_ENV_PATH เท่านั้น)
   if (!isAutomatedTestRuntime() || process.env.SAM_ATT_ENV_PATH?.trim()) {
-    dotenv.config({ path: envFilePath, override: true, quiet: true });
+    reloadEnvConfig({ override: true });
   }
 
   if (cleanToken) {

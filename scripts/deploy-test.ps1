@@ -1,51 +1,43 @@
 <#
 .SYNOPSIS
-  Sam_Att V2 Standalone — Atomic Release Deployment with SHA-256 Verification & Automatic Rollback
+    Sam_Att V2 Standalone - Safe Deployment Wrapper (scripts/deploy-test.ps1)
+.DESCRIPTION
+    Canonical wrapper that delegates to root Deploy_Sam_Att.ps1 so that all deployments
+    use the single canonical deployment engine, shared lifecycle lock, full SHA-256 snapshot
+    manifest, read-only DB preflight (never running automatic db:migrate), and strict HTTPS
+    HealthCheck.
 #>
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
-  [Parameter(Mandatory=$true)][string]$ArtifactZipPath,
-  [Parameter(Mandatory=$true)][string]$ExpectedSha256,
-  [string]$AppDir = "C:\inetpub\wwwroot\Sam_Att",
-  [string]$ServiceName = "SamAttV2Standalone",
-  [int]$HttpsPort = 4101
+    [string]$SamAttRoot = "D:\WebApps\Sam_Att",
+    [string]$BackupRootDir = "D:\Backups\Sam_Att",
+    [string]$DeploymentsDir = "D:\Deployments\Sam_Att",
+    [string]$ServiceName = "SamAttV2Standalone",
+    [string]$Branch = "main",
+    [string]$HostName = "10.2.0.23",
+    [int]$HttpsPort = 4101,
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
 
-if (-not (Test-Path $ArtifactZipPath)) {
-  throw "DEPLOY_ABORTED: Artifact file not found at $ArtifactZipPath"
+$rootDeploy = Join-Path (Split-Path -Parent $PSScriptRoot) "Deploy_Sam_Att.ps1"
+if (-not (Test-Path $rootDeploy)) {
+    throw "CANONICAL_DEPLOY_MISSING: Could not find $rootDeploy"
 }
 
-$ActualHash = (Get-FileHash -Path $ArtifactZipPath -Algorithm SHA256).Hash.ToLower()
-if ($ActualHash -ne $ExpectedSha256.ToLower()) {
-  throw "DEPLOY_ABORTED: SHA-256 mismatch! Expected=$ExpectedSha256 Actual=$ActualHash"
+$forwardParams = @{
+    SamAttRoot     = $SamAttRoot
+    BackupRootDir  = $BackupRootDir
+    DeploymentsDir = $DeploymentsDir
+    ServiceName    = $ServiceName
+    Branch         = $Branch
+    HostName       = $HostName
+    HttpsPort      = $HttpsPort
+}
+if ($DryRun -or $WhatIfPreference) {
+    $forwardParams["DryRun"] = $true
 }
 
-Write-Host "[Deploy] Step 1: Creating pre-deployment backup..."
-$BackupDir = & "$PSScriptRoot\backup.ps1" -AppDir $AppDir
-
-try {
-  Write-Host "[Deploy] Step 2: Stopping '$ServiceName' only..."
-  Stop-Service -Name $ServiceName -ErrorAction SilentlyContinue
-
-  Write-Host "[Deploy] Step 3: Extracting verified release package..."
-  Expand-Archive -Path $ArtifactZipPath -DestinationPath $AppDir -Force
-
-  Push-Location $AppDir
-  try {
-    & npm ci --omit=dev
-    & npm run db:migrate
-  } finally {
-    Pop-Location
-  }
-
-  Write-Host "[Deploy] Step 4: Starting '$ServiceName' and running HTTPS health check..."
-  Start-Service -Name $ServiceName
-  & "$PSScriptRoot\health-check.ps1" -Port $HttpsPort
-  Write-Host "[Deploy] Deployment of verified artifact $ActualHash SUCCEEDED."
-} catch {
-  Write-Warning "[Deploy] Deployment failed ($($_.Exception.Message)). Triggering AUTOMATIC ROLLBACK from $BackupDir..."
-  & "$PSScriptRoot\restore-test.ps1" -BackupFolder $BackupDir -AppDir $AppDir -ServiceName $ServiceName
-  throw "DEPLOYMENT_ROLLED_BACK: Automatic rollback completed after failure."
-}
+& $rootDeploy @forwardParams
+exit $LASTEXITCODE

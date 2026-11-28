@@ -1,582 +1,618 @@
 <#
 .SYNOPSIS
-  Sam_Att V2 Standalone - One-Click Windows Server 2025 Installer & Lifecycle Manager (Phase 2.7)
+    Sam_Att V2 Standalone - Windows Server 2025 Production Installer & Lifecycle Manager
 .DESCRIPTION
-  20-Step Production Installer for Sam_Att V2 Standalone on Windows Server 2025 (10.2.0.23):
-  - Modes: Preflight | FreshInstall | Repair | Upgrade | Uninstall
-  - Supports -WhatIf / -DryRun and Idempotent Lock (D:\Deployments\Sam_Att\install.lock)
-  - Creates standard Drive D directory hierarchy:
-      D:\WebApps\Sam_Att\App
-      D:\WebApps\Sam_Att\Config
-      D:\WebApps\Sam_Att\Logs
-      D:\WebApps\Sam_Att\Service
-      D:\WebApps\Sam_Att\Certs
-      D:\Backups\Sam_Att
-      D:\Deployments\Sam_Att
-      D:\Installers
-  - Interactive Configuration Wizard using Read-Host -AsSecureString for DB_PASSWORD
-  - Strictly Read-Only MySQL 10.1.0.201:3306 connection & schema compatibility verification
-  - Configures Inbound Firewall Rule 'Sam_Att V2 HTTPS 4101' (TCP 4101, configurable RemoteAddress)
-  - Installs & starts WinSW service 'SamAttV2Standalone' (Automatic Delayed Start)
-  - Never uses taskkill /F /IM node.exe, Stop-Process -Name node -Force, iisreset, or Restart-Computer
+    Supports 4 Modes:
+    - FreshInstall : Sets up standard directory structure on Drive D (D:\WebApps\Sam_Att),
+                     refuses to overwrite an existing installation unless -Mode Repair or Upgrade is used,
+                     runs Preflight, copies application files, prompts or generates production .env
+                     outside Git repository (D:\WebApps\Sam_Att\Config\.env) with lossless special-character
+                     password quoting and restricted NTFS ACLs, configures TLS certificates in
+                     D:\WebApps\Sam_Att\Certs, registers WinSW service SamAttV2Standalone, creates scoped
+                     Windows Firewall rule for TCP 4101 only (with explicit administrator-provided
+                     FirewallRemoteAddress), starts service, and runs strict HealthCheck.
+    - Upgrade      : Performs safe application-only upgrade via Deploy_Sam_Att.ps1.
+    - Repair       : Re-applies directory structure, NTFS ACLs, WinSW XML, scoped Firewall Rule,
+                     and restarts SamAttV2Standalone without overwriting Config\.env or Certs.
+    - PreflightOnly: Runs Preflight_Sam_Att.ps1 and exits without making changes.
+
+    Safety Rules (FIX 01 - FIX 07):
+    - Never modifies, migrates, drops, or seeds the production MySQL database.
+    - Requires explicit administrator confirmation for DbHost, DbPort, DbName, DbUser.
+    - Never opens any firewall port other than TCP 4101 and has NO broad default FirewallRemoteAddress.
+    - Keeps SCANNER_AUTO_SCHEDULER_ENABLED=false (Standby Mode) until explicit Cutover approval.
+    - Uses Shared Lifecycle Lock (D:\Deployments\Sam_Att\lifecycle.lock).
+    - In -DryRun or -WhatIf mode, performs zero modifications to disk, lock files, service, or firewall.
 #>
-[CmdletBinding(SupportsShouldProcess=$true)]
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
-  [ValidateSet("Preflight", "FreshInstall", "Repair", "Upgrade", "Uninstall")]
-  [string]$Mode = "FreshInstall",
-  [string]$RootDir = "D:\WebApps\Sam_Att",
-  [string]$BackupRootDir = "D:\Backups\Sam_Att",
-  [string]$DeploymentsDir = "D:\Deployments\Sam_Att",
-  [string]$InstallersDir = "D:\Installers",
-  [string]$RepoUrl = "https://github.com/jk9krnvb6g-ai/Sam_Att-V2-Standalone.git",
-  [string]$Branch = "main",
-  [string]$ServiceName = "SamAttV2Standalone",
-  [string]$ServiceAccount = "NT AUTHORITY\NetworkService",
-  [int]$HttpsPort = 4101,
-  [string]$ServerIp = "10.2.0.23",
-  [string]$DbHost = "10.1.0.201",
-  [int]$DbPort = 3306,
-  [string]$DbName = "samchuk_attendance_v2",
-  [string]$DbUser = "sam_att_app",
-  [string]$FirewallRemoteAddress = "LocalSubnet,10.0.0.0/8,192.168.0.0/16",
-  [string]$WinSwSourcePath = "",
-  [switch]$GenerateInternalSelfSignedCertIfMissing,
-  [switch]$NonInteractive,
-  [switch]$DryRun
+    [ValidateSet("FreshInstall", "Upgrade", "Repair", "PreflightOnly")]
+    [string]$Mode = "FreshInstall",
+    [string]$SamAttRoot = "D:\WebApps\Sam_Att",
+    [string]$BackupDir = "D:\Backups\Sam_Att",
+    [string]$DeploymentsDir = "D:\Deployments\Sam_Att",
+    [string]$ServiceName = "SamAttV2Standalone",
+    [string]$NodeExecutablePath = "",
+    [int]$HttpsPort = 4101,
+    [string]$ServerIpSan = "10.2.0.23",
+    [string]$DbHost = "10.1.0.201",
+    [int]$DbPort = 3306,
+    [string]$DbName = "samchuk_attendance_v2",
+    [string]$DbUser = "sam_att_app",
+    [string]$DbPassword = "",
+    [switch]$ConfirmDatabaseTarget,
+    [string]$HosOfficeHost = "10.1.0.201",
+    [int]$HosOfficePort = 3306,
+    [string]$HosOfficeDbName = "hosoffice",
+    [string]$HosOfficeUser = "hosoffice_readonly",
+    [string]$HosOfficePassword = "",
+    [string]$FirewallRemoteAddress = "",
+    [string]$ServiceAccount = "",
+    [string]$TrustInternalCaCertPath = "",
+    [switch]$GenerateSelfSignedCertIfMissing,
+    [switch]$TrustGeneratedCertInLocalMachineRoot,
+    [switch]$EnableScannerAutoScheduler,
+    [switch]$NonInteractive,
+    [switch]$DryRun
 )
 
-Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$AppDir = Join-Path $RootDir "App"
-$ConfigDir = Join-Path $RootDir "Config"
-$LogsDir = Join-Path $RootDir "Logs"
-$ServiceDir = Join-Path $RootDir "Service"
-$CertsDir = Join-Path $RootDir "Certs"
+$AppDir     = Join-Path $SamAttRoot "App"
+$ConfigDir  = Join-Path $SamAttRoot "Config"
+$LogsDir    = Join-Path $SamAttRoot "Logs"
+$ServiceDir = Join-Path $SamAttRoot "Service"
+$CertsDir   = Join-Path $SamAttRoot "Certs"
 $EnvFilePath = Join-Path $ConfigDir ".env"
-$CertPath = Join-Path $CertsDir "server.crt"
-$KeyPath = Join-Path $CertsDir "server.key"
-$Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$InstallLogPath = Join-Path $LogsDir "install_${Timestamp}.log"
-$ReportJsonPath = Join-Path $LogsDir "install_report_${Timestamp}.json"
-$LockFilePath = Join-Path $DeploymentsDir "install.lock"
+$CertPath    = Join-Path $CertsDir "server.crt"
+$KeyPath     = Join-Path $CertsDir "server.key"
+$LockFilePath = Join-Path $DeploymentsDir "lifecycle.lock"
 
-$StepResults = New-Object System.Collections.Generic.List[object]
+$isDryRunMode = ($DryRun -or $WhatIfPreference)
 
-function Write-InstallLog {
-  param(
-    [string]$Message,
-    [string]$Level = "INFO"
-  )
-  $SafeMsg = [regex]::Replace($Message, '(?i)(PASSWORD|SECRET|TOKEN|KEY)\s*=\s*[^\s;&"]+', '$1=***REDACTED***')
-  $Line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')][$Level] $SafeMsg"
-  try {
-    if (Test-Path $LogsDir) {
-      Add-Content -Path $InstallLogPath -Value $Line -Encoding UTF8 -ErrorAction SilentlyContinue
+if ($HttpsPort -ne 4101) {
+    throw "FORBIDDEN_FIREWALL_PORT: Production installer only permits TCP port 4101 (requested: $HttpsPort)."
+}
+
+function Write-StepHeader {
+    param([string]$Step, [string]$Message)
+    Write-Host ""
+    Write-Host "[$Step] $Message" -ForegroundColor Cyan
+}
+
+function Resolve-NodeExecutable {
+    param([string]$ExplicitPath)
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitPath)) {
+        if (Test-Path $ExplicitPath) { return (Resolve-Path $ExplicitPath).Path }
+        return $ExplicitPath
     }
-  } catch {}
-  $Color = if ($Level -eq "ERROR") { "Red" } elseif ($Level -eq "WARN") { "Yellow" } else { "Cyan" }
-  Write-Host $Line -ForegroundColor $Color
+    if (-not [string]::IsNullOrWhiteSpace($env:NODE_EXECUTABLE_PATH) -and (Test-Path $env:NODE_EXECUTABLE_PATH)) {
+        return (Resolve-Path $env:NODE_EXECUTABLE_PATH).Path
+    }
+    $candidates = @(
+        "C:\Program Files\nodejs\node.exe",
+        "D:\Program Files\nodejs\node.exe"
+    )
+    foreach ($cand in $candidates) {
+        if (Test-Path $cand) { return $cand }
+    }
+    $cmd = Get-Command node -ErrorAction SilentlyContinue
+    if ($null -ne $cmd) { return $cmd.Source }
+    return "C:\Program Files\nodejs\node.exe"
 }
 
-function Record-InstallerStep {
-  param(
-    [int]$StepNo,
-    [string]$StepTitle,
-    [string]$Status,
-    [string]$Detail
-  )
-  $StepResults.Add([ordered]@{
-    stepNumber  = $StepNo
-    title       = $StepTitle
-    status      = $Status
-    detail      = $Detail
-    timestamp   = (Get-Date).ToUniversalTime().ToString("o")
-  }) | Out-Null
-  $Color = if ($Status -eq "PASS") { "Green" } elseif ($Status -eq "SKIP" -or $Status -eq "WARN") { "Yellow" } else { "Red" }
-  Write-Host ("[{0,2}/20] {1,-44} [{2}] {3}" -f $StepNo, $StepTitle, $Status, $Detail) -ForegroundColor $Color
-  Write-InstallLog -Message "Step $StepNo ($StepTitle): [$Status] $Detail" -Level $(if ($Status -eq "FAIL") { "ERROR" } else { "INFO" })
+function New-CryptographicHexSecret {
+    param([int]$ByteLength = 32)
+    $bytes = New-Object byte[] $ByteLength
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($bytes)
+    $rng.Dispose()
+    return ([System.BitConverter]::ToString($bytes)).Replace("-", "").ToLowerInvariant()
 }
 
-function New-RandomHexSecret {
-  param([int]$ByteLength = 48)
-  $Bytes = New-Object byte[] $ByteLength
-  $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-  try {
-    $Rng.GetBytes($Bytes)
-  } finally {
-    $Rng.Dispose()
-  }
-  return ([System.BitConverter]::ToString($Bytes) -replace '-', '').ToLower()
+function Format-EnvValueSafe {
+    param([string]$RawVal)
+    if ($null -eq $RawVal) { return "" }
+    if ($RawVal -match "[\r\n\0]") {
+        throw "INVALID_ENV_VALUE: Value must not contain newline or null character."
+    }
+    if ($RawVal -eq "") { return "" }
+    if ($RawVal -match '[#$&"''\s\\;]') {
+        $escaped = $RawVal.Replace('\', '\\').Replace('"', '\"')
+        return "`"$escaped`""
+    }
+    return $RawVal
 }
 
-function ConvertFrom-SecureStringPlain {
-  param([System.Security.SecureString]$SecureValue)
-  if ($null -eq $SecureValue) { return "" }
-  $Bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($SecureValue)
-  try {
-    return [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($Bstr)
-  } finally {
-    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($Bstr)
-  }
+function Read-DotEnvFileSafe {
+    param([string]$Path)
+    $map = @{}
+    if (-not (Test-Path $Path)) { return $map }
+    $lines = Get-Content -Path $Path -Encoding UTF8
+    foreach ($line in $lines) {
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#")) { continue }
+        if ($trimmed -match "^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$") {
+            $k = $Matches[1].Trim()
+            $v = $Matches[2]
+            if ($v.Length -ge 2 -and $v.StartsWith('"') -and $v.EndsWith('"')) {
+                $inner = $v.Substring(1, $v.Length - 2)
+                $v = $inner.Replace('\"', '"').Replace('\\', '\')
+            } elseif ($v.Length -ge 2 -and $v.StartsWith("'") -and $v.EndsWith("'")) {
+                $inner = $v.Substring(1, $v.Length - 2)
+                $v = $inner.Replace("\'", "'").Replace('\\', '\')
+            } else {
+                $v = $v.Trim()
+            }
+            $map[$k] = $v
+        }
+    }
+    return $map
 }
 
-if ($Mode -eq "Preflight") {
-  $PreflightScript = Join-Path $PSScriptRoot "Preflight_Sam_Att.ps1"
-  & $PreflightScript -RootDir $RootDir -BackupRootDir $BackupRootDir -DeploymentsDir $DeploymentsDir -ServiceName $ServiceName -HttpsPort $HttpsPort -AllowMissingConfig -AllowMissingCerts
-  exit $LASTEXITCODE
+function Set-RestrictedFileAcl {
+    param(
+        [string]$TargetPath,
+        [string]$ExtraAccount,
+        [switch]$IsDirectory
+    )
+    if (-not (Test-Path $TargetPath)) { return }
+    $grantSuffix = if ($IsDirectory) { "(OI)(CI)F" } else { "F" }
+    $readSuffix  = if ($IsDirectory) { "(OI)(CI)RX" } else { "R" }
+
+    & icacls $TargetPath /inheritance:r | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "ICACLS_INHERITANCE_FAILED: icacls failed disabling inheritance on $TargetPath (ExitCode=$LASTEXITCODE)"
+    }
+    & icacls $TargetPath /grant:r "*S-1-5-18:${grantSuffix}" "*S-1-5-32-544:${grantSuffix}" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "ICACLS_GRANT_FAILED: icacls failed granting SYSTEM/Administrators on $TargetPath (ExitCode=$LASTEXITCODE)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ExtraAccount)) {
+        & icacls $TargetPath /grant:r "${ExtraAccount}:${readSuffix}" | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "ICACLS_SERVICE_ACCOUNT_FAILED: icacls failed granting $ExtraAccount on $TargetPath (ExitCode=$LASTEXITCODE)"
+        }
+    }
 }
 
-if ($Mode -eq "Uninstall") {
-  $UninstallScript = Join-Path $PSScriptRoot "Uninstall_Sam_Att.ps1"
-  & $UninstallScript -RootDir $RootDir -ServiceName $ServiceName
-  exit $LASTEXITCODE
+function Import-InternalRootCaSafely {
+    param([string]$CertFilePath)
+    if (-not (Test-Path $CertFilePath)) {
+        throw "CA_CERT_FILE_NOT_FOUND: Certificate file not found at $CertFilePath"
+    }
+    $certObj = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($CertFilePath)
+    $store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
+        [System.Security.Cryptography.X509Certificates.StoreName]::Root,
+        [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
+    )
+    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+    try {
+        $existing = $store.Certificates.Find(
+            [System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
+            $certObj.Thumbprint,
+            $false
+        )
+        if ($existing.Count -eq 0) {
+            $store.Add($certObj)
+        }
+    } finally {
+        $store.Close()
+    }
+    return $certObj.Thumbprint
 }
 
-Write-Host "======================================================================" -ForegroundColor Cyan
-Write-Host " Sam_Att V2 Standalone - 20-Step Production Installer (Mode: $Mode)" -ForegroundColor Cyan
-Write-Host "======================================================================" -ForegroundColor Cyan
-
-if ($DryRun) {
-  Write-Host "[DRY-RUN MODE] Simulating 20-step workflow without modifying service or files." -ForegroundColor Yellow
+# Handle PreflightOnly Mode immediately
+$preflightScript = Join-Path $PSScriptRoot "Preflight_Sam_Att.ps1"
+if ($Mode -eq "PreflightOnly") {
+    & $preflightScript -SamAttRoot $SamAttRoot -BackupDir $BackupDir -DeploymentsDir $DeploymentsDir -NodeExecutablePath $NodeExecutablePath -HttpsPort $HttpsPort -MysqlHost $DbHost -MysqlPort $DbPort
+    exit $LASTEXITCODE
 }
+
+# Handle Upgrade Mode by delegating to Deploy_Sam_Att.ps1
+if ($Mode -eq "Upgrade") {
+    $deployScript = Join-Path $PSScriptRoot "Deploy_Sam_Att.ps1"
+    if (-not (Test-Path $deployScript)) {
+        throw "DEPLOY_SCRIPT_NOT_FOUND: $deployScript not found."
+    }
+    $deployArgs = @{
+        SamAttRoot         = $SamAttRoot
+        BackupRootDir      = $BackupDir
+        DeploymentsDir     = $DeploymentsDir
+        ServiceName        = $ServiceName
+        HttpsPort          = $HttpsPort
+        HostName           = $ServerIpSan
+        NodeExecutablePath = $NodeExecutablePath
+    }
+    if ($isDryRunMode) { $deployArgs["DryRun"] = $true }
+    & $deployScript @deployArgs
+    exit $LASTEXITCODE
+}
+
+# FreshInstall Guard: Refuse to overwrite existing installation (FIX 07)
+if ($Mode -eq "FreshInstall") {
+    $existingPkg = Test-Path (Join-Path $AppDir "package.json")
+    $existingEnv = Test-Path $EnvFilePath
+    $existingSvc = $null -ne (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)
+    if ($existingPkg -or $existingEnv -or $existingSvc) {
+        throw "EXISTING_INSTALLATION_DETECTED: An existing installation was found (AppPackage=$existingPkg, ConfigEnv=$existingEnv, Service=$existingSvc). FreshInstall refuses to overwrite an existing installation. Use -Mode Repair or -Mode Upgrade."
+    }
+}
+
+# Firewall Scope Validation (FIX 02 - No broad default allowed!)
+if ([string]::IsNullOrWhiteSpace($FirewallRemoteAddress)) {
+    if ($NonInteractive -or $isDryRunMode) {
+        if ($isDryRunMode -and [string]::IsNullOrWhiteSpace($FirewallRemoteAddress)) {
+            $FirewallRemoteAddress = "10.2.0.0/24"
+            Write-Host "[DRY-RUN] No -FirewallRemoteAddress supplied; previewing with sample hospital scope '$FirewallRemoteAddress' (In real execution, -FirewallRemoteAddress is mandatory)." -ForegroundColor Yellow
+        } else {
+            throw "MISSING_FIREWALL_SCOPE: In -NonInteractive mode, you must explicitly specify -FirewallRemoteAddress (for example: -FirewallRemoteAddress '10.2.0.0/24,10.1.0.0/24'). Broad default firewall scopes are prohibited."
+        }
+    } else {
+        Write-Host ""
+        Write-Host "--- Windows Firewall Allowed Remote Network Scope (TCP Port 4101 Only) ---" -ForegroundColor Yellow
+        $inputScope = Read-Host "Enter allowed remote IP/CIDR scope (e.g. 10.2.0.0/24,10.1.0.0/24)"
+        if ([string]::IsNullOrWhiteSpace($inputScope)) {
+            throw "MISSING_FIREWALL_SCOPE: FirewallRemoteAddress cannot be empty. Installation aborted."
+        }
+        $FirewallRemoteAddress = $inputScope.Trim()
+    }
+}
+
+# Database Target Confirmation (FIX 06)
+if ($Mode -eq "FreshInstall") {
+    if ($NonInteractive) {
+        if (-not $ConfirmDatabaseTarget -and -not $isDryRunMode) {
+            throw "DATABASE_TARGET_CONFIRMATION_REQUIRED: In -NonInteractive FreshInstall mode, pass -ConfirmDatabaseTarget after verifying DbHost='$DbHost', DbPort=$DbPort, DbName='$DbName', DbUser='$DbUser'."
+        }
+        if ([string]::IsNullOrWhiteSpace($DbPassword) -and -not $isDryRunMode) {
+            throw "MISSING_DB_PASSWORD: In -NonInteractive FreshInstall mode, -DbPassword is required."
+        }
+    } elseif (-not $isDryRunMode) {
+        Write-Host ""
+        Write-Host "--- Production MySQL Database Target Verification (Read-Only Schema Policy) ---" -ForegroundColor Yellow
+        $inHost = Read-Host "MySQL Host [$DbHost]"
+        if (-not [string]::IsNullOrWhiteSpace($inHost)) { $DbHost = $inHost.Trim() }
+        $inPort = Read-Host "MySQL Port [$DbPort]"
+        if (-not [string]::IsNullOrWhiteSpace($inPort)) { $DbPort = [int]$inPort.Trim() }
+        $inName = Read-Host "MySQL Database Name [$DbName]"
+        if (-not [string]::IsNullOrWhiteSpace($inName)) { $DbName = $inName.Trim() }
+        $inUser = Read-Host "MySQL Username [$DbUser]"
+        if (-not [string]::IsNullOrWhiteSpace($inUser)) { $DbUser = $inUser.Trim() }
+
+        $confirmDb = Read-Host "Confirm connecting to MySQL ${DbHost}:${DbPort}/${DbName} as '${DbUser}'? (type YES to confirm)"
+        if ($confirmDb -cne "YES") {
+            throw "DATABASE_TARGET_NOT_CONFIRMED: Administrator did not confirm database target with 'YES'."
+        }
+
+        if ([string]::IsNullOrWhiteSpace($DbPassword)) {
+            $secPwd = Read-Host "Enter MySQL Password for $DbUser@$DbHost" -AsSecureString
+            $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secPwd)
+            $DbPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
+        if ([string]::IsNullOrWhiteSpace($HosOfficePassword)) {
+            $secHos = Read-Host "Enter HOSOffice MySQL Password for $HosOfficeUser@$HosOfficeHost (or press Enter to set later)" -AsSecureString
+            $bstr2 = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secHos)
+            $HosOfficePassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr2)
+            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr2)
+        }
+    }
+}
+
+$resolvedNodeExe = Resolve-NodeExecutable -ExplicitPath $NodeExecutablePath
+
+if ($isDryRunMode) {
+    Write-Host "=================================================================" -ForegroundColor Yellow
+    Write-Host " [DRY-RUN / WHATIF] Sam_Att V2 Standalone Installer ($Mode)" -ForegroundColor Yellow
+    Write-Host "=================================================================" -ForegroundColor Yellow
+    Write-Host " Target Root           : $SamAttRoot"
+    Write-Host " App Directory         : $AppDir"
+    Write-Host " Config File           : $EnvFilePath"
+    Write-Host " Certs Directory       : $CertsDir"
+    Write-Host " Backup Directory      : $BackupDir"
+    Write-Host " Lifecycle Lock Path   : $LockFilePath"
+    Write-Host " Node.js Executable    : $resolvedNodeExe"
+    Write-Host " Database Target       : ${DbUser}@${DbHost}:${DbPort}/${DbName}"
+    Write-Host " Firewall Rule         : TCP Port $HttpsPort ONLY -> Scope: $FirewallRemoteAddress"
+    Write-Host " Scanner AutoScheduler : $(if ($EnableScannerAutoScheduler) { 'true' } else { 'false (Standby Mode)' })"
+    Write-Host " Zero files, lock files, services, or firewall rules were modified." -ForegroundColor Green
+    exit 0
+}
+
+function Acquire-SharedLifecycleLock {
+    param([string]$Path, [string]$Operation)
+    $lockDir = Split-Path -Parent $Path
+    if (-not (Test-Path $lockDir)) {
+        New-Item -ItemType Directory -Path $lockDir -Force | Out-Null
+    }
+    if (Test-Path $Path) {
+        try {
+            $existing = Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+            $ownerPid = [int]$existing.pid
+            $proc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+            if ($null -ne $proc) {
+                throw "LIFECYCLE_LOCK_ACTIVE: Another lifecycle operation ($($existing.operation), lockId=$($existing.lockId), PID=$ownerPid) is currently running since $($existing.startedAt)."
+            }
+        } catch {
+            if ($_.Exception.Message -like "LIFECYCLE_LOCK_ACTIVE*") {
+                throw $_
+            }
+        }
+        Remove-Item $Path -Force -ErrorAction SilentlyContinue
+    }
+    $newLockId = "$Operation-$((Get-Date).ToString('yyyyMMddHHmmss'))-$PID"
+    $payload = @{
+        lockId    = $newLockId
+        operation = $Operation
+        pid       = $PID
+        startedAt = (Get-Date).ToString("o")
+        user      = [Environment]::UserName
+    }
+    $payload | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding UTF8
+    return @{ acquiredNew = $true; lockId = $newLockId }
+}
+
+function Release-SharedLifecycleLock {
+    param([string]$Path, [hashtable]$LockHandle)
+    if ($null -ne $LockHandle -and $LockHandle.acquiredNew -and (Test-Path $Path)) {
+        Remove-Item $Path -Force -ErrorAction SilentlyContinue
+    }
+}
+
+$lockHandle = Acquire-SharedLifecycleLock -Path $LockFilePath -Operation "INSTALL_$Mode"
 
 try {
-  # STEP 1: Check Administrator Privilege
-  $IsAdmin = $false
-  if ($env:OS -like "*Windows*") {
-    $Principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-    $IsAdmin = $Principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-  }
-  if (-not $IsAdmin -and -not $DryRun) {
-    Record-InstallerStep -StepNo 1 -StepTitle "Check Administrator Privilege" -Status "FAIL" -Detail "Administrator privileges required"
-    throw "ADMIN_PRIVILEGE_REQUIRED: Please run PowerShell as Administrator"
-  }
-  Record-InstallerStep -StepNo 1 -StepTitle "Check Administrator Privilege" -Status "PASS" -Detail "Elevated Administrator verified"
-
-  # STEP 2: Check Windows Server Version
-  if ($env:COMPUTERNAME -eq "FILESERVER") {
-    Record-InstallerStep -StepNo 2 -StepTitle "Check Windows Server Version" -Status "FAIL" -Detail "Forbidden host FILESERVER"
-    throw "FORBIDDEN_HOST_FILESERVER: Refusing to install on FILESERVER"
-  }
-  $OsCaption = try { (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption } catch { $env:OS }
-  Record-InstallerStep -StepNo 2 -StepTitle "Check Windows Server Version" -Status "PASS" -Detail "Host=$($env:COMPUTERNAME), OS=$OsCaption"
-
-  # STEP 3: Check PowerShell Version
-  if ($PSVersionTable.PSVersion.Major -lt 5) {
-    Record-InstallerStep -StepNo 3 -StepTitle "Check PowerShell Version" -Status "FAIL" -Detail "PowerShell $($PSVersionTable.PSVersion) < 5.1"
-    throw "POWERSHELL_VERSION_UNSUPPORTED: PowerShell 5.1 or higher is required"
-  }
-  Record-InstallerStep -StepNo 3 -StepTitle "Check PowerShell Version" -Status "PASS" -Detail "PowerShell v$($PSVersionTable.PSVersion)"
-
-  # STEP 4: Check Drive D & Free Disk Space
-  $DriveLetter = (Split-Path -Qualifier $RootDir).TrimEnd(':')
-  $DriveObj = Get-PSDrive -Name $DriveLetter -ErrorAction SilentlyContinue
-  if ($null -eq $DriveObj -and -not $DryRun) {
-    Record-InstallerStep -StepNo 4 -StepTitle "Check Drive D & Free Disk Space" -Status "FAIL" -Detail "Drive ${DriveLetter}: not found"
-    throw "DRIVE_NOT_FOUND: Drive ${DriveLetter}: is not available"
-  }
-  $FreeGB = if ($DriveObj) { [math]::Round(($DriveObj.Free / 1GB), 2) } else { 0 }
-  if ($FreeGB -lt 5 -and -not $DryRun) {
-    Record-InstallerStep -StepNo 4 -StepTitle "Check Drive D & Free Disk Space" -Status "FAIL" -Detail "Insufficient disk space (${FreeGB} GB free)"
-    throw "INSUFFICIENT_DISK_SPACE: Minimum 5 GB free space required on Drive ${DriveLetter}:"
-  }
-  Record-InstallerStep -StepNo 4 -StepTitle "Check Drive D & Free Disk Space" -Status "PASS" -Detail "Drive ${DriveLetter}: has ${FreeGB} GB free"
-
-  # STEP 5: Create Standard Directory Structure & Acquire Lock
-  $RequiredDirs = @($RootDir, $AppDir, $ConfigDir, $LogsDir, $ServiceDir, $CertsDir, $BackupRootDir, $DeploymentsDir, $InstallersDir)
-  if (-not $DryRun) {
-    foreach ($Dir in $RequiredDirs) {
-      if (-not (Test-Path $Dir)) {
-        New-Item -ItemType Directory -Path $Dir -Force | Out-Null
-      }
+    # Step 1: Run Pre-Flight Verification
+    Write-StepHeader "1/9" "Running Pre-Flight Verification..."
+    $allowPort = ($Mode -eq "Repair")
+    & $preflightScript -SamAttRoot $SamAttRoot -BackupDir $BackupDir -DeploymentsDir $DeploymentsDir -NodeExecutablePath $resolvedNodeExe -HttpsPort $HttpsPort -MysqlHost $DbHost -MysqlPort $DbPort -AllowPortOccupiedBySamAtt:$allowPort -SkipDatabaseSchemaCheck
+    if ($LASTEXITCODE -ne 0) {
+        throw "PREFLIGHT_FAILED: Pre-flight checks did not pass. Resolve blockers before continuing."
     }
-    if (Test-Path $LockFilePath) {
-      throw "INSTALL_LOCK_ACTIVE: Another installation is already holding $LockFilePath"
-    }
-    Set-Content -Path $LockFilePath -Value ("pid=$PID`r`nmode=$Mode`r`nstartedAt=" + (Get-Date).ToUniversalTime().ToString("o")) -Encoding UTF8
-    if ($env:OS -like "*Windows*") {
-      & icacls $CertsDir /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" "${ServiceAccount}:(OI)(CI)RX" 2>$null | Out-Null
-      & icacls $ConfigDir /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" "${ServiceAccount}:(OI)(CI)RX" 2>$null | Out-Null
-      & icacls $LogsDir /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" "${ServiceAccount}:(OI)(CI)M" 2>$null | Out-Null
-    }
-  }
-  Record-InstallerStep -StepNo 5 -StepTitle "Create Standard Directory Structure" -Status "PASS" -Detail "Verified standard hierarchy under $RootDir, $BackupRootDir, $DeploymentsDir"
 
-  # STEP 6: Check Git / Node.js / npm
-  $GitCmd = Get-Command git -ErrorAction SilentlyContinue
-  $NodeCmd = Get-Command node -ErrorAction SilentlyContinue
-  $NpmCmd = Get-Command npm -ErrorAction SilentlyContinue
-  if ((-not $GitCmd -or -not $NodeCmd -or -not $NpmCmd) -and -not $DryRun) {
-    Record-InstallerStep -StepNo 6 -StepTitle "Check Git / Node.js / npm" -Status "FAIL" -Detail "Missing git, node, or npm in PATH"
-    throw "MISSING_RUNTIME_TOOLS: Git, Node.js, and npm must be installed and available in PATH"
-  }
-  $NodeVer = if ($NodeCmd) { (& node -v) -join "" } else { "dry-run" }
-  $NpmVer = if ($NpmCmd) { (& npm -v) -join "" } else { "dry-run" }
-  Record-InstallerStep -StepNo 6 -StepTitle "Check Git / Node.js / npm" -Status "PASS" -Detail "Node=$NodeVer, npm=v$NpmVer"
-
-  # STEP 7: Check .NET / Visual C++ Runtime for ScannerReader
-  $DotnetX86 = "C:\Program Files (x86)\dotnet\dotnet.exe"
-  if (Test-Path $DotnetX86) {
-    Record-InstallerStep -StepNo 7 -StepTitle "Check .NET / VC++ Runtime for ScannerReader" -Status "PASS" -Detail "Found x86 .NET Runtime at $DotnetX86"
-  } else {
-    Record-InstallerStep -StepNo 7 -StepTitle "Check .NET / VC++ Runtime for ScannerReader" -Status "WARN" -Detail "x86 .NET Runtime not found yet (Scanner starts in Standby mode; install .NET 10.0 x86 before enabling ScannerSyncCli.exe)"
-  }
-
-  # STEP 8: Check Port 4101 Availability
-  $PortListener = Get-NetTCPConnection -LocalPort $HttpsPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($null -ne $PortListener) {
-    $OwnerPid = [int]$PortListener.OwningProcess
-    $ProcWmi = Get-CimInstance Win32_Process -Filter "ProcessId = $OwnerPid" -ErrorAction SilentlyContinue
-    $Cmd = if ($ProcWmi) { [string]$ProcWmi.CommandLine } else { "" }
-    if ($Cmd -notmatch "Sam_Att" -and $Cmd -notmatch "server\.ts") {
-      Record-InstallerStep -StepNo 8 -StepTitle "Check Port 4101 Availability" -Status "FAIL" -Detail "Port $HttpsPort occupied by foreign PID=$OwnerPid"
-      throw "PORT_4101_CONFLICT: TCP Port $HttpsPort is held by foreign process PID=$OwnerPid"
-    }
-  }
-  Record-InstallerStep -StepNo 8 -StepTitle "Check Port 4101 Availability" -Status "PASS" -Detail "HTTPS Port $HttpsPort ready"
-
-  # STEP 9: Clone or Update GitHub Repository
-  if (-not $DryRun) {
-    if (Test-Path (Join-Path $AppDir ".git")) {
-      Push-Location $AppDir
-      try {
-        & git fetch origin $Branch
-        & git checkout $Branch
-        & git pull --ff-only origin $Branch
-        if ($LASTEXITCODE -ne 0) {
-          throw "GIT_PULL_FAILED: git pull --ff-only origin $Branch failed"
+    # Step 2: Create Isolated Drive D Directory Structure & Restrict NTFS ACLs (FIX 06)
+    Write-StepHeader "2/9" "Creating Standard Directory Structure on Drive D and Applying NTFS ACLs..."
+    $dirsToCreate = @($SamAttRoot, $AppDir, $ConfigDir, $LogsDir, $ServiceDir, $CertsDir, $BackupDir, $DeploymentsDir)
+    foreach ($d in $dirsToCreate) {
+        if (-not (Test-Path $d)) {
+            New-Item -ItemType Directory -Path $d -Force | Out-Null
+            Write-Host "  Created directory: $d" -ForegroundColor Green
         }
-      } finally {
-        Pop-Location
-      }
-      Record-InstallerStep -StepNo 9 -StepTitle "Clone or Update GitHub Repository" -Status "PASS" -Detail "Updated existing repo in $AppDir ($Branch)"
-    } elseif (Test-Path (Join-Path $PSScriptRoot "package.json")) {
-      Copy-Item -Path (Join-Path $PSScriptRoot "*") -Destination $AppDir -Recurse -Force -Exclude @("node_modules")
-      Record-InstallerStep -StepNo 9 -StepTitle "Clone or Update GitHub Repository" -Status "PASS" -Detail "Copied release package from installer source to $AppDir"
+    }
+    Set-RestrictedFileAcl -TargetPath $ConfigDir -ExtraAccount $ServiceAccount -IsDirectory
+    Set-RestrictedFileAcl -TargetPath $CertsDir -ExtraAccount $ServiceAccount -IsDirectory
+
+    # Step 3: Stage Application Files into D:\WebApps\Sam_Att\App
+    Write-StepHeader "3/9" "Staging Application Files into $AppDir..."
+    $sourceRoot = $PSScriptRoot
+    $resolvedSource = (Resolve-Path $sourceRoot).Path.TrimEnd('\')
+    $resolvedTarget = (Resolve-Path $AppDir).Path.TrimEnd('\')
+
+    if ($resolvedSource -ne $resolvedTarget) {
+        $roboArgs = @(
+            $resolvedSource,
+            $resolvedTarget,
+            "/E",
+            "/XD", "node_modules", "logs",
+            "/XF", ".env", "*.sqlite", "*.sqlite-wal", "*.sqlite-shm", "*.key", "*.crt",
+            "/NFL", "/NDL", "/NJH", "/NJS", "/NC", "/NS"
+        )
+        & robocopy @roboArgs | Out-Null
+        if ($LASTEXITCODE -ge 8) {
+            throw "ROBOCOPY_STAGE_FAILED: Robocopy exited with error code $LASTEXITCODE"
+        }
+        Write-Host "  Application files copied to $AppDir" -ForegroundColor Green
     } else {
-      & git clone --branch $Branch $RepoUrl $AppDir
-      if ($LASTEXITCODE -ne 0) {
-        throw "GIT_CLONE_FAILED: Could not clone $RepoUrl to $AppDir"
-      }
-      Record-InstallerStep -StepNo 9 -StepTitle "Clone or Update GitHub Repository" -Status "PASS" -Detail "Cloned $RepoUrl ($Branch) into $AppDir"
+        Write-Host "  Running directly from target AppDir ($AppDir)" -ForegroundColor Gray
     }
-  } else {
-    Record-InstallerStep -StepNo 9 -StepTitle "Clone or Update GitHub Repository" -Status "SKIP" -Detail "DryRun mode"
-  }
 
-  # STEP 10: Verify Repository Integrity
-  $RequiredRepoFiles = @("package.json", "package-lock.json", "server.ts", "backend\src\server.ts", "ScannerReader\ScannerSyncCli.exe")
-  if (-not $DryRun) {
-    foreach ($Rel in $RequiredRepoFiles) {
-      if (-not (Test-Path (Join-Path $AppDir $Rel))) {
-        Record-InstallerStep -StepNo 10 -StepTitle "Verify Repository Integrity" -Status "FAIL" -Detail "Missing required file: $Rel"
-        throw "REPO_INTEGRITY_FAILED: Required file $Rel not found in $AppDir"
-      }
+    # Step 4: Configure External Production .env (D:\WebApps\Sam_Att\Config\.env) with Lossless Quoting & Strict ACL
+    Write-StepHeader "4/9" "Configuring External Production Environment ($EnvFilePath)..."
+    if (Test-Path $EnvFilePath) {
+        Write-Host "  Existing configuration found at $EnvFilePath (preserved without overwrite)." -ForegroundColor Green
+    } else {
+        if ([string]::IsNullOrWhiteSpace($HosOfficePassword)) {
+            $HosOfficePassword = $DbPassword
+        }
+        $jwtSecret     = New-CryptographicHexSecret -ByteLength 48
+        $scannerToken  = New-CryptographicHexSecret -ByteLength 32
+        $autoSchedStr  = if ($EnableScannerAutoScheduler) { "true" } else { "false" }
+
+        $envLines = @(
+            "# ============================================================================",
+            "# Sam_Att V2 Standalone - Production Configuration (Windows Server 2025)",
+            "# Generated: $((Get-Date).ToString('o'))",
+            "# Stored outside Git repository at: $EnvFilePath",
+            "# ============================================================================",
+            "NODE_ENV=production",
+            "SAM_ATT_DATA_MODE=REAL",
+            "SAM_ATT_DB_ENGINE=mysql",
+            "HOST=0.0.0.0",
+            "SAM_ATT_HTTPS_PORT=$HttpsPort",
+            "PUBLIC_BASE_PATH=/Sam_Att/",
+            "API_BASE_PATH=/api/Sam_Att",
+            "",
+            "# Standard Directory Paths on Drive D",
+            "SAM_ATT_ROOT=$(Format-EnvValueSafe $SamAttRoot)",
+            "SAM_ATT_APP_DIR=$(Format-EnvValueSafe $AppDir)",
+            "SAM_ATT_CONFIG_DIR=$(Format-EnvValueSafe $ConfigDir)",
+            "SAM_ATT_LOGS_DIR=$(Format-EnvValueSafe $LogsDir)",
+            "SAM_ATT_SERVICE_DIR=$(Format-EnvValueSafe $ServiceDir)",
+            "SAM_ATT_CERTS_DIR=$(Format-EnvValueSafe $CertsDir)",
+            "SAM_ATT_BACKUP_DIR=$(Format-EnvValueSafe $BackupDir)",
+            "SAM_ATT_DEPLOYMENTS_DIR=$(Format-EnvValueSafe $DeploymentsDir)",
+            "",
+            "# External TLS Certificate Paths",
+            "TLS_CERT_PATH=$(Format-EnvValueSafe $CertPath)",
+            "TLS_KEY_PATH=$(Format-EnvValueSafe $KeyPath)",
+            "",
+            "# Primary MySQL Database (samchuk_attendance_v2)",
+            "SAM_ATT_DB_HOST=$(Format-EnvValueSafe $DbHost)",
+            "SAM_ATT_DB_PORT=$DbPort",
+            "SAM_ATT_DB_NAME=$(Format-EnvValueSafe $DbName)",
+            "SAM_ATT_DB_USER=$(Format-EnvValueSafe $DbUser)",
+            "SAM_ATT_DB_PASSWORD=$(Format-EnvValueSafe $DbPassword)",
+            "",
+            "# HOSOffice MySQL Database (Read-Only Personnel Sync)",
+            "HOSOFFICE_DB_HOST=$(Format-EnvValueSafe $HosOfficeHost)",
+            "HOSOFFICE_DB_PORT=$HosOfficePort",
+            "HOSOFFICE_DB_NAME=$(Format-EnvValueSafe $HosOfficeDbName)",
+            "HOSOFFICE_DB_USER=$(Format-EnvValueSafe $HosOfficeUser)",
+            "HOSOFFICE_DB_PASSWORD=$(Format-EnvValueSafe $HosOfficePassword)",
+            "HOSOFFICE_HR_PERSON_TABLE=hr_person",
+            "HOSOFFICE_LIVE_PUSH_ENABLED=false",
+            "",
+            "# Cryptographic Secrets (CSPRNG Generated)",
+            "JWT_SECRET=$jwtSecret",
+            "SESSION_TTL_MINUTES=480",
+            "AUTH_RATE_LIMIT_WINDOW_MINUTES=15",
+            "AUTH_RATE_LIMIT_MAX_ATTEMPTS=5",
+            "SCANNER_INGEST_SHARED_TOKEN=$scannerToken",
+            "",
+            "# Fingerprint Scanner Configuration (Standby Mode prior to Cutover)",
+            "SCANNER_SYNC_ENABLED=true",
+            "SCANNER_AUTO_SCHEDULER_ENABLED=$autoSchedStr",
+            "SCANNER_READER_EXE_PATH=$(Format-EnvValueSafe (Join-Path $AppDir 'ScannerReader\ScannerSyncCli.exe'))",
+            "SCANNER_READER_TIMEOUT_MS=120000",
+            "SCANNER_READER_MAX_BUFFER_BYTES=33554432",
+            "SCANNER_SYNC_DAYS=3",
+            "SCANNER_SYNC_MAX_RANGE_DAYS=90",
+            "SCANNER_CLI_PREVIEW_MODE=true",
+            "",
+            "# GitHub Update Center",
+            "GITHUB_REPO=jk9krnvb6g-ai/Sam_Att-V2-Standalone",
+            "GITHUB_BRANCH=main"
+        )
+        $envLines -join "`r`n" | Set-Content -Path $EnvFilePath -Encoding UTF8
+        Write-Host "  Created production configuration at $EnvFilePath" -ForegroundColor Green
     }
-  }
-  Record-InstallerStep -StepNo 10 -StepTitle "Verify Repository Integrity" -Status "PASS" -Detail "Verified package.json, lockfile, server.ts, and ScannerReader binaries"
+    Set-RestrictedFileAcl -TargetPath $EnvFilePath -ExtraAccount $ServiceAccount
 
-  # STEP 11: Collect or Validate Production Configuration (D:\WebApps\Sam_Att\Config\.env)
-  if (-not $DryRun) {
-    if (-not (Test-Path $EnvFilePath)) {
-      $PlainDbPassword = $env:SAM_ATT_DB_PASSWORD
-      if ([string]::IsNullOrWhiteSpace($PlainDbPassword) -and (-not $NonInteractive)) {
-        Write-Host ""
-        Write-Host "--- Interactive Production Configuration Wizard ---" -ForegroundColor Cyan
-        $InputHost = Read-Host "MySQL Server Host [$DbHost]"
-        if (-not [string]::IsNullOrWhiteSpace($InputHost)) { $DbHost = $InputHost.Trim() }
-        $InputPort = Read-Host "MySQL Server Port [$DbPort]"
-        if (-not [string]::IsNullOrWhiteSpace($InputPort)) { $DbPort = [int]$InputPort.Trim() }
-        $InputDb = Read-Host "MySQL Database Name [$DbName]"
-        if (-not [string]::IsNullOrWhiteSpace($InputDb)) { $DbName = $InputDb.Trim() }
-        $InputUser = Read-Host "MySQL Username [$DbUser]"
-        if (-not [string]::IsNullOrWhiteSpace($InputUser)) { $DbUser = $InputUser.Trim() }
-        $SecPass = Read-Host "MySQL Password for '$DbUser'" -AsSecureString
-        $PlainDbPassword = ConvertFrom-SecureStringPlain -SecureValue $SecPass
-      }
-      if ([string]::IsNullOrWhiteSpace($PlainDbPassword)) {
-        throw "MISSING_DB_PASSWORD: Database password must be provided interactively or via SAM_ATT_DB_PASSWORD env var"
-      }
-
-      $JwtSecret = New-RandomHexSecret -ByteLength 48
-      $ScannerToken = New-RandomHexSecret -ByteLength 32
-
-      $EnvLines = @(
-        "NODE_ENV=production",
-        "HOST=0.0.0.0",
-        "PORT=$HttpsPort",
-        "SAM_ATT_HTTPS_PORT=$HttpsPort",
-        "PUBLIC_BASE_PATH=/Sam_Att/",
-        "API_BASE_PATH=/api/Sam_Att",
-        "SAM_ATT_ROOT=$RootDir",
-        "SAM_ATT_APP_DIR=$AppDir",
-        "SAM_ATT_CONFIG_DIR=$ConfigDir",
-        "SAM_ATT_LOGS_DIR=$LogsDir",
-        "SAM_ATT_SERVICE_DIR=$ServiceDir",
-        "SAM_ATT_CERTS_DIR=$CertsDir",
-        "SAM_ATT_BACKUP_DIR=$BackupRootDir",
-        "SAM_ATT_DEPLOYMENTS_DIR=$DeploymentsDir",
-        "TLS_CERT_PATH=$CertPath",
-        "TLS_KEY_PATH=$KeyPath",
-        "SAM_ATT_DATA_MODE=REAL",
-        "SAM_ATT_DB_ENGINE=mysql",
-        "SAM_ATT_DB_HOST=$DbHost",
-        "SAM_ATT_DB_PORT=$DbPort",
-        "SAM_ATT_DB_NAME=$DbName",
-        "SAM_ATT_DB_USER=$DbUser",
-        "SAM_ATT_DB_PASSWORD=$PlainDbPassword",
-        "JWT_SECRET=$JwtSecret",
-        "SESSION_TTL_MINUTES=480",
-        "AUTH_RATE_LIMIT_WINDOW_MINUTES=15",
-        "AUTH_RATE_LIMIT_MAX_ATTEMPTS=5",
-        "SCANNER_SYNC_ENABLED=false",
-        "SCANNER_AUTO_SCHEDULER_ENABLED=false",
-        "SCANNER_READER_EXE_PATH=$AppDir\ScannerReader\ScannerSyncCli.exe",
-        "SCANNER_SYNC_DAYS=3",
-        "SCANNER_SYNC_MAX_RANGE_DAYS=90",
-        "SCANNER_CLI_PREVIEW_MODE=true",
-        "SCANNER_INGEST_SHARED_TOKEN=$ScannerToken",
-        "HOSOFFICE_LIVE_PUSH_ENABLED=false",
-        "GITHUB_REPO=jk9krnvb6g-ai/Sam_Att-V2-Standalone",
-        "GITHUB_BRANCH=$Branch"
-      )
-      [System.IO.File]::WriteAllLines($EnvFilePath, $EnvLines, [System.Text.UTF8Encoding]::new($false))
-    }
-    Record-InstallerStep -StepNo 11 -StepTitle "Collect or Validate Production Config" -Status "PASS" -Detail "External config persisted at $EnvFilePath (Scanner Scheduler=Standby)"
-  } else {
-    Record-InstallerStep -StepNo 11 -StepTitle "Collect or Validate Production Config" -Status "SKIP" -Detail "DryRun mode"
-  }
-
-  # STEP 12: Test MySQL Network Connection (Read-Only TCP Probe)
-  if (-not $DryRun) {
-    $TcpClient = New-Object System.Net.Sockets.TcpClient
-    try {
-      $AsyncRes = $TcpClient.BeginConnect($DbHost, $DbPort, $null, $null)
-      $WaitOk = $AsyncRes.AsyncWaitHandle.WaitOne(4000, $false)
-      if (-not $WaitOk -or -not $TcpClient.Connected) {
-        throw "MYSQL_TCP_UNREACHABLE: Cannot connect to MySQL server ${DbHost}:${DbPort}"
-      }
-      $TcpClient.EndConnect($AsyncRes)
-    } finally {
-      $TcpClient.Close()
-    }
-    Record-InstallerStep -StepNo 12 -StepTitle "Test MySQL Connection (Read-Only)" -Status "PASS" -Detail "Reachable at ${DbHost}:${DbPort}"
-  } else {
-    Record-InstallerStep -StepNo 12 -StepTitle "Test MySQL Connection (Read-Only)" -Status "SKIP" -Detail "DryRun mode"
-  }
-
-  # STEP 13: Verify HTTPS Certificate & Private Key
-  if (-not $DryRun) {
-    if ((-not (Test-Path $CertPath)) -or (-not (Test-Path $KeyPath))) {
-      $AllowSelfSigned = [bool]$GenerateInternalSelfSignedCertIfMissing
-      if (-not $AllowSelfSigned -and (-not $NonInteractive)) {
-        $Ans = Read-Host "No TLS certificate found in $CertsDir. Generate internal hospital self-signed certificate for IP $ServerIp? (y/N)"
-        if ($Ans -match "^(y|yes)$") { $AllowSelfSigned = $true }
-      }
-      if ($AllowSelfSigned) {
+    # Step 5: Configure TLS Certificates & Strict Private Key ACL (FIX 01 & FIX 06)
+    Write-StepHeader "5/9" "Verifying TLS Certificates in $CertsDir..."
+    if ((Test-Path $CertPath) -and (Test-Path $KeyPath)) {
+        Write-Host "  Existing TLS certificate pair found at $CertsDir" -ForegroundColor Green
+    } elseif ($GenerateSelfSignedCertIfMissing) {
+        Write-Host "  Generating X.509 v3 Certificate with IP SAN ($ServerIpSan)..." -ForegroundColor Cyan
         Push-Location $AppDir
         try {
-          $GenScript = "import { ensureTlsCertificates } from './backend/src/server.ts'; ensureTlsCertificates(process.argv[1], process.argv[2], 'production', { allowExplicitGenerateInProduction: true, commonName: process.argv[3], extraIpSans: [process.argv[3]] });"
-          & node --import tsx -e $GenScript $CertPath $KeyPath $ServerIp
+            $genScript = "import { ensureTlsCertificates } from './backend/src/server.ts'; ensureTlsCertificates(process.argv[1], process.argv[2], 'production', { allowExplicitGenerateInProduction: true, commonName: process.argv[3], extraIpSans: [process.argv[3]] });"
+            & $resolvedNodeExe --import tsx -e $genScript $CertPath $KeyPath $ServerIpSan
+            if ($LASTEXITCODE -ne 0) {
+                throw "TLS_GENERATION_FAILED: Failed to generate X.509 certificate pair."
+            }
+            Write-Host "  Generated server.crt and server.key at $CertsDir" -ForegroundColor Green
         } finally {
-          Pop-Location
+            Pop-Location
         }
-      }
+    } else {
+        throw "MISSING_TLS_CERTIFICATES: Please place server.crt and server.key in $CertsDir, or re-run with -GenerateSelfSignedCertIfMissing."
     }
-    if ((-not (Test-Path $CertPath)) -or (-not (Test-Path $KeyPath))) {
-      Record-InstallerStep -StepNo 13 -StepTitle "Verify HTTPS Certificate & Private Key" -Status "FAIL" -Detail "Missing server.crt or server.key in $CertsDir"
-      throw "MISSING_TLS_CERTIFICATE: Place server.crt and server.key in $CertsDir or pass -GenerateInternalSelfSignedCertIfMissing"
-    }
-    Record-InstallerStep -StepNo 13 -StepTitle "Verify HTTPS Certificate & Private Key" -Status "PASS" -Detail "TLS certificate and key present in $CertsDir"
-  } else {
-    Record-InstallerStep -StepNo 13 -StepTitle "Verify HTTPS Certificate & Private Key" -Status "SKIP" -Detail "DryRun mode"
-  }
+    Set-RestrictedFileAcl -TargetPath $KeyPath -ExtraAccount $ServiceAccount
 
-  # STEP 14: Install Dependencies & Build Production
-  if (-not $DryRun) {
+    if (-not [string]::IsNullOrWhiteSpace($TrustInternalCaCertPath)) {
+        $thumb = Import-InternalRootCaSafely -CertFilePath $TrustInternalCaCertPath
+        Write-Host "  Trusted Internal CA Certificate in Cert:\LocalMachine\Root (Thumbprint: $thumb)" -ForegroundColor Green
+    } elseif ($TrustGeneratedCertInLocalMachineRoot -and (Test-Path $CertPath)) {
+        $thumb = Import-InternalRootCaSafely -CertFilePath $CertPath
+        Write-Host "  Trusted generated Server Certificate in Cert:\LocalMachine\Root (Thumbprint: $thumb)" -ForegroundColor Green
+    }
+
+    # Step 6: Install Dependencies, TypeCheck, Build Frontend, and Run Read-Only DB Preflight
+    Write-StepHeader "6/9" "Building Production Frontend and Running Read-Only Database Preflight..."
     Push-Location $AppDir
     try {
-      & npm ci
-      if ($LASTEXITCODE -ne 0) { throw "NPM_CI_FAILED: npm ci exited with code $LASTEXITCODE" }
-      & npm run typecheck
-      if ($LASTEXITCODE -ne 0) { throw "TYPECHECK_FAILED: npm run typecheck failed" }
-      & npm run build
-      if ($LASTEXITCODE -ne 0) { throw "VITE_BUILD_FAILED: npm run build failed" }
+        $env:SAM_ATT_ENV_PATH = $EnvFilePath
+        if (-not (Test-Path (Join-Path $AppDir "node_modules"))) {
+            Write-Host "  Running npm ci..." -ForegroundColor Cyan
+            & npm ci
+            if ($LASTEXITCODE -ne 0) { throw "NPM_CI_FAILED: npm ci exited with code $LASTEXITCODE" }
+        }
+        Write-Host "  Running npm run typecheck..." -ForegroundColor Cyan
+        & npm run typecheck
+        if ($LASTEXITCODE -ne 0) { throw "TYPECHECK_FAILED: TypeScript verification failed." }
+
+        Write-Host "  Running npm run build..." -ForegroundColor Cyan
+        & npm run build
+        if ($LASTEXITCODE -ne 0) { throw "VITE_BUILD_FAILED: Frontend production build failed." }
+
+        Write-Host "  Running Read-Only Database Preflight (npm run db:preflight)..." -ForegroundColor Cyan
+        & npm run db:preflight
+        if ($LASTEXITCODE -ne 0) {
+            throw "DATABASE_PREFLIGHT_FAILED: Production MySQL database schema check failed. No changes were made to the database."
+        }
     } finally {
-      Pop-Location
-    }
-    Record-InstallerStep -StepNo 14 -StepTitle "Install Dependencies & Build Production" -Status "PASS" -Detail "npm ci, typecheck, and vite build succeeded"
-  } else {
-    Record-InstallerStep -StepNo 14 -StepTitle "Install Dependencies & Build Production" -Status "SKIP" -Detail "DryRun mode"
-  }
-
-  # STEP 15: Verify Database Schema Compatibility (Read-Only)
-  if (-not $DryRun) {
-    Push-Location $AppDir
-    try {
-      $env:SAM_ATT_ENV_PATH = $EnvFilePath
-      & npm run db:preflight
-      if ($LASTEXITCODE -ne 0) {
-        throw "DB_SCHEMA_PREFLIGHT_FAILED: Read-only database preflight check failed"
-      }
-    } finally {
-      Pop-Location
-    }
-    Record-InstallerStep -StepNo 15 -StepTitle "Verify Database Schema Compatibility" -Status "PASS" -Detail "Read-only schema preflight passed (zero DDL/DML executed)"
-  } else {
-    Record-InstallerStep -StepNo 15 -StepTitle "Verify Database Schema Compatibility" -Status "SKIP" -Detail "DryRun mode"
-  }
-
-  # STEP 16: Run Smoke Test (Validate Production Config & Dist Bundle)
-  if (-not $DryRun) {
-    $DistIndexPath = Join-Path $AppDir "dist\index.html"
-    if (-not (Test-Path $DistIndexPath)) {
-      throw "SMOKE_TEST_DIST_MISSING: dist\index.html not found after build"
-    }
-    Push-Location $AppDir
-    try {
-      $env:SAM_ATT_ENV_PATH = $EnvFilePath
-      $env:NODE_ENV = "production"
-      & node --import tsx -e "import { loadConfig, validateProductionConfig } from './backend/src/config/env.ts'; validateProductionConfig(loadConfig());"
-      if ($LASTEXITCODE -ne 0) {
-        throw "SMOKE_TEST_CONFIG_INVALID: validateProductionConfig failed"
-      }
-    } finally {
-      Pop-Location
-    }
-    Record-InstallerStep -StepNo 16 -StepTitle "Run Smoke Test" -Status "PASS" -Detail "Production config and dist/index.html verified"
-  } else {
-    Record-InstallerStep -StepNo 16 -StepTitle "Run Smoke Test" -Status "SKIP" -Detail "DryRun mode"
-  }
-
-  # STEP 17: Configure Windows Firewall Rule Port 4101
-  $FirewallDisplayName = "Sam_Att V2 HTTPS 4101"
-  if (-not $DryRun) {
-    $ExistingFw = @(Get-NetFirewallRule -DisplayName $FirewallDisplayName -ErrorAction SilentlyContinue)
-    if ($ExistingFw.Count -gt 0) {
-      Remove-NetFirewallRule -DisplayName $FirewallDisplayName -ErrorAction SilentlyContinue
-    }
-    $RemoteAddrs = @($FirewallRemoteAddress -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
-    New-NetFirewallRule -DisplayName $FirewallDisplayName `
-      -Direction Inbound `
-      -Protocol TCP `
-      -LocalPort $HttpsPort `
-      -Action Allow `
-      -Profile Domain,Private `
-      -RemoteAddress $RemoteAddrs `
-      -Description "Allow HTTPS access to Sam_Att V2 Standalone on TCP port 4101" | Out-Null
-    Record-InstallerStep -StepNo 17 -StepTitle "Configure Windows Firewall Rule Port 4101" -Status "PASS" -Detail "Rule '$FirewallDisplayName' active (RemoteAddress=$FirewallRemoteAddress)"
-  } else {
-    Record-InstallerStep -StepNo 17 -StepTitle "Configure Windows Firewall Rule Port 4101" -Status "SKIP" -Detail "DryRun mode"
-  }
-
-  # STEP 18: Install & Start Windows Service (SamAttV2Standalone via WinSW)
-  if (-not $DryRun) {
-    $ServiceExe = Join-Path $ServiceDir "$ServiceName.exe"
-    $ServiceXml = Join-Path $ServiceDir "$ServiceName.xml"
-    $TemplateXml = Join-Path $AppDir "scripts\winsw-sam-att.xml"
-    if (Test-Path $TemplateXml) {
-      Copy-Item -Path $TemplateXml -Destination $ServiceXml -Force
-    }
-    if (-not (Test-Path $ServiceExe)) {
-      $CandidateWinSw = @(
-        $WinSwSourcePath,
-        (Join-Path $InstallersDir "WinSW-x64.exe"),
-        (Join-Path $ServiceDir "WinSW-x64.exe"),
-        (Join-Path $AppDir "bin\WinSW-x64.exe")
-      ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and (Test-Path $_) } | Select-Object -First 1
-      if ($CandidateWinSw) {
-        Copy-Item -Path $CandidateWinSw -Destination $ServiceExe -Force
-      }
-    }
-    if (-not (Test-Path $ServiceExe)) {
-      Record-InstallerStep -StepNo 18 -StepTitle "Install & Start Windows Service" -Status "FAIL" -Detail "Missing WinSW binary at $ServiceExe (place WinSW-x64.exe in $InstallersDir or $ServiceDir)"
-      throw "MISSING_WINSW_EXECUTABLE: Place WinSW-x64.exe at $InstallersDir\WinSW-x64.exe or $ServiceExe"
+        Pop-Location
     }
 
-    $ExistingSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($null -ne $ExistingSvc) {
-      if ($ExistingSvc.Status -ne "Stopped") {
-        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 3
-      }
-      & $ServiceExe uninstall | Out-Null
+    # Step 7: Configure Scoped Windows Firewall Rule for TCP Port 4101 ONLY (FIX 02)
+    Write-StepHeader "7/9" "Configuring Scoped Windows Firewall Rule (TCP Port $HttpsPort Only)..."
+    $ruleName = "Sam_Att V2 HTTPS $HttpsPort"
+    $remoteAddresses = ($FirewallRemoteAddress -split ",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+    if ($remoteAddresses.Count -eq 0) {
+        throw "INVALID_FIREWALL_SCOPE: FirewallRemoteAddress resolved to an empty address list."
     }
-    & $ServiceExe install
-    if ($LASTEXITCODE -ne 0) { throw "WINSW_INSTALL_FAILED: WinSW install returned $LASTEXITCODE" }
-    & $ServiceExe start
-    Start-Sleep -Seconds 4
-    $SvcNow = Get-Service -Name $ServiceName -ErrorAction Stop
-    if ($SvcNow.Status -ne "Running") {
-      throw "SERVICE_START_FAILED: Windows Service '$ServiceName' is in state '$($SvcNow.Status)'"
+    $existingRule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+    if ($null -ne $existingRule) {
+        Set-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $HttpsPort -RemoteAddress $remoteAddresses -Enabled True | Out-Null
+        Write-Host "  Updated Windows Firewall Rule '$ruleName' (RemoteAddress: $($remoteAddresses -join ', '))" -ForegroundColor Green
+    } else {
+        New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Action Allow -Protocol TCP -LocalPort $HttpsPort -RemoteAddress $remoteAddresses -Profile Domain,Private -Description "Sam_Att V2 Standalone HTTPS Port $HttpsPort (Samchuk Hospital)" | Out-Null
+        Write-Host "  Created Windows Firewall Rule '$ruleName' (RemoteAddress: $($remoteAddresses -join ', '))" -ForegroundColor Green
     }
-    Record-InstallerStep -StepNo 18 -StepTitle "Install & Start Windows Service" -Status "PASS" -Detail "Service '$ServiceName' installed and Running"
-  } else {
-    Record-InstallerStep -StepNo 18 -StepTitle "Install & Start Windows Service" -Status "SKIP" -Detail "DryRun mode"
-  }
 
-  # STEP 19: Run Post-Install Health Check
-  if (-not $DryRun) {
-    $HealthScript = Join-Path $AppDir "HealthCheck_Sam_Att.ps1"
-    if (-not (Test-Path $HealthScript)) {
-      $HealthScript = Join-Path $PSScriptRoot "HealthCheck_Sam_Att.ps1"
-    }
-    & $HealthScript -Port $HttpsPort -ServiceName $ServiceName -ExpectedDbName $DbName
-    if ($LASTEXITCODE -ne 0) {
-      throw "POST_INSTALL_HEALTH_CHECK_FAILED: HealthCheck_Sam_Att.ps1 failed"
-    }
-    Record-InstallerStep -StepNo 19 -StepTitle "Run Post-Install Health Check" -Status "PASS" -Detail "https://127.0.0.1:${HttpsPort}/Sam_Att/ & /api/Sam_Att/health returned 200 OK"
-  } else {
-    Record-InstallerStep -StepNo 19 -StepTitle "Run Post-Install Health Check" -Status "SKIP" -Detail "DryRun mode"
-  }
+    # Step 8: Configure & Register WinSW Windows Service (SamAttV2Standalone) with Configurable NodeExecutablePath (FIX 04)
+    Write-StepHeader "8/9" "Configuring WinSW Windows Service ($ServiceName)..."
+    $templateXmlPath = Join-Path $AppDir "scripts\winsw-sam-att.xml"
+    $targetXmlPath   = Join-Path $ServiceDir "$ServiceName.xml"
+    $targetExePath   = Join-Path $ServiceDir "$ServiceName.exe"
 
-  # STEP 20: Generate Installation Summary Report
-  $SummaryReport = [ordered]@{
-    applicationName          = "Sam_Att V2 Standalone"
-    mode                     = $Mode
-    dryRun                   = [bool]$DryRun
-    status                   = "SUCCESS"
-    completedAtIso           = (Get-Date).ToUniversalTime().ToString("o")
-    serverHost               = $env:COMPUTERNAME
-    serverIp                 = $ServerIp
-    httpsPort                = $HttpsPort
-    frontendUrl              = "https://${ServerIp}:${HttpsPort}/Sam_Att/"
-    apiHealthUrl             = "https://${ServerIp}:${HttpsPort}/api/Sam_Att/health"
-    serviceName              = $ServiceName
-    rootDirectory            = $RootDir
-    appDirectory             = $AppDir
-    configEnvPath            = $EnvFilePath
-    certsDirectory           = $CertsDir
-    logsDirectory            = $LogsDir
-    backupsDirectory         = $BackupRootDir
-    deploymentsDirectory     = $DeploymentsDir
-    databaseHost             = $DbHost
-    databasePort             = $DbPort
-    databaseName             = $DbName
-    scannerSchedulerStandby  = $true
-    steps                    = $StepResults
-  }
-  if (-not $DryRun -and (Test-Path $LogsDir)) {
-    $JsonText = $SummaryReport | ConvertTo-Json -Depth 6
-    [System.IO.File]::WriteAllText($ReportJsonPath, $JsonText, [System.Text.UTF8Encoding]::new($false))
-  }
-  Record-InstallerStep -StepNo 20 -StepTitle "Generate Installation Summary Report" -Status "PASS" -Detail "Report written to $ReportJsonPath"
+    if (Test-Path $templateXmlPath) {
+        $rawXml = Get-Content -Path $templateXmlPath -Raw -Encoding UTF8
+        $escapedNodePath = [System.Security.SecurityElement]::Escape($resolvedNodeExe)
+        $updatedXml = [regex]::Replace($rawXml, "<executable>.*?</executable>", "<executable>$escapedNodePath</executable>")
+        Set-Content -Path $targetXmlPath -Value $updatedXml -Encoding UTF8
+        Write-Host "  Deployed WinSW configuration to $targetXmlPath (NodeExecutable=$resolvedNodeExe)" -ForegroundColor Green
+    }
 
-  Write-Host "======================================================================" -ForegroundColor Green
-  Write-Host " INSTALLATION COMPLETED SUCCESSFULLY" -ForegroundColor Green
-  Write-Host "  Frontend URL : https://${ServerIp}:${HttpsPort}/Sam_Att/" -ForegroundColor Green
-  Write-Host "  Health API   : https://${ServerIp}:${HttpsPort}/api/Sam_Att/health" -ForegroundColor Green
-  Write-Host "  Service Name : $ServiceName (Automatic Delayed Start)" -ForegroundColor Green
-  Write-Host "  Scanner Mode : STANDBY (SCANNER_AUTO_SCHEDULER_ENABLED=false until Cutover)" -ForegroundColor Yellow
-  Write-Host "======================================================================" -ForegroundColor Green
-  exit 0
-} catch {
-  $ErrMsg = $_.Exception.Message
-  Write-InstallLog -Message "INSTALLATION FAILED: $ErrMsg" -Level "ERROR"
-  exit 1
+    $bundledWinsw = Join-Path $AppDir "Service\WinSW-x64.exe"
+    if ((-not (Test-Path $targetExePath)) -and (Test-Path $bundledWinsw)) {
+        Copy-Item -Path $bundledWinsw -Destination $targetExePath -Force
+    }
+
+    if (Test-Path $targetExePath) {
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($null -eq $svc) {
+            & $targetExePath install $targetXmlPath | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "WINSW_INSTALL_FAILED: WinSW service installation failed with exit code $LASTEXITCODE"
+            }
+            Write-Host "  Registered Windows Service '$ServiceName'" -ForegroundColor Green
+        }
+        Start-Service -Name $ServiceName -ErrorAction Stop
+        Write-Host "  Started Windows Service '$ServiceName'" -ForegroundColor Green
+        Start-Sleep -Seconds 5
+    } else {
+        throw "WINSW_BINARY_MISSING: WinSW binary not found at $targetExePath. Place WinSW-x64.exe as $targetExePath and run Install_Sam_Att.ps1 -Mode Repair."
+    }
+
+    # Step 9: Post-Install Strict Health Verification (FIX 01 & FIX 03)
+    Write-StepHeader "9/9" "Running Strict Production Health Check..."
+    $healthScript = Join-Path $AppDir "HealthCheck_Sam_Att.ps1"
+    if (Test-Path $healthScript) {
+        & $healthScript -HostName $ServerIpSan -Port $HttpsPort -ServiceName $ServiceName -AppDir $AppDir
+        if ($LASTEXITCODE -ne 0) {
+            throw "POST_INSTALL_HEALTHCHECK_FAILED: Service started, but strict HTTPS/Service HealthCheck did not pass."
+        }
+    }
+
+    Write-Host ""
+    Write-Host "=================================================================" -ForegroundColor Green
+    Write-Host " Sam_Att V2 Standalone Installation ($Mode) Completed." -ForegroundColor Green
+    Write-Host " URL: https://${ServerIpSan}:${HttpsPort}/Sam_Att/" -ForegroundColor Green
+    Write-Host "=================================================================" -ForegroundColor Green
+    exit 0
 } finally {
-  if (Test-Path $LockFilePath) {
-    Remove-Item -Path $LockFilePath -Force -ErrorAction SilentlyContinue
-  }
+    Release-SharedLifecycleLock -Path $LockFilePath -LockHandle $lockHandle
 }

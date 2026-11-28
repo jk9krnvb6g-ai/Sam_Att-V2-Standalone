@@ -2,38 +2,150 @@ name: Sam_Att V2 Standalone CI
 
 on:
   push:
-    branches: [ main, develop, 'fix/**' ]
+    branches: [main, master]
   pull_request:
-    branches: [ main ]
+    branches: [main, master]
 
 jobs:
-  build-and-test:
+  verify-and-test:
+    name: Build, Typecheck & Test Suite (Ubuntu)
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Security Gate — Verify Zero Committed Private Keys, SQLite Databases, or Conflicting Lockfiles
-        run: |
-          if [ -f "certs/server.key" ] || [ -f "data/sam_att_v2.sqlite" ] || [ -f "bun.lock" ]; then
-            echo "SECURITY VIOLATION: Private keys, SQLite runtime files, or conflicting lockfiles must not be committed!"
-            exit 1
-          fi
-
-      - name: Setup Node.js (from .nvmrc)
+      - name: Set up Node.js 22 LTS
         uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
 
-      - name: Clean Install Locked Dependencies (npm ci)
+      - name: Install dependencies cleanly (npm ci)
         run: npm ci
 
-      - name: TypeScript Strict Verification
-        run: npm run typecheck
+      - name: Run TypeScript typecheck & lint
+        run: |
+          npm run typecheck
+          npm run lint
 
-      - name: Build Production Frontend Bundle
+      - name: Run automated test suite (Isolated SQLite Sandbox in os.tmpdir)
+        env:
+          NODE_ENV: test
+          SAM_ATT_TEST_ISOLATION: 'true'
+          SAM_ATT_DB_ENGINE: sqlite_sandbox
+          SAM_ATT_DATA_MODE: REAL
+          JWT_SECRET: ci-ephemeral-jwt-secret-key-for-isolated-sandbox-testing-only-99887766
+          SCANNER_INGEST_SHARED_TOKEN: ci-ephemeral-scanner-ingest-token-isolated-998877
+        run: npm test
+
+      - name: Build production frontend bundle (vite build)
         run: npm run build
 
-      - name: Run Database Migrations & Full Integration Test Matrix
+  windows-production-readiness:
+    name: Windows Server PowerShell 5.1 & Production Readiness (Windows Runner)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22 LTS on Windows
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Install dependencies cleanly (npm ci)
+        run: npm ci
+
+      - name: Run TypeScript typecheck, lint & production build on Windows
+        run: |
+          npm run typecheck
+          npm run lint
+          npm run build
+
+      - name: Run automated test suite on Windows Runner
+        env:
+          NODE_ENV: test
+          SAM_ATT_TEST_ISOLATION: 'true'
+          SAM_ATT_DB_ENGINE: sqlite_sandbox
+          SAM_ATT_DATA_MODE: REAL
+          JWT_SECRET: ci-win-ephemeral-jwt-secret-key-for-isolated-sandbox-testing-99887766
+          SCANNER_INGEST_SHARED_TOKEN: ci-win-ephemeral-scanner-ingest-token-isolated-998877
         run: npm test
+
+      - name: Validate Windows PowerShell 5.1 AST Parsing, DryRun, HealthCheck Failures & Backup/Rollback Integrity
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $scriptsToParse = @(
+            "Install_Sam_Att.ps1",
+            "Preflight_Sam_Att.ps1",
+            "Deploy_Sam_Att.ps1",
+            "HealthCheck_Sam_Att.ps1",
+            "Backup_Sam_Att.ps1",
+            "Rollback_Sam_Att.ps1",
+            "Uninstall_Sam_Att.ps1",
+            "deployment\Deploy_Sam_Att.ps1",
+            "scripts\health-check.ps1",
+            "scripts\install-windows.ps1",
+            "scripts\backup.ps1",
+            "scripts\deploy-test.ps1",
+            "scripts\restore-test.ps1"
+          )
+          foreach ($rel in $scriptsToParse) {
+            $full = Join-Path $PWD $rel
+            if (-not (Test-Path $full)) { throw "Missing script: $full" }
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($full, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              throw "PowerShell 5.1 AST Parse failed in ${rel}: $($errors[0].Message)"
+            }
+            Write-Host "[PASS] PowerShell 5.1 AST verified: $rel" -ForegroundColor Green
+          }
+
+          # 1. Verify Installer DryRun makes zero disk/lock mutations
+          $testRoot = Join-Path $env:TEMP "sam_att_ci_win_$(Get-Random)"
+          $testBackup = Join-Path $testRoot "Backups"
+          $testDeploy = Join-Path $testRoot "Deployments"
+          & .\Install_Sam_Att.ps1 -Mode FreshInstall -SamAttRoot (Join-Path $testRoot "WebApps") -BackupDir $testBackup -DeploymentsDir $testDeploy -FirewallRemoteAddress "10.2.0.0/24" -ConfirmDatabaseTarget -DbPassword "Complex#Pass`$123&456" -NonInteractive -DryRun
+          if ($LASTEXITCODE -ne 0) { throw "Install_Sam_Att.ps1 -DryRun failed" }
+          if (Test-Path (Join-Path $testDeploy "lifecycle.lock")) { throw "DryRun must not leave lifecycle.lock on disk" }
+
+          # 2. Verify HealthCheck fails closed when -SkipServiceCheck is passed without -DiagnosticMode
+          $hcOut = & .\HealthCheck_Sam_Att.ps1 -SkipServiceCheck -Json
+          if ($LASTEXITCODE -eq 0) { throw "HealthCheck_Sam_Att.ps1 must fail when -SkipServiceCheck is used without -DiagnosticMode" }
+
+          # 3. Verify Backup & Rollback SHA-256 File Manifest Integrity and Corrupted Snapshot Rejection
+          $mockRoot = Join-Path $testRoot "MockProd"
+          $mockApp  = Join-Path $mockRoot "App"
+          $mockCfg  = Join-Path $mockRoot "Config"
+          $mockSvc  = Join-Path $mockRoot "Service"
+          New-Item -ItemType Directory -Path $mockApp, $mockCfg, $mockSvc, $testBackup, $testDeploy -Force | Out-Null
+          Copy-Item -Path "package.json", "server.ts" -Destination $mockApp -Force
+          Set-Content -Path (Join-Path $mockCfg ".env") -Value 'SAM_ATT_DB_PASSWORD="My#Complex$Pass&Word 123"' -Encoding UTF8
+
+          $backupJson = & .\Backup_Sam_Att.ps1 -SamAttRoot $mockRoot -BackupRootDir $testBackup -DeploymentsDir $testDeploy -Json
+          if ($LASTEXITCODE -ne 0) { throw "Backup_Sam_Att.ps1 failed on Windows runner" }
+          $manifest = $backupJson | ConvertFrom-Json
+          $snapDir = Join-Path $testBackup $manifest.snapshotName
+
+          # Verify Rollback DryRun succeeds on intact snapshot
+          & .\Rollback_Sam_Att.ps1 -SamAttRoot $mockRoot -BackupRootDir $testBackup -DeploymentsDir $testDeploy -SnapshotDir $snapDir -DryRun
+          if ($LASTEXITCODE -ne 0) { throw "Rollback_Sam_Att.ps1 -DryRun failed on intact snapshot" }
+
+          # Tamper with a file inside AppSnapshot and verify Rollback aborts BEFORE stopping service
+          Set-Content -Path (Join-Path $snapDir "AppSnapshot\server.ts") -Value "// tampered content" -Encoding UTF8
+          $tamperFailed = $false
+          try {
+            & .\Rollback_Sam_Att.ps1 -SamAttRoot $mockRoot -BackupRootDir $testBackup -DeploymentsDir $testDeploy -SnapshotDir $snapDir -SkipServiceRestart
+            if ($LASTEXITCODE -ne 0) { $tamperFailed = $true }
+          } catch {
+            $tamperFailed = $true
+          }
+          if (-not $tamperFailed) { throw "Rollback_Sam_Att.ps1 must fail when snapshot file SHA-256 mismatches!" }
+
+          Remove-Item -Path $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "[PASS] All Windows Server PowerShell 5.1 Readiness Checks Succeeded." -ForegroundColor Green

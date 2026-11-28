@@ -1530,11 +1530,15 @@ settingsRouter.post(
         return;
       }
 
-      const windowsScriptPath = 'C:\\inetpub\\wwwroot\\Sam_Att\\deployment\\Deploy_Sam_Att.bat';
+      const cfg = loadConfig();
+      const primaryProdBatPath = path.win32.join(cfg.paths.appDir, 'deployment', 'Deploy_Sam_Att.bat');
+      const legacyWindowsBatPath = 'C:\\inetpub\\wwwroot\\Sam_Att\\deployment\\Deploy_Sam_Att.bat';
       const localScriptPath = path.resolve(process.cwd(), 'deployment', 'Deploy_Sam_Att.bat');
-      const resolvedScriptPath = fs.existsSync(windowsScriptPath)
-        ? windowsScriptPath
-        : localScriptPath;
+      const resolvedScriptPath = fs.existsSync(primaryProdBatPath)
+        ? primaryProdBatPath
+        : fs.existsSync(legacyWindowsBatPath)
+          ? legacyWindowsBatPath
+          : localScriptPath;
       const resolvedPs1Path = path.join(path.dirname(resolvedScriptPath), 'Deploy_Sam_Att.ps1');
       const resolvedAppDir = path.dirname(path.dirname(resolvedScriptPath));
 
@@ -1542,7 +1546,7 @@ settingsRouter.post(
         res.status(404).json({
           status: 'FAILED',
           error: 'DEPLOY_SCRIPT_NOT_FOUND',
-          message: `ไม่พบไฟล์สคริปต์อัปเดตที่กำหนด (${windowsScriptPath})`,
+          message: `ไม่พบไฟล์สคริปต์อัปเดตที่กำหนด (${primaryProdBatPath})`,
           requestId: req.requestId,
         });
         return;
@@ -2005,9 +2009,15 @@ settingsRouter.post(
         return;
       }
 
-      const windowsPs1Path = 'C:\\inetpub\\wwwroot\\Sam_Att\\deployment\\Deploy_Sam_Att.ps1';
+      const cfg = loadConfig();
+      const primaryProdPs1Path = path.win32.join(cfg.paths.appDir, 'deployment', 'Deploy_Sam_Att.ps1');
+      const legacyWindowsPs1Path = 'C:\\inetpub\\wwwroot\\Sam_Att\\deployment\\Deploy_Sam_Att.ps1';
       const localPs1Path = path.resolve(process.cwd(), 'deployment', 'Deploy_Sam_Att.ps1');
-      const resolvedPs1Path = fs.existsSync(windowsPs1Path) ? windowsPs1Path : localPs1Path;
+      const resolvedPs1Path = fs.existsSync(primaryProdPs1Path)
+        ? primaryProdPs1Path
+        : fs.existsSync(legacyWindowsPs1Path)
+          ? legacyWindowsPs1Path
+          : localPs1Path;
       const resolvedAppDir = path.dirname(path.dirname(resolvedPs1Path));
 
       const jobId = generateDeployJobId('rollback');

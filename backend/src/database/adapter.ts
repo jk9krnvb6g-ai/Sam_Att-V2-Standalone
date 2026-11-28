@@ -1098,7 +1098,7 @@ export async function runMigrations(
       options.forceRunInProductionCli === true ||
       process.argv.some((arg) => arg.includes('cli-migrate'));
     const skipAutoMigrateOnStartup =
-      (options.startupReadOnlyOnMysql === true || cfg.nodeEnv === 'production') &&
+      (options.startupReadOnlyOnMysql === true || cfg.nodeEnv === 'production' || cfg.dbEngine === 'mysql') &&
       process.env.SAM_ATT_AUTO_MIGRATE !== 'true' &&
       !isExplicitMigrateCli;
     if (skipAutoMigrateOnStartup) {
@@ -1240,28 +1240,29 @@ export async function runMigrations(
  * - หมายเหตุ Production Safety: ห้ามรัน DDL ALTER TABLE อัตโนมัติในโหมด production ระหว่าง Server Startup
  */
 export async function ensureBaselineSystemCatalog(
-  options: { startupReadOnlyOnMysql?: boolean } = {}
+  options: { startupReadOnlyOnMysql?: boolean; forceRunInProductionCli?: boolean } = {}
 ): Promise<void> {
   const cfg = loadConfig();
-  const isExplicitMigrateCli = process.argv.some((arg) => arg.includes('cli-migrate'));
-  const readOnlyMysqlStartup =
-    options.startupReadOnlyOnMysql === true &&
-    cfg.dbEngine === 'mysql' &&
+  const isExplicitMigrateCli =
+    options.forceRunInProductionCli === true ||
+    process.argv.some((arg) => arg.includes('cli-migrate'));
+  const readOnlyMysqlOrProdStartup =
+    (options.startupReadOnlyOnMysql === true || cfg.nodeEnv === 'production' || cfg.dbEngine === 'mysql') &&
+    (cfg.dbEngine === 'mysql' || cfg.nodeEnv === 'production') &&
     process.env.SAM_ATT_AUTO_MIGRATE !== 'true' &&
     !isExplicitMigrateCli;
 
-  if (readOnlyMysqlStartup) {
+  if (readOnlyMysqlOrProdStartup) {
     console.log(
-      '[Sam_Att DB] Read-only startup policy: Skipping baseline catalog DDL/DML mutations during MySQL server startup.'
+      '[Sam_Att DB] Read-only startup policy: Skipping baseline catalog DDL/DML mutations during MySQL/Production server startup.'
     );
     return;
   }
 
   const allowAdditiveStartupDdl =
-    cfg.nodeEnv !== 'production' ||
+    (cfg.nodeEnv !== 'production' && cfg.dbEngine === 'sqlite_sandbox') ||
     isExplicitMigrateCli ||
-    process.env.SAM_ATT_AUTO_MIGRATE === 'true' ||
-    cfg.dbEngine === 'sqlite_sandbox';
+    process.env.SAM_ATT_AUTO_MIGRATE === 'true';
 
   if (allowAdditiveStartupDdl) {
     // 0. Safe additive schema upgrades for dev/test or explicit CLI migrate (skip existing columns first to avoid Duplicate column logs)

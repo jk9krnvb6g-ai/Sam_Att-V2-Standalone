@@ -64,7 +64,7 @@ async function main() {
     forceRunInProductionCli: true,
   });
   console.log('[db:migrate] Migrations completed:', JSON.stringify(result));
-  await ensureBaselineSystemCatalog();
+  await ensureBaselineSystemCatalog({ forceRunInProductionCli: true });
 
   if (cfg.dataMode === 'DEMO') {
     await seedDemoSyntheticData();

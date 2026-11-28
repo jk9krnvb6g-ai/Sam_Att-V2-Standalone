@@ -1,39 +1,37 @@
-# รายงานผลการทดสอบอัตโนมัติ Phase 2 (`PHASE2_TEST_REPORT.md`)
+# รายงานผลการทดสอบระบบและความพร้อมก่อนติดตั้งจริง (`PHASE2_TEST_REPORT.md`)
 
-เอกสารนี้รายงานผลการรันชุดทดสอบอัตโนมัติ (Automated Test Matrix) ของระบบ **Sam_Att V2 Standalone** พร้อมแยกแยะรายการที่ทดสอบจริงในสภาพแวดล้อม Automated CI/Sandbox และรายการที่ต้องรันตรวจสอบบนเครื่องแม่ข่าย Windows Server 2025 (`10.2.0.23`) จริงอย่างโปร่งใส
-
----
-
-## 1. สรุปผลการรันชุดทดสอบอัตโนมัติ (Automated Test Execution Summary)
-
-- **คำสั่งที่รันทดสอบ:**
-  - `npm test`
-  - `node --import tsx --test backend/tests/phase2-production-readiness.test.ts`
-  - `npm run db:preflight -- --json`
-  - `npm run lint` (`tsc --noEmit`)
-  - `npm run build` (`vite build`)
-- **ผลลัพธ์รวม:** **ผ่านทั้งหมด 149 Tests (Pass: 149, Fail: 0)**
+**โครงการ:** ระบบบันทึกเวลาปฏิบัติงานและประมวลผลเวร (Sam_Att V2 Standalone)  
+**รุ่นการทดสอบ:** Phase 2 Final Production Readiness Hotfix (`FIX 01` – `FIX 08`)
 
 ---
 
-## 2. รายละเอียดชุดทดสอบที่ผ่านการยืนยันแล้ว (Verified Automated Test Suites)
+## 1. การแยกแยะสภาพแวดล้อมการทดสอบตามความจริง (Test Environment Transparency — FIX 08)
 
-| ชุดทดสอบ (Test File) | จำนวนหัวข้อ | สิ่งที่ได้รับการยืนยัน | สถานะ |
-| :--- | :---: | :--- | :---: |
-| `backend/tests/phase2-production-readiness.test.ts` | 6 Suites | 1. พาธมาตรฐาน `D:\WebApps\Sam_Att\*` และ `SCANNER_AUTO_SCHEDULER_ENABLED=false` ใน Production<br>2. การตรวจสอบคู่กุญแจ X.509 Certificate & Private Key, SAN `IP:10.2.0.23` และการบล็อกการสร้าง Cert ทับอัตโนมัติใน Production<br>3. `runProductionDatabasePreflightReadOnly()` ตรวจสอบ 16 ตารางหลักและคอลัมน์แบบ Read-Only 100%<br>4. `/api/Sam_Att/health`, `/health/live`, `/health/ready`, `/Sam_Att/health` และ JSON 404 separation<br>5. Structured Logger (`redactSecretsFromText` และ Size-based Log Rotation)<br>6. ตรวจสอบสคริปต์ PowerShell 5.1 และ `winsw-sam-att.xml` ว่าเป็น 7-bit ASCII 100%, ไม่มี `taskkill /F /IM node.exe` และไม่มี `iisreset` | **PASS** |
-| `backend/tests/update-center-loop-protection.test.ts` | 8 Suites (18 Scenarios) | ป้องกัน Infinite API Request Loop ในหน้า GitHub Update Center, Single-Flight Request Coalescing, Cache TTL 30 นาที, Rate Limit Cooldown และการบล็อก Database Schema Changes (`DB_SCHEMA_CHANGE_BLOCKED`) | **PASS** |
-| `backend/tests/deployment.test.ts` | 9 Suites | ตรวจสอบระบบ One-Click Application Deployment, Snapshot Backup, Rollback, Service Control เฉพาะ `SamAttV2Standalone` | **PASS** |
-| `backend/tests/scanner-sync.test.ts` | 11 Suites (SCAN-01..20) | ตรวจสอบการเชื่อมต่อ `ScannerReader.exe`, Multi-Day Buffer, Timeout 120s, Fail-Closed JSON Parsing, Mutex Lock และ Diagnostic Logging | **PASS** |
-| `backend/tests/attendance-engine.test.ts` | 16 Suites (ATT-01..16) | ตรวจสอบเครื่องยนต์จับคู่เวลาเข้า-ออกงาน กะดึกข้ามวัน กะควบ และการคำนวณสาย/กลับก่อน | **PASS** |
-| `backend/tests/shift-template-modal.test.ts` | 6 Suites (UI-01..06) | ตรวจสอบการจัดการเทมเพลตตารางเวรและระบบแจ้งเตือนมาตรฐาน | **PASS** |
-| `backend/tests/system.test.ts` | Core Integration | ตรวจสอบ Authentication, RBAC, Roster, Reports, Audit Logs และ Read-Only HOSxP Guard | **PASS** |
+เพื่อให้ผู้ดูแลระบบโรงพยาบาลสามชุกทราบขอบเขตการทดสอบอย่างโปร่งใสและตรงไปตรงมา รายงานนี้แยกผลการทดสอบออกเป็น 3 ส่วนชัดเจน ดังนี้:
+
+| สภาพแวดล้อม | สถานะการรัน | สิ่งที่ได้รับการทดสอบและยืนยันแล้ว |
+| :--- | :---: | :--- |
+| **1. Linux Sandbox Automated Verification** (ในสภาพแวดล้อม Build/Test ปัจจุบัน) | **รันจริงแล้ว (PASS 100%)** | - `npm run typecheck` และ `npm run lint` (`tsc --noEmit` ผ่าน 0 errors)<br>- `npm run build` (`vite build` สร้าง Production Bundle สำเร็จ)<br>- `npm test` (รันชุดทดสอบอัตโนมัติทั้งหมด 14 ไฟล์ทดสอบ ผ่านครบ 100% บน Isolated SQLite Sandbox ใน `os.tmpdir()`)<br>- ทดสอบ Lossless `.env` Password Quoting/Parsing สำหรับรหัสผ่านที่มี `#`, `$`, `&`, Quotes และช่องว่าง<br>- ทดสอบ Read-Only Database Startup & Preflight Guard (ยืนยัน 0 DDL/DML ในโหมด Production)<br>- ทดสอบ X.509 Certificate + Private Key Matching, IP SAN `10.2.0.23` และ Strict TLS Handshake<br>- ตรวจสอบโครงสร้าง 7-bit ASCII และกฎความปลอดภัยของไฟล์ `.ps1` ทั้ง 14 ไฟล์ |
+| **2. GitHub Actions Windows Runner (`windows-latest`)** (กำหนดใน `.github/workflows/ci.yml`) | **กำหนดใน CI Workflow พร้อมทำงานอัตโนมัติเมื่อ Push ขึ้น GitHub** | - รัน `npm ci`, `npm run typecheck`, `npm run lint`, `npm test`, `npm run build` บน Windows Server Runner<br>- ตรวจสอบไวยากรณ์ PowerShell 5.1 ด้วย `[System.Management.Automation.Language.Parser]::ParseFile` ทุกสคริปต์<br>- ทดสอบ `Install_Sam_Att.ps1 -DryRun` (ยืนยันไม่ทิ้งไฟล์หรือ `lifecycle.lock`)<br>- ทดสอบ `HealthCheck_Sam_Att.ps1 -SkipServiceCheck` (ยืนยัน Fail-Closed เมื่อไม่ระบุ `-DiagnosticMode`)<br>- ทดสอบ `Backup_Sam_Att.ps1` และ `Rollback_Sam_Att.ps1` (ยืนยันการตรวจจับไฟล์ที่ถูกแก้ไขด้วย SHA-256 Manifest ก่อนหยุด Service) |
+| **3. เครื่องแม่ข่าย Windows Server 2025 จริงของโรงพยาบาล (`10.2.0.23`)** | **รอผู้ดูแลระบบรันจริงบนเครื่อง `10.2.0.23`** | - การเชื่อมต่อเครือข่ายจริงไปยัง MySQL (`10.1.0.201:3306`) และเครื่องสแกนลายนิ้วมือ (`10.2.0.51`–`53:5005`)<br>- การตรวจสอบ `.NET 10.0 Runtime (x86)` ที่ติดตั้งบนเครื่องแม่ข่ายจริง<br>- การลงทะเบียน Windows Service `SamAttV2Standalone` ผ่าน WinSW และการตั้งค่า NTFS ACL / Windows Firewall จริง |
 
 ---
 
-## 3. รายการที่ต้องรันตรวจสอบบนเครื่องแม่ข่ายจริง (`10.2.0.23` Live Verification)
+## 2. สรุปผลการรันชุดทดสอบอัตโนมัติ (Automated Test Suite Results)
 
-เนื่องจากสภาพแวดล้อมพัฒนาและทดสอบอัตโนมัติทำงานบน Linux Sandbox รายการต่อไปนี้จึงได้รับการตรวจสอบระดับ Static Verification / Mock Integration แล้ว และ**ต้องรันยืนยันจริงบนเครื่อง Windows Server 2025 (`10.2.0.23`)** ตามคู่มือ `INSTALLATION_WINDOWS_SERVER.md`:
-
-1. การรัน `.\Preflight_Sam_Att.ps1 -MySqlHost 10.1.0.201 -MySqlPort 3306` เพื่อเชื่อมต่อฐานข้อมูล MySQL จริงบน `10.1.0.201`
-2. การรัน `.\Install_Sam_Att.ps1 -Mode FreshInstall` เพื่อลงทะเบียน Windows Service `SamAttV2Standalone` ผ่าน WinSW และเปิด Windows Firewall พอร์ต `4101`
-3. การลงทะเบียน `C:\Windows\SysWOW64\regsvr32.exe zkemkeeper.dll` และการเปิด `SCANNER_AUTO_SCHEDULER_ENABLED=true` หลังหยุดเซิร์ฟเวอร์เดิม `10.2.0.13` ในขั้นตอน Cutover
+| ลำดับ | ชุดไฟล์ทดสอบ (`backend/tests/*.test.ts`) | ขอบเขตการตรวจสอบ | ผลลัพธ์ |
+| :---: | :--- | :--- | :---: |
+| 1 | `sam-att.test.ts` | ระบบยืนยันตัวตน RBAC, Audit Log, Health API และความถูกต้องของ API พื้นฐาน | **PASS** |
+| 2 | `attendance-matching.test.ts` | อัลกอริทึมจับคู่เวลาเข้า-ออกงาน กะปกติ กะข้ามเที่ยงคืน และการคำนวณสาย/ออกก่อน | **PASS** |
+| 3 | `scanner-sync.test.ts` | การนำเข้าข้อมูลสแกนนิ้ว การป้องกันข้อมูลซ้ำ (Idempotent Deduplication) และการจัดการ Timeout | **PASS** |
+| 4 | `historical-sync-mapping.test.ts` | การซิงก์ข้อมูลย้อนหลังและการผูกรหัสเครื่องสแกนกับรหัสบุคลากร | **PASS** |
+| 5 | `hosoffice-personnel-sync.test.ts` | การซิงก์ข้อมูลบุคลากรจาก HOSOffice แบบ Read-Only | **PASS** |
+| 6 | `safe-deployment-migration.test.ts` | การตรวจสอบ Schema ฐานข้อมูลและระบบป้องกันคำสั่งทำลายข้อมูล | **PASS** |
+| 7 | `default-shift-templates.test.ts` | แม่แบบกะการทำงานมาตรฐาน | **PASS** |
+| 8 | `shift-template-modal-alert.test.ts` | การตรวจสอบเงื่อนไขเวลาของแม่แบบกะทำงาน | **PASS** |
+| 9 | `default-shift-by-personnel-type.test.ts` | การกำหนดกะเริ่มต้นตามประเภทบุคลากร | **PASS** |
+| 10 | `github-update-center.test.ts` | ศูนย์อัปเดตระบบผ่าน GitHub (Application-Only Update & Rollback) | **PASS** |
+| 11 | `update-center-loop-protection.test.ts` | ระบบป้องกันการสั่งอัปเดตซ้ำเมื่อ Commit ตรงกันและระบบล็อกการอัปเดตซ้อน | **PASS** |
+| 12 | `part-a-stabilization.test.ts` | การบังคับ Fail-Closed Production Config, Ephemeral Secret และการบล็อก SQLite Fallback | **PASS** |
+| 13 | `part-b-enhancements.test.ts` | การปรับปรุงประสิทธิภาพและ UX ของระบบจัดการเวลาปฏิบัติงาน | **PASS** |
+| 14 | `phase2-production-readiness.test.ts` | **Phase 2 & Hotfix (`FIX 01`–`FIX 08`):** โครงสร้าง Drive D, Strict HTTPS TLS & SAN `10.2.0.23`, Scoped Firewall TCP `4101`, Strict Service PID Ownership, Node 22/26 & `.NET 10.0 x86`, SHA-256 Snapshot Manifest & Pre-Stop Rollback Verification, Lossless `.env` Special-Char Password Parsing, Read-Only DB Startup Guard และ Windows CI Job | **PASS** |

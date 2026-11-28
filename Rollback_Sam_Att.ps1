@@ -1,183 +1,272 @@
 <#
 .SYNOPSIS
-  Sam_Att V2 Standalone - Safe Application Rollback Script (Phase 2.10)
+    Sam_Att V2 Standalone - Safe Application-Only Rollback Utility (Pre-Stop SHA-256 Integrity Verification)
 .DESCRIPTION
-  Restores a verified application backup snapshot from D:\Backups\Sam_Att to D:\WebApps\Sam_Att\App:
-  - Stops ONLY the SamAttV2Standalone Windows Service (never uses taskkill /F /IM node.exe or iisreset)
-  - Preserves D:\WebApps\Sam_Att\Config\.env and D:\WebApps\Sam_Att\Certs
-  - Never modifies or drops any MySQL tables on 10.1.0.201:3306
-  - Starts SamAttV2Standalone and runs post-rollback HealthCheck_Sam_Att.ps1
-  - Logs full rollback audit trail to D:\WebApps\Sam_Att\Logs\rollback_<timestamp>.log
+    Restores Sam_Att V2 Standalone application files from a verified snapshot in D:\Backups\Sam_Att:
+    1. Acquires Shared Lifecycle Lock (D:\Deployments\Sam_Att\lifecycle.lock).
+    2. Selects requested snapshot, Last Known Good Release (last_known_good.json), or latest valid snapshot.
+    3. VERIFIES snapshot completeness, backup-manifest.json.sha256, and EVERY file's SHA-256 hash
+       against backup-manifest.json BEFORE stopping SamAttV2Standalone service (FIX 05).
+       - If any file is missing or any SHA-256 hash mismatches, aborts immediately before stopping service.
+    4. Stops ONLY SamAttV2Standalone service (never kills global node.exe, never touches IIS).
+    5. Restores application files to D:\WebApps\Sam_Att\App while strictly preserving
+       D:\WebApps\Sam_Att\Config\.env and D:\WebApps\Sam_Att\Certs.
+    6. NEVER restores or modifies any database.
+    7. Starts SamAttV2Standalone and runs strict HealthCheck_Sam_Att.ps1.
 #>
-[CmdletBinding(SupportsShouldProcess=$true)]
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
-  [string]$RootDir = "D:\WebApps\Sam_Att",
-  [string]$BackupRoot = "D:\Backups\Sam_Att",
-  [string]$SnapshotDir = "",
-  [string]$ServiceName = "SamAttV2Standalone",
-  [int]$HttpsPort = 4101,
-  [switch]$ListSnapshotsOnly
+    [string]$SamAttRoot = "D:\WebApps\Sam_Att",
+    [string]$BackupRootDir = "D:\Backups\Sam_Att",
+    [string]$DeploymentsDir = "D:\Deployments\Sam_Att",
+    [string]$SnapshotDir = "",
+    [string]$ServiceName = "SamAttV2Standalone",
+    [string]$HostName = "10.2.0.23",
+    [int]$HttpsPort = 4101,
+    [string]$LockFilePath = "",
+    [string]$ParentLockId = "",
+    [switch]$UseLastKnownGood,
+    [switch]$DryRun,
+    [switch]$SkipServiceRestart
 )
 
-Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$AppDir = Join-Path $RootDir "App"
-$ConfigDir = Join-Path $RootDir "Config"
-$CertsDir = Join-Path $RootDir "Certs"
-$LogsDir = Join-Path $RootDir "Logs"
-$ServiceDir = Join-Path $RootDir "Service"
-
-if (-not (Test-Path $BackupRoot)) {
-  throw "BACKUP_ROOT_NOT_FOUND: Backup root directory not found at $BackupRoot"
+$AppDir    = Join-Path $SamAttRoot "App"
+$ConfigDir = Join-Path $SamAttRoot "Config"
+$CertsDir  = Join-Path $SamAttRoot "Certs"
+if ([string]::IsNullOrWhiteSpace($LockFilePath)) {
+    $LockFilePath = Join-Path $DeploymentsDir "lifecycle.lock"
 }
+$isDryRunMode = ($DryRun -or $WhatIfPreference)
 
-$Snapshots = @(Get-ChildItem -Path $BackupRoot -Directory -Filter "release_*" -ErrorAction SilentlyContinue | Sort-Object CreationTime -Descending)
-if ($ListSnapshotsOnly) {
-  Write-Host "Available Backup Snapshots in ${BackupRoot}:" -ForegroundColor Cyan
-  foreach ($S in $Snapshots) {
-    $ManifestFile = Join-Path $S.FullName "backup-manifest.json"
-    $Detail = if (Test-Path $ManifestFile) {
-      $M = Get-Content -Path $ManifestFile -Raw -Encoding UTF8 | ConvertFrom-Json
-      "Version=$($M.releaseVersion), Commit=$($M.commitSha), Created=$($M.createdAtIso)"
-    } else {
-      "Created=$($S.CreationTime)"
+function Test-SnapshotIntegrityBeforeStop {
+    param([string]$TargetSnapshotDir)
+
+    if (-not (Test-Path $TargetSnapshotDir)) {
+        throw "SNAPSHOT_NOT_FOUND: Snapshot directory $TargetSnapshotDir does not exist."
     }
-    Write-Host "  - $($S.Name) ($Detail)"
-  }
-  exit 0
+    $appSnapDir = Join-Path $TargetSnapshotDir "AppSnapshot"
+    $manifestPath = Join-Path $TargetSnapshotDir "backup-manifest.json"
+    $manifestShaFile = "$manifestPath.sha256"
+
+    if (-not (Test-Path $appSnapDir)) {
+        throw "INVALID_SNAPSHOT: Missing AppSnapshot directory in $TargetSnapshotDir"
+    }
+    if (-not (Test-Path $manifestPath)) {
+        throw "INVALID_SNAPSHOT_MANIFEST: Missing backup-manifest.json in $TargetSnapshotDir"
+    }
+    if (-not (Test-Path $manifestShaFile)) {
+        throw "INVALID_SNAPSHOT_CHECKSUM: Missing backup-manifest.json.sha256 in $TargetSnapshotDir"
+    }
+
+    $expectedManifestHash = (Get-Content $manifestShaFile -Raw).Trim()
+    $actualManifestHash = (Get-FileHash -Path $manifestPath -Algorithm SHA256).Hash
+    if ($expectedManifestHash -ne $actualManifestHash) {
+        throw "SNAPSHOT_MANIFEST_CHECKSUM_MISMATCH: Snapshot manifest hash mismatch (expected $expectedManifestHash, got $actualManifestHash)."
+    }
+
+    $manifest = Get-Content $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+
+    # Verify core required files exist in snapshot
+    $coreRequired = @("package.json", "server.ts")
+    foreach ($reqRel in $coreRequired) {
+        $fullReq = Join-Path $appSnapDir ($reqRel.Replace('/', '\'))
+        if (-not (Test-Path $fullReq)) {
+            throw "SNAPSHOT_INCOMPLETE: Missing required core file '$reqRel' in $appSnapDir"
+        }
+    }
+
+    if ($null -eq $manifest.files -or $manifest.files.Count -eq 0) {
+        throw "SNAPSHOT_MANIFEST_FILES_EMPTY: backup-manifest.json does not contain a valid 'files' SHA-256 manifest array."
+    }
+
+    if ($manifest.requiredFilesCount -and ($manifest.files.Count -ne [int]$manifest.requiredFilesCount)) {
+        throw "SNAPSHOT_FILE_COUNT_MISMATCH: Manifest declares requiredFilesCount=$($manifest.requiredFilesCount) but lists $($manifest.files.Count) files."
+    }
+
+    $verifiedCount = 0
+    foreach ($entry in $manifest.files) {
+        $rel = [string]$entry.relativePath
+        $expectedSha = [string]$entry.sha256
+        if ([string]::IsNullOrWhiteSpace($rel) -or [string]::IsNullOrWhiteSpace($expectedSha)) {
+            throw "SNAPSHOT_MANIFEST_CORRUPT_ENTRY: File entry in backup-manifest.json is missing relativePath or sha256."
+        }
+        $candidatePath = Join-Path $appSnapDir ($rel.Replace('/', '\'))
+        if (-not (Test-Path $candidatePath)) {
+            throw "SNAPSHOT_FILE_MISSING: Required file '$rel' listed in manifest is missing from $appSnapDir."
+        }
+        $actualSha = (Get-FileHash -Path $candidatePath -Algorithm SHA256).Hash
+        if (-not $actualSha.Equals($expectedSha, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "SNAPSHOT_FILE_HASH_MISMATCH: File '$rel' failed SHA-256 verification (expected $expectedSha, got $actualSha)."
+        }
+        $verifiedCount++
+    }
+
+    return @{
+        manifest      = $manifest
+        appSnapDir    = $appSnapDir
+        verifiedFiles = $verifiedCount
+    }
 }
 
+# Resolve target snapshot directory
 if ([string]::IsNullOrWhiteSpace($SnapshotDir)) {
-  if ($Snapshots.Count -eq 0) {
-    throw "NO_BACKUP_SNAPSHOTS_AVAILABLE: No release_* snapshots found in $BackupRoot"
-  }
-  $SnapshotDir = $Snapshots[0].FullName
-} elseif (-not [System.IO.Path]::IsPathRooted($SnapshotDir)) {
-  $SnapshotDir = Join-Path $BackupRoot $SnapshotDir
-}
-
-$SnapshotDir = [System.IO.Path]::GetFullPath($SnapshotDir)
-$ManifestPath = Join-Path $SnapshotDir "backup-manifest.json"
-$SnapshotAppDir = Join-Path $SnapshotDir "app"
-
-if (-not (Test-Path $ManifestPath) -or -not (Test-Path $SnapshotAppDir)) {
-  throw "INVALID_BACKUP_SNAPSHOT: Snapshot at $SnapshotDir is missing backup-manifest.json or app/ folder"
-}
-
-$ManifestHashFile = "$ManifestPath.sha256"
-if (Test-Path $ManifestHashFile) {
-  $ExpectedHash = (Get-Content -Path $ManifestHashFile -Raw).Trim().ToLower()
-  $ActualHash = (Get-FileHash -Path $ManifestPath -Algorithm SHA256).Hash.ToLower()
-  if ($ExpectedHash -ne $ActualHash) {
-    throw "SNAPSHOT_MANIFEST_CHECKSUM_MISMATCH: Expected $ExpectedHash but calculated $ActualHash"
-  }
-}
-
-$ManifestObj = Get-Content -Path $ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
-
-$Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-if (-not (Test-Path $LogsDir)) {
-  New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
-}
-$RollbackLogPath = Join-Path $LogsDir "rollback_${Timestamp}.log"
-
-function Write-RollbackLog {
-  param([string]$Message, [string]$Level = "INFO")
-  $Line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')][$Level] $Message"
-  Add-Content -Path $RollbackLogPath -Value $Line -Encoding UTF8 -ErrorAction SilentlyContinue
-  $Color = if ($Level -eq "ERROR") { "Red" } elseif ($Level -eq "WARN") { "Yellow" } else { "Cyan" }
-  Write-Host $Line -ForegroundColor $Color
-}
-
-if (-not $PSCmdlet.ShouldProcess($AppDir, "Rollback application to snapshot $($ManifestObj.snapshotName)")) {
-  Write-Host "[Rollback - WhatIf] Would rollback $AppDir to $SnapshotDir"
-  exit 0
-}
-
-Write-RollbackLog -Message "Starting Safe Application Rollback to snapshot '$($ManifestObj.snapshotName)' (Commit=$($ManifestObj.commitSha), Version=$($ManifestObj.releaseVersion))..."
-
-# 1. Verify Config and Certs hashes before rollback to guarantee immutability
-$EnvFilePath = Join-Path $ConfigDir ".env"
-$EnvHashBefore = if (Test-Path $EnvFilePath) { (Get-FileHash -Path $EnvFilePath -Algorithm SHA256).Hash.ToLower() } else { "" }
-
-# 2. Stop ONLY SamAttV2Standalone Windows Service
-if ($env:OS -like "*Windows*") {
-  $Svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-  if ($null -ne $Svc -and $Svc.Status -ne "Stopped") {
-    Write-RollbackLog -Message "Stopping isolated Windows Service '$ServiceName'..."
-    Stop-Service -Name $ServiceName -Force -ErrorAction Stop
-    for ($i = 1; $i -le 20; $i++) {
-      Start-Sleep -Seconds 1
-      $SvcCheck = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-      if ($null -eq $SvcCheck -or $SvcCheck.Status -eq "Stopped") { break }
+    $lkgPath = Join-Path $BackupRootDir "last_known_good.json"
+    if ($UseLastKnownGood -and (Test-Path $lkgPath)) {
+        $lkg = Get-Content $lkgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($lkg.snapshotDir -and (Test-Path $lkg.snapshotDir)) {
+            $SnapshotDir = [string]$lkg.snapshotDir
+        }
     }
-  }
-}
-
-# 3. Restore Application files from snapshot
-Write-RollbackLog -Message "Restoring application files from $SnapshotAppDir to $AppDir..."
-if (-not (Test-Path $AppDir)) {
-  New-Item -ItemType Directory -Path $AppDir -Force | Out-Null
-}
-
-$RestoreItems = @(
-  "dist",
-  "backend",
-  "frontend",
-  "database",
-  "ScannerReader",
-  "scripts",
-  "deployment",
-  "package.json",
-  "package-lock.json",
-  "tsconfig.json",
-  "vite.config.ts",
-  "server.ts",
-  ".env.example",
-  ".nvmrc"
-)
-
-foreach ($Item in $RestoreItems) {
-  $SrcItem = Join-Path $SnapshotAppDir $Item
-  $DstItem = Join-Path $AppDir $Item
-  if (Test-Path $SrcItem) {
-    if (Test-Path $DstItem) {
-      Remove-Item -Path $DstItem -Recurse -Force -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($SnapshotDir)) {
+        if (-not (Test-Path $BackupRootDir)) {
+            throw "BACKUP_ROOT_NOT_FOUND: $BackupRootDir does not exist."
+        }
+        $latest = Get-ChildItem -Path $BackupRootDir -Directory -Filter "app_snapshot_*" | Sort-Object CreationTime -Descending | Select-Object -First 1
+        if ($null -eq $latest) {
+            throw "NO_SNAPSHOTS_AVAILABLE: No application snapshots found in $BackupRootDir"
+        }
+        $SnapshotDir = $latest.FullName
     }
-    Copy-Item -Path $SrcItem -Destination $DstItem -Recurse -Force -ErrorAction Stop
-  }
 }
 
-# 4. Verify external Config\.env was never modified
-$EnvHashAfter = if (Test-Path $EnvFilePath) { (Get-FileHash -Path $EnvFilePath -Algorithm SHA256).Hash.ToLower() } else { "" }
-if ($EnvHashBefore -ne $EnvHashAfter) {
-  throw "SECURITY_CONFIG_MUTATION_DETECTED: External Config\.env hash changed during rollback"
+# Verify snapshot integrity BEFORE acquiring lock or stopping service in DryRun, and before stopping service in real run
+$verifiedSnapshot = Test-SnapshotIntegrityBeforeStop -TargetSnapshotDir $SnapshotDir
+$manifest = $verifiedSnapshot.manifest
+$appSnapDir = $verifiedSnapshot.appSnapDir
+
+if ($isDryRunMode) {
+    Write-Host "[DRY-RUN] Verified snapshot integrity ($($verifiedSnapshot.verifiedFiles) files SHA-256 matched) for $SnapshotDir (Version=$($manifest.version), Commit=$($manifest.commitHash)). Would restore to $AppDir without modifying Config\.env, Certs, or MySQL database." -ForegroundColor Yellow
+    exit 0
 }
 
-# 5. Start SamAttV2Standalone service
-if ($env:OS -like "*Windows*") {
-  $Svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-  if ($null -ne $Svc) {
-    Write-RollbackLog -Message "Starting Windows Service '$ServiceName'..."
-    Start-Service -Name $ServiceName -ErrorAction Stop
-    Start-Sleep -Seconds 4
-    $SvcAfter = Get-Service -Name $ServiceName -ErrorAction Stop
-    if ($SvcAfter.Status -ne "Running") {
-      throw "ROLLBACK_SERVICE_START_FAILED: Windows Service '$ServiceName' status is '$($SvcAfter.Status)'"
+function Acquire-SharedLifecycleLock {
+    param([string]$Path, [string]$Operation, [string]$InheritedLockId)
+    $lockDir = Split-Path -Parent $Path
+    if (-not (Test-Path $lockDir)) {
+        New-Item -ItemType Directory -Path $lockDir -Force | Out-Null
     }
-  }
+    if (Test-Path $Path) {
+        try {
+            $existing = Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+            if (-not [string]::IsNullOrWhiteSpace($InheritedLockId) -and $existing.lockId -eq $InheritedLockId) {
+                return @{ acquiredNew = $false; lockId = $InheritedLockId }
+            }
+            $ownerPid = [int]$existing.pid
+            $proc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+            if ($null -ne $proc) {
+                throw "LIFECYCLE_LOCK_ACTIVE: Another lifecycle operation ($($existing.operation), lockId=$($existing.lockId), PID=$ownerPid) is currently running since $($existing.startedAt)."
+            }
+        } catch {
+            if ($_.Exception.Message -like "LIFECYCLE_LOCK_ACTIVE*") {
+                throw $_
+            }
+        }
+        Remove-Item $Path -Force -ErrorAction SilentlyContinue
+    }
+    $newLockId = "$Operation-$((Get-Date).ToString('yyyyMMddHHmmss'))-$PID"
+    $payload = @{
+        lockId    = $newLockId
+        operation = $Operation
+        pid       = $PID
+        startedAt = (Get-Date).ToString("o")
+        user      = [Environment]::UserName
+    }
+    $payload | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding UTF8
+    return @{ acquiredNew = $true; lockId = $newLockId }
 }
 
-# 6. Post-Rollback Health Verification
-$HealthScript = Join-Path $PSScriptRoot "HealthCheck_Sam_Att.ps1"
-if (-not (Test-Path $HealthScript)) {
-  $HealthScript = Join-Path $AppDir "HealthCheck_Sam_Att.ps1"
-}
-if (Test-Path $HealthScript) {
-  Write-RollbackLog -Message "Executing post-rollback health verification on HTTPS port $HttpsPort..."
-  & $HealthScript -Port $HttpsPort -ServiceName $ServiceName
+function Release-SharedLifecycleLock {
+    param([string]$Path, [hashtable]$LockHandle)
+    if ($null -ne $LockHandle -and $LockHandle.acquiredNew -and (Test-Path $Path)) {
+        Remove-Item $Path -Force -ErrorAction SilentlyContinue
+    }
 }
 
-Write-RollbackLog -Message "ROLLBACK COMPLETED SUCCESSFULLY: Restored Commit=$($ManifestObj.commitSha), Version=$($ManifestObj.releaseVersion)"
-exit 0
+$lockHandle = Acquire-SharedLifecycleLock -Path $LockFilePath -Operation "ROLLBACK" -InheritedLockId $ParentLockId
+
+try {
+    Write-Host "=================================================================" -ForegroundColor Yellow
+    Write-Host " Sam_Att V2 Standalone - Application-Only Rollback" -ForegroundColor Yellow
+    Write-Host " Snapshot : $SnapshotDir" -ForegroundColor Yellow
+    Write-Host " Version  : $($manifest.version) (Commit: $($manifest.commitHash))" -ForegroundColor Yellow
+    Write-Host " Verified : $($verifiedSnapshot.verifiedFiles) files passed SHA-256 integrity check" -ForegroundColor Green
+    Write-Host "=================================================================" -ForegroundColor Yellow
+
+    $envFilePath = Join-Path $ConfigDir ".env"
+    $envPreHash = if (Test-Path $envFilePath) { (Get-FileHash -Path $envFilePath -Algorithm SHA256).Hash } else { $null }
+
+    # 1. Stop only SamAttV2Standalone Service (ONLY AFTER 100% SHA-256 snapshot verification passed)
+    if (-not $SkipServiceRestart) {
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($null -ne $svc -and $svc.Status -eq "Running") {
+            Write-Host "[1/4] Stopping Windows Service '$ServiceName'..." -ForegroundColor Cyan
+            Stop-Service -Name $ServiceName -Force -ErrorAction Stop
+            Start-Sleep -Seconds 3
+        } else {
+            Write-Host "[1/4] Windows Service '$ServiceName' is not running." -ForegroundColor Gray
+        }
+    }
+
+    # 2. Restore application files to AppDir (preserve node_modules and .git, never touch Config\.env or Certs)
+    Write-Host "[2/4] Restoring verified application files to $AppDir..." -ForegroundColor Cyan
+    if (-not (Test-Path $AppDir)) {
+        New-Item -ItemType Directory -Path $AppDir -Force | Out-Null
+    }
+    $roboArgs = @(
+        $appSnapDir,
+        $AppDir,
+        "/MIR",
+        "/XD", "node_modules", ".git", "logs",
+        "/NFL", "/NDL", "/NJH", "/NJS", "/NC", "/NS"
+    )
+    & robocopy @roboArgs | Out-Null
+    if ($LASTEXITCODE -ge 8) {
+        throw "ROLLBACK_ROBOCOPY_FAILED: Robocopy failed with exit code $LASTEXITCODE"
+    }
+
+    # Verify Config\.env was not altered during rollback
+    if ($null -ne $envPreHash -and (Test-Path $envFilePath)) {
+        $envPostHash = (Get-FileHash -Path $envFilePath -Algorithm SHA256).Hash
+        if ($envPreHash -ne $envPostHash) {
+            throw "CONFIG_ENV_MUTATION_DETECTED: Production Config\.env hash changed unexpectedly during rollback."
+        }
+    }
+
+    # 3. Start SamAttV2Standalone Service
+    if (-not $SkipServiceRestart) {
+        $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+        if ($null -ne $svc) {
+            Write-Host "[3/4] Starting Windows Service '$ServiceName'..." -ForegroundColor Cyan
+            Start-Service -Name $ServiceName -ErrorAction Stop
+            Start-Sleep -Seconds 5
+        }
+    }
+
+    # 4. Run Strict Production HealthCheck
+    $healthScript = Join-Path $PSScriptRoot "HealthCheck_Sam_Att.ps1"
+    if (-not (Test-Path $healthScript)) {
+        $healthScript = Join-Path $AppDir "HealthCheck_Sam_Att.ps1"
+    }
+    if ((Test-Path $healthScript) -and -not $SkipServiceRestart) {
+        Write-Host "[4/4] Verifying strict system health after rollback..." -ForegroundColor Cyan
+        $hcParams = @{
+            HostName    = $HostName
+            Port        = $HttpsPort
+            ServiceName = $ServiceName
+            AppDir      = $AppDir
+        }
+        if ($manifest.version) { $hcParams["ExpectedVersion"] = [string]$manifest.version }
+        if ($manifest.commitHash -and $manifest.commitHash -ne "unknown") { $hcParams["ExpectedCommit"] = [string]$manifest.commitHash }
+        & $healthScript @hcParams
+        if ($LASTEXITCODE -ne 0) {
+            throw "ROLLBACK_HEALTHCHECK_FAILED: Health check failed after restoring snapshot $SnapshotDir"
+        }
+    }
+
+    Write-Host "[PASS] Application rollback completed safely. Database, Config\.env, and Certs were not modified." -ForegroundColor Green
+    exit 0
+} finally {
+    Release-SharedLifecycleLock -Path $LockFilePath -LockHandle $lockHandle
+}

@@ -1,173 +1,244 @@
 <#
 .SYNOPSIS
-  Sam_Att V2 Standalone - Application Release, Service & Config Metadata Backup Script (Phase 2.10)
+    Sam_Att V2 Standalone - Application Snapshot Backup Utility (Strict SHA-256 File Manifest & Shared Lifecycle Lock)
 .DESCRIPTION
-  Backs up the current working application release from D:\WebApps\Sam_Att\App,
-  WinSW service XML from D:\WebApps\Sam_Att\Service, and sanitized configuration metadata
-  into D:\Backups\Sam_Att\release_<timestamp>_<commit> with SHA-256 verification.
-  Enforces retention policy: retains at least the latest 5 releases and all backups within 30 days.
-  Never logs or exposes database passwords, JWT secrets, or private keys.
+    Creates a timestamped application snapshot in D:\Backups\Sam_Att\app_snapshot_<yyyyMMdd_HHmmss>:
+    - Acquires Shared Lifecycle Lock (D:\Deployments\Sam_Att\lifecycle.lock) so Install, Deploy,
+      Backup, and Rollback never run concurrently (supports -ParentLockId when called by Deploy_Sam_Att.ps1).
+    - Snapshots App source & compiled dist/, Config/.env, and Service/SamAttV2Standalone.xml.
+    - Generates a complete SHA-256 File Manifest (files array with relativePath, sizeBytes, sha256)
+      covering all required application files in AppSnapshot, plus backup-manifest.json.sha256.
+    - Updates D:\Backups\Sam_Att\last_known_good.json pointer when -MarkAsLastKnownGood is specified (default true).
+    - NEVER runs mysqldump or modifies any database.
+    - Supports -WhatIf / -DryRun with zero disk or lock modifications.
 #>
-[CmdletBinding(SupportsShouldProcess=$true)]
+[CmdletBinding(SupportsShouldProcess = $true)]
 param(
-  [string]$RootDir = "D:\WebApps\Sam_Att",
-  [string]$BackupRoot = "D:\Backups\Sam_Att",
-  [int]$MinRetainCount = 5,
-  [int]$MinRetainDays = 30,
-  [string]$Reason = "PRE_DEPLOYMENT_BACKUP"
+    [string]$SamAttRoot = "D:\WebApps\Sam_Att",
+    [string]$BackupRootDir = "D:\Backups\Sam_Att",
+    [string]$DeploymentsDir = "D:\Deployments\Sam_Att",
+    [string]$LockFilePath = "",
+    [string]$ParentLockId = "",
+    [int]$RetentionCount = 10,
+    [switch]$MarkAsLastKnownGood = $true,
+    [switch]$DryRun,
+    [switch]$Json
 )
 
-Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$AppDir = Join-Path $RootDir "App"
-$ConfigDir = Join-Path $RootDir "Config"
-$ServiceDir = Join-Path $RootDir "Service"
-$LogsDir = Join-Path $RootDir "Logs"
-
-$AppDirFull = [System.IO.Path]::GetFullPath($AppDir)
-$BackupRootFull = [System.IO.Path]::GetFullPath($BackupRoot)
-
-if ($BackupRootFull.StartsWith($AppDirFull, [System.StringComparison]::OrdinalIgnoreCase)) {
-  throw "BACKUP_DIR_INSIDE_APP_FORBIDDEN: BackupRoot ($BackupRootFull) must reside outside AppDir ($AppDirFull)"
+$AppDir     = Join-Path $SamAttRoot "App"
+$ConfigDir  = Join-Path $SamAttRoot "Config"
+$ServiceDir = Join-Path $SamAttRoot "Service"
+if ([string]::IsNullOrWhiteSpace($LockFilePath)) {
+    $LockFilePath = Join-Path $DeploymentsDir "lifecycle.lock"
 }
 
-if (-not (Test-Path $AppDirFull)) {
-  throw "APP_DIR_NOT_FOUND: Application directory not found at $AppDirFull"
-}
+$isDryRunMode = ($DryRun -or $WhatIfPreference)
+$timestamp = (Get-Date).ToString("yyyyMMdd_HHmmss")
+$snapshotName = "app_snapshot_$timestamp"
+$snapshotDir = Join-Path $BackupRootDir $snapshotName
 
-$Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$CommitShort = "unknown"
-$ReleaseVer = "2.0.0"
-
-$PkgJsonPath = Join-Path $AppDirFull "package.json"
-if (Test-Path $PkgJsonPath) {
-  try {
-    $PkgObj = Get-Content -Path $PkgJsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($PkgObj.version) { $ReleaseVer = [string]$PkgObj.version }
-  } catch {}
-}
-
-if (Get-Command git -ErrorAction SilentlyContinue) {
-  Push-Location $AppDirFull
-  try {
-    $GitSha = (& git rev-parse --short=8 HEAD 2>$null) -join ""
-    if (-not [string]::IsNullOrWhiteSpace($GitSha)) {
-      $CommitShort = $GitSha.Trim()
+if ($isDryRunMode) {
+    $dryReport = @{
+        ok            = $true
+        dryRun        = $true
+        snapshotName  = $snapshotName
+        snapshotDir   = $snapshotDir
+        lockFilePath  = $LockFilePath
+        message       = "DryRun/WhatIf: Would create application snapshot at $snapshotDir with full SHA-256 file manifest without touching disk or lock files."
     }
-  } catch {} finally {
-    Pop-Location
-  }
-}
-
-$SnapshotName = "release_${Timestamp}_${CommitShort}"
-$TargetDir = Join-Path $BackupRootFull $SnapshotName
-
-if (-not $PSCmdlet.ShouldProcess($TargetDir, "Create application backup snapshot")) {
-  Write-Host "[Backup - WhatIf] Would create backup snapshot at $TargetDir"
-  exit 0
-}
-
-New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
-$AppSnapshotDir = Join-Path $TargetDir "app"
-New-Item -ItemType Directory -Path $AppSnapshotDir -Force | Out-Null
-
-Write-Host "[Backup] 1/4 Copying application release files from $AppDirFull to $AppSnapshotDir..."
-$ItemsToCopy = @(
-  "dist",
-  "backend",
-  "frontend",
-  "database",
-  "ScannerReader",
-  "scripts",
-  "deployment",
-  "package.json",
-  "package-lock.json",
-  "tsconfig.json",
-  "vite.config.ts",
-  "server.ts",
-  ".env.example",
-  ".nvmrc"
-)
-
-foreach ($Item in $ItemsToCopy) {
-  $SrcPath = Join-Path $AppDirFull $Item
-  if (Test-Path $SrcPath) {
-    Copy-Item -Path $SrcPath -Destination (Join-Path $AppSnapshotDir $Item) -Recurse -Force
-  }
-}
-
-Write-Host "[Backup] 2/4 Copying WinSW service configuration and sanitized config metadata..."
-$ServiceSnapshotDir = Join-Path $TargetDir "service"
-New-Item -ItemType Directory -Path $ServiceSnapshotDir -Force | Out-Null
-$WinSwXml = Join-Path $ServiceDir "SamAttV2Standalone.xml"
-if (Test-Path $WinSwXml) {
-  Copy-Item -Path $WinSwXml -Destination (Join-Path $ServiceSnapshotDir "SamAttV2Standalone.xml") -Force
-}
-
-$EnvFile = Join-Path $ConfigDir ".env"
-$EnvKeyList = @()
-$EnvSha256 = ""
-if (Test-Path $EnvFile) {
-  $EnvSha256 = (Get-FileHash -Path $EnvFile -Algorithm SHA256).Hash.ToLower()
-  foreach ($Line in Get-Content -Path $EnvFile -Encoding UTF8) {
-    $Trim = $Line.Trim()
-    if ([string]::IsNullOrWhiteSpace($Trim) -or $Trim.StartsWith("#")) { continue }
-    $Idx = $Trim.IndexOf("=")
-    if ($Idx -gt 0) {
-      $EnvKeyList += $Trim.Substring(0, $Idx).Trim()
+    if ($Json) {
+        Write-Output ($dryReport | ConvertTo-Json -Depth 5)
+    } else {
+        Write-Host "[DRY-RUN] $($dryReport.message)" -ForegroundColor Yellow
     }
-  }
+    exit 0
 }
 
-$DistIndex = Join-Path $AppSnapshotDir "dist\index.html"
-$DistIndexSha256 = if (Test-Path $DistIndex) { (Get-FileHash -Path $DistIndex -Algorithm SHA256).Hash.ToLower() } else { "" }
-$PkgLockSnap = Join-Path $AppSnapshotDir "package-lock.json"
-$PkgLockSha256 = if (Test-Path $PkgLockSnap) { (Get-FileHash -Path $PkgLockSnap -Algorithm SHA256).Hash.ToLower() } else { "" }
-
-Write-Host "[Backup] 3/4 Writing cryptographic backup-manifest.json..."
-$Manifest = [ordered]@{
-  serviceName         = "SamAttV2Standalone"
-  applicationName     = "Sam_Att V2 Standalone"
-  snapshotName        = $SnapshotName
-  backupTimestamp     = $Timestamp
-  createdAtIso        = (Get-Date).ToUniversalTime().ToString("o")
-  releaseVersion      = $ReleaseVer
-  commitSha           = $CommitShort
-  reason              = $Reason
-  appDirectory        = $AppDirFull
-  configEnvPath       = $EnvFile
-  configEnvSha256     = $EnvSha256
-  configuredEnvKeys   = $EnvKeyList
-  distIndexSha256     = $DistIndexSha256
-  packageLockSha256   = $PkgLockSha256
-  createdBy           = $env:USERNAME
-  status              = "VERIFIED_READY"
-}
-
-$ManifestPath = Join-Path $TargetDir "backup-manifest.json"
-$ManifestJson = $Manifest | ConvertTo-Json -Depth 6
-[System.IO.File]::WriteAllText($ManifestPath, $ManifestJson, [System.Text.UTF8Encoding]::new($false))
-$ManifestHash = (Get-FileHash -Path $ManifestPath -Algorithm SHA256).Hash.ToLower()
-Set-Content -Path "$ManifestPath.sha256" -Value $ManifestHash -Encoding ASCII
-
-Write-Host "[Backup] 4/4 Applying backup retention policy (retain >= $MinRetainCount releases and >= $MinRetainDays days)..."
-$AllSnapshots = @(Get-ChildItem -Path $BackupRootFull -Directory -Filter "release_*" -ErrorAction SilentlyContinue | Sort-Object CreationTime -Descending)
-$CutoffDate = (Get-Date).AddDays(-$MinRetainDays)
-if ($AllSnapshots.Count -gt $MinRetainCount) {
-  for ($i = $MinRetainCount; $i -lt $AllSnapshots.Count; $i++) {
-    $Candidate = $AllSnapshots[$i]
-    if ($Candidate.CreationTime -lt $CutoffDate) {
-      Write-Host "[Backup] Pruning expired backup (> $MinRetainDays days): $($Candidate.FullName)"
-      Remove-Item -Path $Candidate.FullName -Recurse -Force -ErrorAction SilentlyContinue
+function Acquire-SharedLifecycleLock {
+    param([string]$Path, [string]$Operation, [string]$InheritedLockId)
+    $lockDir = Split-Path -Parent $Path
+    if (-not (Test-Path $lockDir)) {
+        New-Item -ItemType Directory -Path $lockDir -Force | Out-Null
     }
-  }
+    if (Test-Path $Path) {
+        try {
+            $existing = Get-Content $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+            if (-not [string]::IsNullOrWhiteSpace($InheritedLockId) -and $existing.lockId -eq $InheritedLockId) {
+                return @{ acquiredNew = $false; lockId = $InheritedLockId }
+            }
+            $ownerPid = [int]$existing.pid
+            $proc = Get-Process -Id $ownerPid -ErrorAction SilentlyContinue
+            if ($null -ne $proc) {
+                throw "LIFECYCLE_LOCK_ACTIVE: Another lifecycle operation ($($existing.operation), lockId=$($existing.lockId), PID=$ownerPid) is currently running since $($existing.startedAt)."
+            }
+        } catch {
+            if ($_.Exception.Message -like "LIFECYCLE_LOCK_ACTIVE*") {
+                throw $_
+            }
+        }
+        Remove-Item $Path -Force -ErrorAction SilentlyContinue
+    }
+    $newLockId = "$Operation-$((Get-Date).ToString('yyyyMMddHHmmss'))-$PID"
+    $payload = @{
+        lockId    = $newLockId
+        operation = $Operation
+        pid       = $PID
+        startedAt = (Get-Date).ToString("o")
+        user      = [Environment]::UserName
+    }
+    $payload | ConvertTo-Json -Depth 4 | Set-Content -Path $Path -Encoding UTF8
+    return @{ acquiredNew = $true; lockId = $newLockId }
 }
 
-if (Test-Path $LogsDir) {
-  $LogLine = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')][INFO] Backup created at $TargetDir (Version=$ReleaseVer, Commit=$CommitShort, ManifestSHA256=$ManifestHash)"
-  Add-Content -Path (Join-Path $LogsDir "deployment.log") -Value $LogLine -Encoding UTF8 -ErrorAction SilentlyContinue
+function Release-SharedLifecycleLock {
+    param([string]$Path, [hashtable]$LockHandle)
+    if ($null -ne $LockHandle -and $LockHandle.acquiredNew -and (Test-Path $Path)) {
+        Remove-Item $Path -Force -ErrorAction SilentlyContinue
+    }
 }
 
-Write-Host "[Backup] SUCCESS: Application backup verified at $TargetDir" -ForegroundColor Green
-Write-Output $TargetDir
+$lockHandle = Acquire-SharedLifecycleLock -Path $LockFilePath -Operation "BACKUP" -InheritedLockId $ParentLockId
+
+try {
+    if (-not (Test-Path $AppDir)) {
+        throw "APP_DIR_NOT_FOUND: Application directory $AppDir does not exist."
+    }
+    $requiredCorePaths = @(
+        (Join-Path $AppDir "package.json"),
+        (Join-Path $AppDir "server.ts")
+    )
+    foreach ($reqPath in $requiredCorePaths) {
+        if (-not (Test-Path $reqPath)) {
+            throw "MISSING_REQUIRED_APP_FILE: Required application file not found at $reqPath"
+        }
+    }
+
+    if (-not (Test-Path $BackupRootDir)) {
+        New-Item -ItemType Directory -Path $BackupRootDir -Force | Out-Null
+    }
+    New-Item -ItemType Directory -Path $snapshotDir -Force | Out-Null
+
+    $appSnapDir     = Join-Path $snapshotDir "AppSnapshot"
+    $configSnapDir  = Join-Path $snapshotDir "ConfigSnapshot"
+    $serviceSnapDir = Join-Path $snapshotDir "ServiceSnapshot"
+
+    New-Item -ItemType Directory -Path $appSnapDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $configSnapDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $serviceSnapDir -Force | Out-Null
+
+    # Copy application code & compiled dist (exclude node_modules and .git for clean fast snapshots)
+    $roboArgs = @(
+        $AppDir,
+        $appSnapDir,
+        "/MIR",
+        "/XD", "node_modules", ".git", "logs",
+        "/NFL", "/NDL", "/NJH", "/NJS", "/NC", "/NS"
+    )
+    & robocopy @roboArgs | Out-Null
+    if ($LASTEXITCODE -ge 8) {
+        throw "BACKUP_ROBOCOPY_FAILED: Robocopy failed with exit code $LASTEXITCODE"
+    }
+
+    $envPath = Join-Path $ConfigDir ".env"
+    if (Test-Path $envPath) {
+        Copy-Item -Path $envPath -Destination (Join-Path $configSnapDir ".env.backup") -Force
+    }
+
+    $xmlPath = Join-Path $ServiceDir "SamAttV2Standalone.xml"
+    if (Test-Path $xmlPath) {
+        Copy-Item -Path $xmlPath -Destination (Join-Path $serviceSnapDir "SamAttV2Standalone.xml") -Force
+    }
+
+    $commitHash = "unknown"
+    if (Test-Path (Join-Path $AppDir ".git")) {
+        try {
+            $gitOut = & git -C $AppDir rev-parse HEAD 2>$null
+            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($gitOut)) {
+                $commitHash = ($gitOut | Select-Object -First 1).Trim()
+            }
+        } catch {}
+    }
+
+    $pkgVersion = "2.0.0"
+    $pkgPath = Join-Path $AppDir "package.json"
+    if (Test-Path $pkgPath) {
+        try {
+            $pkg = Get-Content $pkgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($pkg.version) { $pkgVersion = [string]$pkg.version }
+        } catch {}
+    }
+
+    # Generate full SHA-256 File Manifest for every file in AppSnapshot (FIX 05)
+    $allSnapshotFiles = Get-ChildItem -Path $appSnapDir -Recurse -File | Sort-Object FullName
+    if ($allSnapshotFiles.Count -eq 0) {
+        throw "EMPTY_APP_SNAPSHOT: No application files were copied to $appSnapDir"
+    }
+
+    $normalizedRoot = (Resolve-Path $appSnapDir).Path.TrimEnd('\', '/')
+    $fileManifestList = @()
+    foreach ($fileItem in $allSnapshotFiles) {
+        $relPath = $fileItem.FullName.Substring($normalizedRoot.Length).TrimStart('\', '/').Replace('\', '/')
+        $hashVal = (Get-FileHash -Path $fileItem.FullName -Algorithm SHA256).Hash
+        $fileManifestList += @{
+            relativePath = $relPath
+            sizeBytes    = [int64]$fileItem.Length
+            sha256       = $hashVal
+        }
+    }
+
+    $envBackupPath = Join-Path $configSnapDir ".env.backup"
+    $envSha256 = if (Test-Path $envBackupPath) { (Get-FileHash -Path $envBackupPath -Algorithm SHA256).Hash } else { $null }
+
+    $manifest = @{
+        snapshotName       = $snapshotName
+        createdAt          = (Get-Date).ToString("o")
+        samAttRoot         = $SamAttRoot
+        appDir             = $AppDir
+        version            = $pkgVersion
+        commitHash         = $commitHash
+        databaseTouched    = $false
+        requiredFilesCount = $fileManifestList.Count
+        envBackupSha256    = $envSha256
+        files              = $fileManifestList
+    }
+    $manifestPath = Join-Path $snapshotDir "backup-manifest.json"
+    $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding UTF8
+
+    $manifestHash = (Get-FileHash -Path $manifestPath -Algorithm SHA256).Hash
+    Set-Content -Path "$manifestPath.sha256" -Value $manifestHash -Encoding ASCII
+
+    # Update Last Known Good Release pointer (FIX 05)
+    if ($MarkAsLastKnownGood) {
+        $lkgPath = Join-Path $BackupRootDir "last_known_good.json"
+        $lkgPayload = @{
+            snapshotName       = $snapshotName
+            snapshotDir        = $snapshotDir
+            version            = $pkgVersion
+            commitHash         = $commitHash
+            manifestSha256     = $manifestHash
+            requiredFilesCount = $fileManifestList.Count
+            updatedAt          = (Get-Date).ToString("o")
+        }
+        $lkgPayload | ConvertTo-Json -Depth 4 | Set-Content -Path $lkgPath -Encoding UTF8
+    }
+
+    # Prune old snapshots beyond RetentionCount
+    $allSnapshots = Get-ChildItem -Path $BackupRootDir -Directory -Filter "app_snapshot_*" | Sort-Object CreationTime -Descending
+    if ($allSnapshots.Count -gt $RetentionCount) {
+        $toRemove = $allSnapshots | Select-Object -Skip $RetentionCount
+        foreach ($old in $toRemove) {
+            Remove-Item -Path $old.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($Json) {
+        Write-Output ($manifest | ConvertTo-Json -Depth 6)
+    } else {
+        Write-Host "[OK] Created Application Snapshot: $snapshotDir (Version=$pkgVersion, Commit=$commitHash, Files=$($fileManifestList.Count), ManifestSHA256=$manifestHash)" -ForegroundColor Green
+    }
+    exit 0
+} finally {
+    Release-SharedLifecycleLock -Path $LockFilePath -LockHandle $lockHandle
+}

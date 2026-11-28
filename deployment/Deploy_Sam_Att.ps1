@@ -527,7 +527,23 @@ function Invoke-HttpsProbe {
 
   $NodeProbeScript = @"
 const https = require('https');
-const req = https.get('$Url', { rejectUnauthorized: false, timeout: $($TimeoutSec * 1000) }, (res) => {
+const fs = require('fs');
+const targetUrl = process.argv[1];
+const timeoutMs = Number(process.argv[2] || 5000);
+const certCandidates = [
+  process.env.TLS_CA_CERT_PATH || '',
+  process.env.TLS_CERT_PATH || '',
+  'D:\\\\WebApps\\\\Sam_Att\\\\Certs\\\\server.crt',
+  'C:\\\\inetpub\\\\wwwroot\\\\Sam_Att\\\\certs\\\\server.crt'
+].filter(Boolean);
+const opts = { rejectUnauthorized: true, timeout: timeoutMs };
+for (const c of certCandidates) {
+  if (fs.existsSync(c)) {
+    opts.ca = fs.readFileSync(c);
+    break;
+  }
+}
+const req = https.get(targetUrl, opts, (res) => {
   const chunks = [];
   res.on('data', (c) => chunks.push(c));
   res.on('end', () => {
@@ -540,7 +556,7 @@ req.on('timeout', () => { req.destroy(new Error('TIMEOUT')); });
 req.on('error', (err) => { console.error(err.message); process.exit(2); });
 "@
 
-  $NodeRes = Invoke-NativeCli -Executable "node" -Arguments @("-e", $NodeProbeScript)
+  $NodeRes = Invoke-NativeCli -Executable "node" -Arguments @("-e", $NodeProbeScript, $Url, "$($TimeoutSec * 1000)")
   if ($NodeRes.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($NodeRes.Output)) {
     throw "HTTPS_PROBE_FAILED: Cannot connect to $Url ($($NodeRes.Output))"
   }
